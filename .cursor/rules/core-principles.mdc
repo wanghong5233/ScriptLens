@@ -1,0 +1,27 @@
+---
+description: Core engineering constraints for all Agent/Python projects in this workspace
+alwaysApply: true
+---
+
+# Core Constraints
+
+## What NOT to Do (this section does the heavy lifting)
+- No bare `except` / `except Exception` — catch specific exceptions, let unknowns propagate
+- No silent fallback returns that hide failures (`return []` instead of raising)
+- No comments that restate code — only explain WHY, never WHAT
+- No wrapper classes that merely delegate (Ghost Layers)
+- No features beyond what's explicitly requested — YAGNI
+- No new dependencies without user approval — verify on PyPI first
+- No hardcoded secrets — use env vars or config/
+
+## What to Do
+- Read existing code patterns before implementing anything new
+- Fail fast: crash loudly at boundaries, fix root cause not symptoms
+- Type hints on all function signatures
+- Prefer `async def` for I/O when the surrounding stack is async; don't force async into tiny scripts or sync-only code
+- Prefer logging in app/runtime code; use `print()` only for tiny scripts or explicit debugging
+- When in doubt, do less
+
+## Response Style
+- Fix first, report after. No preamble.
+- Chinese-simplified for explanations, English for code.

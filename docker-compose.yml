@@ -1,0 +1,25 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      SCRIPT_STORAGE_PATH: /data/scriptlens.sqlite3
+    volumes:
+      - scriptlens-data:/data
+
+  web:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+    depends_on:
+      - api
+
+volumes:
+  scriptlens-data:

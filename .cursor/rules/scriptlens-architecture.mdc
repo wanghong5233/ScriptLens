@@ -1,0 +1,31 @@
+---
+description: ScriptLens project structure and Agent architecture boundaries
+globs:
+  - "backend/**/*.py"
+  - "frontend/**/*.{ts,tsx}"
+  - "docs/**/*.md"
+alwaysApply: false
+---
+
+# ScriptLens Architecture
+
+## Source of Truth
+- `docs/source/task.md` is the highest-priority requirement source.
+- Build only capabilities that serve long-script understanding, grounded analysis, evaluation, rewrite, skill evolution, frontend usability, or deployment.
+
+## Backend Boundaries
+- `api/` exposes HTTP contracts and should stay thin.
+- `ingest/` loads and normalizes input text; it should not generate analysis.
+- `segmentation/` splits scripts into stable, source-addressable chunks.
+- `reporting/` turns extracted facts into user-facing reports.
+- `core/` owns shared Pydantic contracts and storage primitives, not feature-specific workflows.
+
+## Agent Output Rules
+- Analysis claims must be traceable to script text or evidence refs.
+- Prefer structured Pydantic outputs over free-form prose when code consumes model output.
+- Fail loudly on invalid model JSON, missing sample files, or schema mismatches.
+
+## Frontend Contract Rules
+- TypeScript types must mirror backend response schemas.
+- User-facing UI should expose evidence, risk, rewrite, and next-step information, not only summaries.
+- Do not hide backend errors behind generic success states.
