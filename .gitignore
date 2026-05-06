@@ -29,6 +29,8 @@ eval/**/*.pdf
 eval/**/*.epub
 eval/**/*.mobi
 eval/runs/
+# 评测脚本本地跑出来的 stdout 落盘日志
+eval/_*_out.txt
 logs/
 
 backend/storage_root/
