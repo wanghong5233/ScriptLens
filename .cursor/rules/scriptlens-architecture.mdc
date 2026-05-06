@@ -1,5 +1,5 @@
 ---
-description: ScriptLens project structure and Agent architecture boundaries
+description: ScriptLens project structure and architecture boundaries
 globs:
   - "backend/**/*.py"
   - "frontend/**/*.{ts,tsx}"
@@ -10,22 +10,65 @@ alwaysApply: false
 # ScriptLens Architecture
 
 ## Source of Truth
-- `docs/source/task.md` is the highest-priority requirement source.
-- Build only capabilities that serve long-script understanding, grounded analysis, evaluation, rewrite, skill evolution, frontend usability, or deployment.
+
+- `docs/source/task.md` — highest-priority requirement source, never modified.
+- `docs/01-requirements.md` — product requirements, Agent output schema, 5 scoring dimensions, acceptance checklist.
+- `docs/00-reuse-matrix.md` — ScholarMind → ScriptLens module reuse matrix and 3-day execution plan.
+
+Any work that does not serve `task.md` is out of scope.
+
+## Backend Layout (single-service architecture)
+
+ScriptLens runs as **one FastAPI process** (`scriptlens_api:8005`). The ReAct Agent is embedded as a subpackage inside `app/`, not a separate microservice. See `00-reuse-matrix.md §0.1` for rationale.
+
+| Path | Source | Role |
+|---|---|---|
+| `backend/app/` | physically copied from `ScholarMind/backend/app/` per `00-reuse-matrix.md §2-§3` | main API: users, script library, documents, jobs, sessions, simplified RAG, 5-dimension report pipeline |
+| `backend/app/agent_runtime/` | physically copied from `ScholarMind/backend/services/doc_studio/` per `00-reuse-matrix.md §4` and migrated per §0.1 | ReAct subpackage: agent_service, async_run_manager, HitL, tool registry, script-specific tools |
 
 ## Backend Boundaries
-- `api/` exposes HTTP contracts and should stay thin.
-- `ingest/` loads and normalizes input text; it should not generate analysis.
-- `segmentation/` splits scripts into stable, source-addressable chunks.
-- `reporting/` turns extracted facts into user-facing reports.
-- `core/` owns shared Pydantic contracts and storage primitives, not feature-specific workflows.
+
+- `app/router/` exposes HTTP; thin layer, no business logic.
+- `app/service/core/ingestion/` parses uploads (docx / pdf / txt / md, no legacy .doc) and segments by `第N集` / `X-Y 场号` / `角色：对白` / `角色 os：内心` anchors.
+- `app/service/script_rag.py` runs simplified RAG: embedding + BM25 → RRF → top-k. No HyDE, no metadata boost, no cross-encoder rerank.
+- `app/service/script_report_service.py` orchestrates the deterministic 5-dimension scoring pipeline (D2-4). It does NOT use the ReAct loop; ReAct is reserved for chat / rewrite where multi-step reasoning is genuinely needed.
+- `app/agent_runtime/service/agent_service.py` runs the ReAct loop. Called in-process from chat / rewrite endpoints; never via HTTP.
+- `app/agent_runtime/service/tools/` contains the Agent tool registry: 4 script-specific tools (`score_dimension_tool`, `locate_scenes_tool`, `extract_characters_tool`, `propose_rewrite_tool`) plus reused tools (`web_search_tool`, `analysis_tools`, editing tools). All inherit `BaseTool` for budget guarding and consecutive-failure recovery.
+- `app/agent_runtime/` uses **relative imports only** (`from .core.config`, `from .service.X`). Its `core/config.py` is independent from `app/core/config.py`; pydantic_settings reads the same `.env` but field names do not collide.
+- DO NOT add an independent FastAPI process for the Agent. If a future scaling need genuinely demands it, lift `app/agent_runtime/` out as a sibling `services/scriptlens_agent/` package — the subpackage boundary is designed to make this trivial.
+
+## Out of Scope (DO NOT BUILD)
+
+- DeepResearch, Notebook, IdeaGen, Admin console.
+- Online ingestion (Semantic Scholar, arXiv).
+- LaTeX compile, ctex, bibtex.
+- Cross-session long-term memory.
+- Reranker container, MinerU, Grobid, Elasticsearch.
+- Per-user workspace isolation beyond `users` row.
+- 6-role full perspective system; only 3 roles in MVP: selection / writer / review.
+- Independent Agent microservice (subpackage in-process only — see Backend Layout above).
+- RL training, reward model, full skill scheduler (only the lightweight feedback-injection skill mechanism in PRD §10 P3).
 
 ## Agent Output Rules
-- Analysis claims must be traceable to script text or evidence refs.
-- Prefer structured Pydantic outputs over free-form prose when code consumes model output.
-- Fail loudly on invalid model JSON, missing sample files, or schema mismatches.
+
+- Every score / claim must carry non-empty `evidence_ref_ids[]`.
+- Empty-evidence outputs are treated as LLM hallucination and dropped before being shown to the user.
+- Structured JSON over prose for any output consumed by code (see schema in `docs/01-requirements.md §7`).
+- Fail loudly on schema mismatch or missing source file; never silently fall back.
+
+## Frontend Layout
+
+| Path | Source | Role |
+|---|---|---|
+| `frontend/src/pages/script-studio/` | physically copied from `ScholarMind/frontend/src/pages/doc-studio/` per `00-reuse-matrix.md §7` | left script viewer (txt + scene tree + evidence highlight) + right Agent chat + report tab |
+| `frontend/src/pages/script-library/` | physically copied from `ScholarMind/frontend/src/pages/repository/` | upload + list + delete; no online import |
 
 ## Frontend Contract Rules
-- TypeScript types must mirror backend response schemas.
-- User-facing UI should expose evidence, risk, rewrite, and next-step information, not only summaries.
+
+- TypeScript types mirror backend Pydantic schemas exactly.
+- Click-through from claim → `evidence_ref_id` → highlight in left source viewer is mandatory.
 - Do not hide backend errors behind generic success states.
+
+## Deployment
+
+Reuse existing `portfolio-mvp-shanghai-01` ECS. New container `scriptlens_api` only. Shared PostgreSQL (independent schema `scriptlens`), shared Redis (`REDIS_DB=1`), shared Cloudflare Tunnel (new hostname `api-scriptlens.wh5233.me`).

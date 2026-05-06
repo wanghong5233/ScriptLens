@@ -8,16 +8,43 @@ __pycache__/
 
 node_modules/
 .next/
+frontend/.next-dev.json
 out/
 dist/
 
 .env
 .env.*
 !.env.example
+!.env.*.example
 
 *.db
 *.sqlite
 *.sqlite3
 
+# 评测数据集：网络收集的真实短剧剧本（含版权 + 体积大），仅本地保留。
+# git 不支持父目录 ignore + 子文件白名单，因此按扩展名屏蔽，留出我们的 .py 脚本。
+eval/**/*.docx
+eval/**/*.doc
+eval/**/*.pdf
+eval/**/*.epub
+eval/**/*.mobi
 eval/runs/
 logs/
+
+backend/storage_root/
+# Agent 运行时工作目录（用户上传 + 改写历史 + 工具调用日志），随用户产生
+backend/app/workspaces/
+# RAG 资源大文件（复用自 ScholarMind，原本由 git-lfs 管理，本仓库未启用 lfs）：
+# 部署时由 backend/README.deploy.md 描述的方式从对象存储拉取，不入 git
+backend/app/service/core/rag/res/deepdoc/*.onnx
+backend/app/service/core/rag/res/deepdoc/*.model
+backend/app/service/core/rag/res/deepdoc/updown_concat_xgb.json
+backend/app/service/core/rag/res/huqie.txt.trie
+backend/app/service/core/9b5ad71b2ce5302211f9c61530b329a4922fc6a4
+backend/_e2e_dryrun_out.txt
+backend/_validate_segmenter_out.txt
+# 临时冒烟测试文件（用真实剧本时拷过来跑完即删）
+backend/_*.docx
+backend/_*.pdf
+backend/_smoke_*.txt
+backend/_smoke_*.json
