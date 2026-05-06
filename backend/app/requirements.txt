@@ -1,0 +1,81 @@
+# ============================================================
+# scholarmind_api 生产依赖（CPU-only，远程 SaaS 模式）
+# 不变式：
+#   SM_VECTOR_STORE=pgvector
+#   SM_EMBEDDER_TYPE=dashscope
+#   SM_RERANKER_TYPE=dashscope
+#   SM_PARSER_ORDER=llamaparse,unstructured_api,pymupdf
+# 切换回 local embedder/reranker/elasticsearch/deepdoc 解析时，需要重新加回对应依赖。
+# ============================================================
+
+# ---------------- Web framework ----------------
+fastapi==0.115.0
+fastapi-jwt[authlib]==0.3.0
+uvicorn==0.31.0
+gunicorn==21.0.0
+python-multipart==0.0.11
+requests==2.32.3
+httpx==0.28.1
+pydantic-settings==2.10.1
+beartype
+
+# ---------------- Auth / utils ----------------
+python-jose
+authlib
+bcrypt
+colorlog
+loguru==0.7.3
+six
+xxhash
+chardet
+tiktoken
+arxiv
+
+# ---------------- Storage ----------------
+psycopg2-binary
+sqlalchemy==1.4.53
+alembic==1.13.1
+redis==5.0.1
+aioredis==2.0.1
+
+# ---------------- LLM / RAG ----------------
+openai>=1.0.0
+dashscope
+llama-index-core
+llama-index-postprocessor-dashscope-rerank-custom
+jieba
+nltk
+datrie
+hanziconv
+
+# ---------------- 数据处理 ----------------
+# numpy 由 pandas 传递引入；rag/nlp/model.py 顶层 import numpy，pandas 必保留
+pandas
+openpyxl
+python-pptx
+python-docx
+markdown
+
+# Pillow 是 rag/nlp/__init__.py 顶层 import，原先靠 unstructured/sentence-transformers 传递；
+# 现在删除两者后必须显式声明，避免热路径 ImportError
+Pillow
+
+# ---------------- 文档解析（轻量兜底） ----------------
+# 远程优先：llamaparse / unstructured_api（无本地大型依赖）
+# 本地兜底：pymupdf / pdfplumber / pypdf
+pymupdf==1.24.10
+pdfplumber
+pypdf
+
+# ============================================================
+# 已删除（瘦身原因）：
+#   torch==2.5.1                       —— 仅 LocalBgeEmbedder 用，云端走 DashScope
+#   sentence-transformers==5.0.0       —— 同上；transformers/scipy/sklearn 随之脱落
+#   unstructured[pdf,docx]==0.16.9     —— 改用 unstructured_api 远程；本地 parser 已 try/except 懒加载
+#   huggingface_hub                    —— 仅 deepdoc/* 用，已弃用（parser_orchestrator 不引用）
+#   onnxruntime / opencv-python        —— 同上，仅 deepdoc/vision 用
+#   pyclipper / shapely                —— 同上
+#   tika                               —— 仅 rag/app/naive.py 用，cold path
+#   elasticsearch / elasticsearch-dsl  —— SM_VECTOR_STORE=pgvector，云端不用 ES
+#   readability-lxml / lxml_html_clean / html-text  —— 仅 deepdoc/* 用
+# ============================================================

@@ -1,0 +1,143 @@
+# ============================================================
+# ScriptLens 本地开发 compose（自包含、独立栈）
+#
+# 设计原则：
+#   1. 与 ScholarMind 本地 dev 完全隔离 —— 自带 PG / Redis，不混用数据
+#   2. 端口避开 ScholarMind dev 的 8000/15432/6379 —— 用 8005/25432/26379
+#   3. 代码热更新（volume mount + uvicorn --reload）
+#   4. 不起 cloudflared / 重型解析服务（dev 期不需要公网入口）
+#   5. alembic upgrade head 由容器启动脚本 start.sh 自动跑
+#
+# 启动：
+#   cd ScriptLens/backend
+#   cp .env.dev.example .env.dev      # 第一次：填 DASHSCOPE_API_KEY
+#   docker compose -f docker-compose.dev.yml up -d --build
+#
+# 验证：
+#   curl http://localhost:8005/health
+#   docker exec scriptlens_db_dev psql -U postgres -d scriptlens_dev -c "\dt scriptlens.*"
+#
+# 关停（保留数据）：
+#   docker compose -f docker-compose.dev.yml stop
+#
+# 销毁（含数据）：
+#   docker compose -f docker-compose.dev.yml down -v
+# ============================================================
+
+services:
+  scriptlens_db:
+    image: pgvector/pgvector:pg15
+    container_name: scriptlens_db_dev
+    hostname: scriptlens_db
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: pg123456
+      POSTGRES_DB: scriptlens_dev
+    ports:
+      # 暴露到宿主机方便 IDE 直连调试；25432 避开 ScholarMind dev 的 15432
+      - "25432:5432"
+    volumes:
+      - scriptlens_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d scriptlens_dev"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks:
+      - scriptlens_net
+
+  scriptlens_redis:
+    image: redis:7-alpine
+    container_name: scriptlens_redis_dev
+    hostname: scriptlens_redis
+    ports:
+      - "26379:6379"
+    volumes:
+      - scriptlens_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    restart: unless-stopped
+    networks:
+      - scriptlens_net
+
+  scriptlens_api:
+    build:
+      context: .
+      dockerfile: ./app/Dockerfile
+    container_name: scriptlens_api_dev
+    hostname: scriptlens_api
+    env_file:
+      - .env.dev
+    environment:
+      DATABASE_URL: postgresql://postgres:pg123456@scriptlens_db:5432/scriptlens_dev
+      REDIS_HOST: scriptlens_redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      ROOT_PATH: http://localhost:8005
+      SM_VECTOR_STORE: pgvector
+      SM_PARSER_ORDER: pymupdf
+      SM_GROBID_ENABLED: "false"
+      # LLM 推理优先 GPT（评分/决策/改写/对话），DashScope 兜底
+      SM_LLM_TYPE: ${SM_LLM_TYPE:-openai}
+      # Embedding / Reranker 固定 DashScope，不切换
+      SM_EMBEDDER_TYPE: dashscope
+      SM_RERANKER_TYPE: dashscope
+      SM_EMBEDDING_MODEL: text-embedding-v3
+      SM_EMBEDDING_DIMENSIONS: "1024"
+      LOG_LEVEL: DEBUG
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+    ports:
+      - "8005:8005"
+    volumes:
+      # 代码热更新：本机改 Python 文件 → 容器内 uvicorn --reload 立即生效
+      - ./app:/app
+      # 剧本原始文件落盘（dev 期）
+      - ./storage_root:/app/service/core/storage
+    command:
+      [
+        "uvicorn",
+        "app_main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8005",
+        "--reload",
+        "--timeout-graceful-shutdown",
+        "5",
+      ]
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u; u.urlopen('http://localhost:8005/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      scriptlens_db:
+        condition: service_healthy
+      scriptlens_redis:
+        condition: service_healthy
+    networks:
+      - scriptlens_net
+
+volumes:
+  scriptlens_pg_data:
+    name: scriptlens_dev_pg_data
+  scriptlens_redis_data:
+    name: scriptlens_dev_redis_data
+
+networks:
+  scriptlens_net:
+    name: scriptlens_dev_net
+    driver: bridge

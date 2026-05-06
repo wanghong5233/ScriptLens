@@ -1,0 +1,20 @@
+.dockerignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.env
+.vscode/
+.idea/
+.git/
+.gitignore
+docker-compose.yml
+Dockerfile
+*.md
+# alembic.ini
+# alembic/
+*test*
+run_migration.py

@@ -1,0 +1,69 @@
+{
+  "version": "scriptlens-1.0",
+  "_doc": [
+    "ScriptLens 短剧场景下，5 个 intent 的 tool_sequence 全部收敛为只含 reply_to_user_tool 的兜底序列。",
+    "原因：doc_studio 的 tool_sequence 强塞 analyze_document_tool / rewrite_selection_tool 等",
+    "LaTeX 工作区工具——它们在 ScriptLens 没有注册。如保留原 sequence 会让 ReAct prompt 提示",
+    "LLM '下一步请使用 X tool'，但 X 不存在，导致 consecutive_tool_failures 触发 recovery。",
+    "ScriptLens 让 LLM 看 zh.yaml 的 system prompt（含 6 工具调用矩阵）自由决策；",
+    "plan 只保留'最终必须 reply' 这一硬约束。",
+    "max_iterations 跟 AGENT_MAX_ITERATIONS 配合控制总预算。"
+  ],
+  "strategies": {
+    "qa": {
+      "description": "用户提问（场景定位 / 维度解释 / 人物 / 市场对比 / 法规等）。LLM 自由调 6 工具。",
+      "max_iterations": 6,
+      "tool_sequence": [
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "短剧场景：LLM 根据 system prompt 自由选择 locate_scenes_tool / score_dimension_tool / extract_characters_tool / web_search_tool；最后必须以 reply_to_user_tool 收尾。"
+    },
+    "suggest": {
+      "description": "用户希望得到建议 / 评价（不修改原文）。",
+      "max_iterations": 6,
+      "tool_sequence": [
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "短剧场景：先 locate_scenes_tool 确认证据，再 reply_to_user_tool 给建议；不调用 propose_rewrite_tool。"
+    },
+    "edit": {
+      "description": "用户要求改写某场（短剧场景下专指 propose_rewrite_tool）。",
+      "max_iterations": 8,
+      "tool_sequence": [
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "改写流程：locate_scenes_tool 确认 scene_id → propose_rewrite_tool → reply_to_user_tool 贴 diff。禁止用 doc_studio 的 rewrite_selection_tool / insert_text_tool（未注册）。"
+    },
+    "citation": {
+      "description": "短剧无引用语义；保留 intent 仅为 schema 兼容，实际走 qa 等价行为。",
+      "max_iterations": 4,
+      "tool_sequence": [
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "短剧不存在'引用'语义；如用户误问，按 qa 走。"
+    },
+    "file_op": {
+      "description": "短剧无文件操作；保留 intent 仅为 schema 兼容，实际拒绝。",
+      "max_iterations": 2,
+      "tool_sequence": [
+        {
+          "tool": "reply_to_user_tool",
+          "optional": false
+        }
+      ],
+      "notes": "短剧没有文件系统工作区；如命中 file_op，直接 reply 拒绝并解释 ScriptLens 不做文件操作。"
+    }
+  }
+}
