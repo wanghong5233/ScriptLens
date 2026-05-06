@@ -1,0 +1,120 @@
+.doc-studio-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-height: 320px;
+  padding: 40px 24px 56px;
+  color: #8c8c8c;
+  user-select: none;
+
+  .doc-studio-welcome__title {
+    font-size: 14px;
+    font-weight: 500;
+    color: #8c8c8c;
+    margin-bottom: 8px;
+  }
+
+  .doc-studio-welcome__tagline {
+    font-size: 12px;
+    color: #bfbfbf;
+    margin-bottom: 28px;
+    text-align: center;
+  }
+
+  .doc-studio-welcome__sections {
+    display: flex;
+    flex-direction: column;
+    gap: 32px;
+    max-width: 480px;
+    width: 100%;
+    align-items: center;
+  }
+
+  .doc-studio-welcome__section {
+    width: 100%;
+  }
+
+  .doc-studio-welcome__section-title {
+    font-size: 12px;
+    font-weight: 500;
+    color: #bfbfbf;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+
+  .doc-studio-welcome__shortcuts {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .doc-studio-welcome__shortcut {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: #8c8c8c;
+
+    &:last-of-type {
+      margin-bottom: 0;
+    }
+
+    kbd {
+      display: inline-block;
+      min-width: 72px;
+      padding: 2px 8px;
+      font-size: 12px;
+      font-family: inherit;
+      background: #f5f5f5;
+      border: 1px solid #e8e8e8;
+      border-radius: 4px;
+      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05);
+    }
+  }
+
+  .doc-studio-welcome__highlights {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  .doc-studio-welcome__highlight {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    margin-bottom: 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #8c8c8c;
+
+    &:last-of-type {
+      margin-bottom: 0;
+    }
+  }
+
+  .doc-studio-welcome__highlight-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    border-radius: 6px;
+    background: #f0f0f0;
+    color: #8c8c8c;
+    font-size: 12px;
+  }
+
+  .doc-studio-welcome__highlight-content {
+    flex: 1;
+    min-width: 0;
+
+    strong {
+      color: #595959;
+      font-weight: 500;
+    }
+  }
+}

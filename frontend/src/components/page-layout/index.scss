@@ -1,0 +1,37 @@
+.com-page-layout {
+  display: flex;
+  min-height: 100vh;
+  min-height: 100dvh;
+
+  .com-page-layout__main {
+    flex-grow: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 100vh;
+    min-height: 100dvh;
+    min-width: 600px;
+
+    .com-page-layout__main-content {
+      flex-grow: 1;
+      flex-shrink: 0;
+    }
+  }
+
+  .com-page-layout__sender {
+    position: sticky;
+    bottom: 0;
+    z-index: 900;
+    padding: 12px 40px calc(4px + env(safe-area-inset-bottom));
+    background: linear-gradient(
+      180deg,
+      rgba(255, 255, 255, 0) 0%,
+      rgba(255, 255, 255, 0.9) 35%,
+      #fff 68%
+    );
+  }
+
+  .com-page-layout__right {
+    flex-shrink: 0;
+    width: 408px;
+  }
+}

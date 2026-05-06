@@ -1,0 +1,1090 @@
+/**
+ * docStudio.ts —— ScriptLens 适配层
+ *
+ * 这一层保持原 doc-studio 的导出函数签名不变（doc-studio/index.tsx 8000 行
+ * 的 import 不动），但内部实现统一接 ScriptLens 后端的 11 个 `/api/scripts/*`
+ * 端点。
+ *
+ * 对齐策略（参考 PRD 业务模型）：
+ *   - workspace ↔ script  (script_id 直接当 workspace_id 用)
+ *   - file      ↔ scene   (path = scene_id；virtual 目录 path = `__ep_<n>`)
+ *   - 文件树   ↔ scenes 按 episode 分组
+ *
+ * 不能对齐的功能（场不可变 / 无编译 / 无 operations / 无 PDF 等）一律 fail
+ * aloud：直接抛 `Error('ScriptLens 不支持: ...')`，由 UI 上层弹 toast。
+ *
+ * chat 链路（EventSource GET 协议）当前与 ScriptLens 的 `POST /chat → SSE`
+ * 不对齐，runAgentTaskAsync / events / cancel 暂时抛错；后续改造
+ * doc-studio/index.tsx 的 chat 触发点为 fetch+ReadableStream。
+ */
+
+import { AxiosRequestConfig } from 'axios'
+import { getApiBase } from './env'
+import { request } from './request'
+import {
+  ScriptLensAgentStream,
+  openScriptLensAgentStream,
+  rememberChatArgs,
+} from './sseClient'
+
+const API_BASE = getApiBase()
+const SCRIPTS_BASE = `${API_BASE}/scripts`
+
+// ============================================================
+// ScriptLens 后端响应原始 DTO（与 backend/app/schemas/script.py 对齐）
+// ============================================================
+
+type ScriptStatus = 'pending' | 'parsing' | 'indexing' | 'ready' | 'failed'
+
+type ScriptListItemDTO = {
+  id: string
+  title: string
+  status: ScriptStatus
+  total_episodes?: number | null
+  total_scenes?: number | null
+  created_at: string
+}
+
+type ScriptDetailDTO = {
+  id: string
+  title: string
+  source_format: string
+  status: ScriptStatus
+  total_episodes?: number | null
+  total_scenes?: number | null
+  total_chars?: number | null
+  failure_reason?: string | null
+  created_at: string
+  updated_at: string
+}
+
+type SceneItemDTO = {
+  id: string
+  episode_no?: number | null
+  scene_no: string
+  scene_label: string
+  characters: string[]
+  text: string
+  start_line?: number | null
+  end_line?: number | null
+}
+
+type ScenesResponseDTO = {
+  script_id: string
+  total: number
+  scenes: SceneItemDTO[]
+}
+
+type ScriptUploadResponseDTO = {
+  id: string
+  title: string
+  source_format: string
+  status: ScriptStatus
+}
+
+// ============================================================
+// Report DTO（与 backend/app/schemas/script.py ReportPayload 对齐）
+// ============================================================
+
+export type DimensionKey =
+  | 'opening_hook'
+  | 'reward_density'
+  | 'motivation'
+  | 'pacing'
+  | 'risk'
+
+// 与 backend schemas/script.py 的 DimensionLevel 对齐（含 risk 4 档 + 通用 3 档）
+// rubric §6 失败模式：证据不足时 score / level 都为 null
+export type ScoreLevel =
+  | 'high'
+  | 'medium'
+  | 'low'
+  | 'clean'
+  | 'high_risk'
+  | 'medium_risk'
+  | 'low_risk'
+  | 'minor'
+  | 'major'
+
+export interface ScorecardItemDTO {
+  dimension: DimensionKey
+  score: number | null
+  level: ScoreLevel | null
+  reason: string
+  evidence_ref_ids: string[]
+}
+
+export interface DecisionCardDTO {
+  label: string
+  confidence: 'high' | 'medium' | 'low'
+  one_sentence_reason: string
+  summary?: string
+}
+
+// 后端 ReportPayload.risk_flags 是 List[str]（category 字符串列表，PRD §7）
+export type RiskFlagDTO = string
+
+// 与 backend.ReportEvidenceRef 严格对齐（id / quote / scene_label 真实字段名）
+export interface EvidenceRefDTO {
+  id: string
+  scene_id: string
+  scene_no?: string | null
+  scene_label?: string | null
+  start_line?: number | null
+  end_line?: number | null
+  quote: string
+  reason: string
+  confidence?: 'high' | 'medium' | 'low'
+}
+
+export interface ReportPayloadDTO {
+  script_id: string
+  title?: string
+  decision: DecisionCardDTO
+  decision_reason?: string
+  overall_score?: number | null
+  summary?: string
+  must_read_scene_ids: string[]
+  scorecard: ScorecardItemDTO[]
+  evidence_refs: EvidenceRefDTO[]
+  risk_flags: RiskFlagDTO[]
+  report_id?: string
+  generated_at?: string
+}
+
+export interface ReportResponseDTO {
+  script_id: string
+  report: ReportPayloadDTO | null
+  generated_at?: string | null
+}
+
+export interface ReportNotReadyDTO {
+  script_id: string
+  status: ScriptStatus
+  failure_reason?: string | null
+}
+
+export type ReportFetchResult = ReportResponseDTO | ReportNotReadyDTO
+
+export function isReportReady(
+  result: ReportFetchResult,
+): result is ReportResponseDTO {
+  return 'report' in result && result.report !== null && result.report !== undefined
+}
+
+// ============================================================
+// 内部工具：scene cache（workspaceId → scenes[]）
+// ============================================================
+
+const sceneCache = new Map<string, SceneItemDTO[]>()
+
+function unsupported(feature: string): never {
+  throw new Error(`ScriptLens 不支持: ${feature}`)
+}
+
+function toUnixMs(iso?: string | null): number {
+  if (!iso) return 0
+  const t = Date.parse(iso)
+  return Number.isFinite(t) ? t : 0
+}
+
+function withScripts(config?: AxiosRequestConfig): AxiosRequestConfig {
+  return {
+    baseURL: SCRIPTS_BASE,
+    ...config,
+    headers: { ...(config?.headers ?? {}) },
+  }
+}
+
+function sceneFileName(s: SceneItemDTO): string {
+  const ep = s.episode_no != null ? `第${s.episode_no}集·` : ''
+  const label = s.scene_label ? `《${s.scene_label}》` : ''
+  return `${ep}${s.scene_no}场${label ? ` ${label}` : ''}`
+}
+
+/**
+ * 把 LLM 输出里的引用（"5-3"、"5-3 场"、"第 5 集第 3 场"）解析为 sceneId。
+ *
+ * 匹配策略（按强到弱）：
+ *   1. scene_label 完全相等
+ *   2. 形如 "{episode}-{scene_no}" → 找 episode_no=5 且 scene_no=3 的 scene
+ *   3. 单纯 "{scene_no}" → 工作区只有一集时取该 scene_no
+ *
+ * 找不到返回 null（调用方决定 toast 还是静默）。
+ *
+ * 注意：前端 scene_no 在 DTO 里已经是数字字符串。
+ */
+export function findSceneByRef(
+  workspaceId: string,
+  ref: string,
+): SceneItemDTO | null {
+  const scenes = sceneCache.get(workspaceId)
+  if (!scenes || scenes.length === 0) return null
+  const trimmed = ref.trim()
+  if (!trimmed) return null
+
+  const labelMatch = scenes.find(
+    (s) => (s.scene_label || '').trim() === trimmed,
+  )
+  if (labelMatch) return labelMatch
+
+  // {episode}-{scene_no}
+  const m = trimmed.match(/^(\d+)\s*-\s*(\d+)$/)
+  if (m) {
+    const ep = Number(m[1])
+    const sn = m[2]
+    const exact = scenes.find(
+      (s) => (s.episode_no ?? 0) === ep && String(s.scene_no) === sn,
+    )
+    if (exact) return exact
+  }
+
+  // 仅 {scene_no}：单集时唯一匹配
+  if (/^\d+$/.test(trimmed)) {
+    const onlyEp = new Set(scenes.map((s) => s.episode_no ?? 0))
+    if (onlyEp.size === 1) {
+      const hit = scenes.find((s) => String(s.scene_no) === trimmed)
+      if (hit) return hit
+    }
+  }
+
+  return null
+}
+
+function scenesToFileTree(scenes: SceneItemDTO[]): DocStudioAPI.FileNode[] {
+  if (!Array.isArray(scenes) || scenes.length === 0) return []
+
+  // 按 episode_no 分组（null 归到 "__ep_0"）
+  const groups = new Map<number, SceneItemDTO[]>()
+  for (const s of scenes) {
+    const ep = s.episode_no ?? 0
+    if (!groups.has(ep)) groups.set(ep, [])
+    groups.get(ep)!.push(s)
+  }
+
+  const epKeys = Array.from(groups.keys()).sort((a, b) => a - b)
+
+  // 单集时摊平，不要无谓的目录层
+  if (epKeys.length === 1) {
+    return groups
+      .get(epKeys[0])!
+      .map<DocStudioAPI.FileNode>((s) => ({
+        name: sceneFileName(s),
+        path: s.id,
+        type: 'file',
+      }))
+  }
+
+  return epKeys.map<DocStudioAPI.FileNode>((ep) => ({
+    name: ep === 0 ? '未知集' : `第 ${ep} 集`,
+    path: `__ep_${ep}`,
+    type: 'directory',
+    children: groups
+      .get(ep)!
+      .map<DocStudioAPI.FileNode>((s) => ({
+        name: sceneFileName(s),
+        path: s.id,
+        type: 'file',
+      })),
+  }))
+}
+
+function detailToWorkspace(d: ScriptDetailDTO): DocStudioAPI.WorkspaceDetail {
+  return {
+    workspaceId: d.id,
+    name: d.title,
+    mainFile: undefined, // 由 fetchWorkspaceFiles 时由前端选首个 scene 决定
+    fileCount: d.total_scenes ?? 0,
+    updatedAt: toUnixMs(d.updated_at),
+    config: {
+      title: d.title,
+      source_format: d.source_format,
+      status: d.status,
+      total_episodes: d.total_episodes,
+      total_scenes: d.total_scenes,
+      total_chars: d.total_chars,
+      failure_reason: d.failure_reason,
+    },
+  }
+}
+
+// ============================================================
+// 工作区列表 / 详情 / 创建（能对齐到 ScriptLens 端点）
+// ============================================================
+
+export async function listWorkspaces(options?: AxiosRequestConfig) {
+  const { data } = await request.get<ScriptListItemDTO[]>('', withScripts(options))
+  if (!Array.isArray(data)) return []
+  return data.map<DocStudioAPI.WorkspaceSummary>((item) => ({
+    workspaceId: item.id,
+    name: item.title,
+    mainFile: undefined,
+    fileCount: item.total_scenes ?? 0,
+    updatedAt: toUnixMs(item.created_at),
+  }))
+}
+
+export async function fetchWorkspace(
+  params: { workspaceId: string },
+  options?: AxiosRequestConfig,
+) {
+  const { data } = await request.get<ScriptDetailDTO>(
+    `/${params.workspaceId}`,
+    withScripts(options),
+  )
+  return detailToWorkspace(data)
+}
+
+/**
+ * doc-studio 原意：先 createWorkspace 再 uploadFile；ScriptLens 是
+ * `POST /upload` 一步上传文件。这里要求调用方在 `config.file` 里塞一个 File
+ * 对象（doc-studio UI 上传流程之后会改造，这里只为不挡跑）。
+ *
+ * 没有 file 就 fail aloud。
+ */
+export async function createWorkspace(
+  params: { name: string; workspaceId?: string; config?: Record<string, any> & { file?: File } },
+  options?: AxiosRequestConfig,
+) {
+  const file = params.config?.file
+  if (!file || !(file instanceof File)) {
+    unsupported('createWorkspace 需要在 config.file 中提供文件；ScriptLens 不支持空工作区')
+  }
+  // 后端 /upload 只接收 multipart 'file' 字段，title 从文件名 stem 自动派生
+  const fd = new FormData()
+  fd.append('file', file)
+
+  const { data } = await request.post<ScriptUploadResponseDTO>(
+    '/upload',
+    fd,
+    withScripts({
+      ...options,
+      headers: {
+        'Content-Type': 'multipart/form-data',
+        ...(options?.headers ?? {}),
+      },
+    }),
+  )
+
+  return {
+    workspaceId: data.id,
+    name: data.title,
+    mainFile: undefined,
+    fileCount: 0,
+    updatedAt: Date.now(),
+    config: {
+      title: data.title,
+      source_format: data.source_format,
+      status: data.status,
+    },
+  } as DocStudioAPI.WorkspaceDetail
+}
+
+export async function updateWorkspace(
+  _params: {
+    workspaceId: string
+    name?: string
+    config?: Record<string, any>
+  },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.WorkspaceDetail> {
+  return unsupported('updateWorkspace（剧本元数据修改未实现）')
+}
+
+export async function bindWorkspaceSession(
+  params: { workspaceId: string; sessionId?: string | null },
+  options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.WorkspaceDetail> {
+  // ScriptLens chat 当前是无状态（history 由前端传），sessionId 无意义。
+  // 直接返回当前 workspace 详情，让 doc-studio UI 的 session 绑定流程跑通。
+  return fetchWorkspace({ workspaceId: params.workspaceId }, options)
+}
+
+export async function deleteWorkspace(
+  _params: { workspaceId: string },
+  _options?: AxiosRequestConfig,
+): Promise<{ deleted: boolean; workspace_id: string }> {
+  return unsupported('deleteWorkspace（剧本删除未实现）')
+}
+
+// ============================================================
+// 文件树 / 文件内容（scenes 1:1 映射）
+// ============================================================
+
+export async function fetchWorkspaceFiles(
+  params: { workspaceId: string },
+  options?: AxiosRequestConfig,
+) {
+  const { data } = await request.get<ScenesResponseDTO>(
+    `/${params.workspaceId}/scenes`,
+    withScripts(options),
+  )
+  const scenes = Array.isArray(data?.scenes) ? data.scenes : []
+  sceneCache.set(params.workspaceId, scenes)
+
+  const files = scenesToFileTree(scenes)
+  const mainFile = scenes.length > 0 ? scenes[0].id : undefined
+
+  return {
+    workspaceId: params.workspaceId,
+    files,
+    mainFile,
+    config: {
+      total_scenes: data?.total ?? scenes.length,
+    },
+  } as DocStudioAPI.WorkspaceFilesResponse
+}
+
+export async function fetchFileContent(
+  params: { workspaceId: string; path: string },
+  options?: AxiosRequestConfig,
+) {
+  // path 在我们的映射下就是 scene_id；先查 cache，cache miss 时重 fetch
+  let scenes = sceneCache.get(params.workspaceId)
+  if (!scenes) {
+    await fetchWorkspaceFiles({ workspaceId: params.workspaceId }, options)
+    scenes = sceneCache.get(params.workspaceId) || []
+  }
+  const scene = scenes.find((s) => s.id === params.path)
+  if (!scene) {
+    throw new Error(`场景不存在: scene_id=${params.path}`)
+  }
+  const result: DocStudioAPI.FileContentResponse = {
+    path: scene.id,
+    content: scene.text || '',
+    encoding: 'utf-8',
+  }
+  return result
+}
+
+export async function updateFileContent(
+  _params: {
+    workspaceId: string
+    path: string
+    content: string
+    encoding?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.SaveFileResponse> {
+  return unsupported('updateFileContent（保存场景内容未实现，PRD 未定义 PUT scene）')
+}
+
+export async function createFileOrDirectory(
+  _params: {
+    workspaceId: string
+    path: string
+    type: 'file' | 'directory'
+    content?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.FileCreateResponse> {
+  return unsupported('createFileOrDirectory（剧本场景不可新增）')
+}
+
+export async function deleteFile(
+  _params: { workspaceId: string; path: string },
+  _options?: AxiosRequestConfig,
+): Promise<{ deleted: boolean; path: string }> {
+  return unsupported('deleteFile（剧本场景不可删除）')
+}
+
+export async function renameFileOrDirectory(
+  _params: {
+    workspaceId: string
+    sourcePath: string
+    targetPath: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<{
+  moved: boolean
+  sourcePath: string
+  targetPath: string
+  type: 'file' | 'directory'
+}> {
+  return unsupported('renameFileOrDirectory（剧本场景不可重命名）')
+}
+
+export async function uploadFile(
+  _params: {
+    workspaceId: string
+    directory?: string
+    file: File
+  },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.UploadResponse> {
+  return unsupported('uploadFile（场景级上传未实现，请用 createWorkspace 整本上传）')
+}
+
+// ============================================================
+// 消息 / debug（chat 状态由前端维护，这里返空避免 UI 挂掉）
+// ============================================================
+
+export async function listWorkspaceMessages(
+  _params: {
+    workspaceId: string
+    sessionId: string
+    page?: number
+    pageSize?: number
+  },
+  _options?: AxiosRequestConfig,
+) {
+  return {
+    total: 0,
+    page: 1,
+    pageSize: 200,
+    items: [] as Array<{
+      message_id: string
+      session_id: string
+      user_question: string
+      model_answer: string
+      create_time: string
+      retrieval_content?: string
+    }>,
+  }
+}
+
+export async function getWorkspaceMessagesDebug(
+  _params: {
+    workspaceId: string
+    sessionId: string
+  },
+  _options?: AxiosRequestConfig,
+) {
+  return {
+    session_id: _params.sessionId,
+    items: [] as Array<{
+      message_id: string
+      content_length: number
+      newline_count: number
+      double_newline_count: number
+      triple_plus_newline_count: number
+      raw_repr_sample: string
+      raw_with_markers: string
+    }>,
+  }
+}
+
+// ============================================================
+// 知识库（ScriptLens 不暴露多知识库选择，UI 上当作空列表）
+// ============================================================
+
+export async function listAgentKnowledgeBases(_options?: AxiosRequestConfig) {
+  const empty: DocStudioAPI.KnowledgeBaseSummary[] = []
+  return empty
+}
+
+// ============================================================
+// Agent 异步运行（chat / events / cancel）
+//
+// ScriptLens 是 `POST /api/scripts/{id}/chat (body) → SSE` 一步直连。
+// doc-studio UI 走两步：runAgentTaskAsync 拿 runId → EventSource(events_url)。
+// 这里把两步桥接到一步：
+//   1. runAgentTaskAsync 不真正发请求，只生成一个本地 runId 并把 chat
+//      请求体存到 sseClient 的 pendingArgs map
+//   2. UI 后续 new EventSource(getAgentAsyncEventsUrl(...)) 会被替换为
+//      `openScriptLensAgentStream(runId)` —— 真正发起 fetch+ReadableStream
+//      并按 EventSource 接口分发事件
+//
+// HitL（respondAgentRunInteraction）当前 ScriptLens 后端不发
+// interaction_required 事件，UI 上的危险操作确认在短剧场景用不到。
+// ============================================================
+
+const activeStreams = new Map<string, ScriptLensAgentStream>()
+
+function generateRunId(): string {
+  // 浏览器原生 crypto.randomUUID 已普遍可用
+  if (typeof crypto !== 'undefined' && typeof (crypto as any).randomUUID === 'function') {
+    return (crypto as any).randomUUID()
+  }
+  return `run-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
+/**
+ * 把 doc-studio UI 调用 EventSource 的 URL 替换为 ScriptLens 流的句柄。
+ *
+ * 注意签名是 string —— 但 doc-studio UI 拿到 URL 后立即 `new EventSource(url)`，
+ * 我们在 doc-studio/index.tsx 改造点上把 `new EventSource(url)` 替换成
+ * `openScriptLensAgentStream(runId)`，所以这里返回的 URL 实际只用作占位
+ * （包含 runId 让上层可以解析回去）。
+ */
+export function getAgentAsyncEventsUrl(_workspaceId: string, runId: string): string {
+  return `scriptlens-stream:${runId}`
+}
+
+/**
+ * doc-studio UI 改造点直接调用：返回一个 EventSource-shim。
+ */
+export function openAsyncEventStream(runId: string): ScriptLensAgentStream {
+  const stream = openScriptLensAgentStream(runId)
+  activeStreams.set(runId, stream)
+  return stream
+}
+
+export async function runAgentTask(
+  _params: {
+    workspaceId: string
+    userIntent: string
+    context?: Record<string, any>
+    options?: Record<string, any>
+    collectTrainingData?: boolean
+    knowledgeBaseId?: number
+    knowledgeBaseName?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.AgentResponse> {
+  return unsupported('runAgentTask 同步接口（请用 runAgentTaskAsync + SSE）')
+}
+
+export async function runAgentTaskAsync(
+  params: {
+    workspaceId: string
+    userIntent: string
+    context?: Record<string, any>
+    options?: Record<string, any>
+    collectTrainingData?: boolean
+    knowledgeBaseId?: number
+    knowledgeBaseName?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<{ runId: string; status?: string }> {
+  if (!params.workspaceId) {
+    throw new Error('runAgentTaskAsync: workspaceId 为空')
+  }
+  if (!params.userIntent || !params.userIntent.trim()) {
+    throw new Error('runAgentTaskAsync: userIntent 为空')
+  }
+  const runId = generateRunId()
+  // role：从 context 读取，doc-studio UI 没传就用 general（PRD 默认）
+  const role = String(params.context?.role || 'general')
+  rememberChatArgs(runId, {
+    scriptId: params.workspaceId,
+    question: params.userIntent,
+    history: [],
+    role,
+  })
+  return { runId, status: 'queued' }
+}
+
+export async function fetchAgentRunStatus(
+  _params: {
+    workspaceId: string
+    runId: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<{
+  run_id: string
+  status: string
+  result?: DocStudioAPI.AgentResponse
+  error?: string
+  updated_at?: number
+}> {
+  // ScriptLens 不持久化 run；UI 只在 finally 兜底拉一次状态，这里返回
+  // succeeded 让 UI 退出 loading 即可。
+  return {
+    run_id: _params.runId,
+    status: 'succeeded',
+  }
+}
+
+export async function cancelAgentRun(
+  params: {
+    workspaceId: string
+    runId: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<{ runId: string; status: string }> {
+  const stream = activeStreams.get(params.runId)
+  if (stream) {
+    stream.close()
+    activeStreams.delete(params.runId)
+  }
+  return { runId: params.runId, status: 'cancelled' }
+}
+
+export async function respondAgentRunInteraction(
+  _params: {
+    workspaceId: string
+    runId: string
+    interactionId: string
+    decision: string
+    note?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<{ runId: string; status: string; accepted: boolean; decision: string }> {
+  // ScriptLens 后端当前不发 interaction_required 事件（短剧场景没有危险操作
+  // 确认链路）。UI 不会触发这个调用；万一触发就 fail aloud。
+  return unsupported('respondAgentRunInteraction（ScriptLens 不支持 HitL 危险操作确认）')
+}
+
+export async function confirmAgentRunAction(
+  params: {
+    workspaceId: string
+    runId: string
+    confirmationId: string
+    decision: 'approve' | 'reject'
+    note?: string
+  },
+  _options?: AxiosRequestConfig,
+) {
+  return respondAgentRunInteraction({
+    workspaceId: params.workspaceId,
+    runId: params.runId,
+    interactionId: params.confirmationId,
+    decision: params.decision,
+    note: params.note,
+  })
+}
+
+// ============================================================
+// Operations（M4 timeline）：改写历史 / 快照 / 回退
+// ============================================================
+
+export async function listOperations(
+  params: { workspaceId: string },
+  options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.OperationSummary[]> {
+  const { data } = await request.get<{
+    script_id: string
+    items: DocStudioAPI.OperationSummary[]
+  }>(`/${params.workspaceId}/operations`, withScripts(options))
+  return Array.isArray(data?.items) ? data.items : []
+}
+
+export async function revertOperation(
+  params: {
+    workspaceId: string
+    operationId: string
+    files?: string[]
+  },
+  options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.RevertOperationResponse> {
+  // ScriptLens 后端目前 no-op（不真改 scenes.text，避免覆盖原始上传）。
+  // 但端点存在并会做权限校验：op 不存在 / 越权时会 404 / 403。
+  const { data } = await request.post<{
+    operation_id: string
+    reverted_files: string[]
+    deleted_files: string[]
+    skipped_files: string[]
+  }>(
+    `/${params.workspaceId}/operations/${params.operationId}/revert`,
+    {},
+    withScripts(options),
+  )
+  return {
+    operation_id: data.operation_id,
+    reverted_files: data.reverted_files || [],
+    deleted_files: data.deleted_files || [],
+    skipped_files: data.skipped_files || [],
+  }
+}
+
+export async function restoreCheckpoint(
+  _params: { workspaceId: string; runId: string },
+  _options?: AxiosRequestConfig,
+): Promise<{ run_id: string; restored_files: string[]; skipped_files: string[] }> {
+  return unsupported('restoreCheckpoint（短剧场景无 checkpoint 概念）')
+}
+
+export async function rewindConversation(
+  _params: {
+    workspaceId: string
+    keepUserTurns?: number
+    beforeMessageId?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<{
+  session_id?: string
+  total_turns?: number
+  kept_turns?: number
+  deleted_turns?: number
+}> {
+  return unsupported('rewindConversation（chat 当前无服务端 session）')
+}
+
+export async function fetchOperationSnapshotFile(
+  params: {
+    workspaceId: string
+    operationId: string
+    filePath: string
+    version?: 'before' | 'after'
+  },
+  options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.FileContentResponse> {
+  const version = params.version || 'before'
+  const { data } = await request.get<DocStudioAPI.FileContentResponse>(
+    `/${params.workspaceId}/operations/${params.operationId}/snapshot`,
+    withScripts({
+      ...(options ?? {}),
+      params: {
+        file_path: params.filePath,
+        version,
+        ...(options?.params ?? {}),
+      },
+    }),
+  )
+  return data
+}
+
+// ============================================================
+// 编译 / PDF / 下载（短剧业务无此概念）
+// ============================================================
+
+export async function compileWorkspace(
+  _params: {
+    workspaceId: string
+    mainFile?: string
+    compiler?: string
+  },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.CompileResult> {
+  return unsupported('compileWorkspace（短剧无编译概念，可改为触发 reanalyze）')
+}
+
+export async function fetchCompileStatus(
+  _params: { workspaceId: string },
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.CompileStatus> {
+  // 返回空闲态让 UI 不显示"编译中"
+  return { status: 'idle' }
+}
+
+export function buildDownloadUrl(_workspaceId: string, _filePath: string): string {
+  unsupported('buildDownloadUrl（场级下载未实现）')
+}
+
+export function buildPdfUrl(_workspaceId: string, _pdfPath?: string): string {
+  unsupported('buildPdfUrl（短剧无 PDF 编译产物）')
+}
+
+export async function downloadPdf(
+  _params: { workspaceId: string; pdfPath?: string },
+  _options?: AxiosRequestConfig,
+): Promise<Blob> {
+  return unsupported('downloadPdf（短剧无 PDF 编译产物）')
+}
+
+export async function downloadFile(
+  _params: { workspaceId: string; filePath: string },
+  _options?: AxiosRequestConfig,
+): Promise<Blob> {
+  return unsupported('downloadFile（场级下载未实现）')
+}
+
+// ============================================================
+// Report（5 维评分报告：fetch / reanalyze）—— ScriptLens 独有
+// ============================================================
+
+export async function fetchScriptReport(
+  scriptId: string,
+  options?: AxiosRequestConfig,
+): Promise<ReportFetchResult> {
+  const { data } = await request.get<ReportFetchResult>(
+    `/${scriptId}/report`,
+    withScripts(options),
+  )
+  return data
+}
+
+export async function reanalyzeScript(
+  scriptId: string,
+  options?: AxiosRequestConfig,
+): Promise<{ script_id: string; status: string }> {
+  const { data } = await request.post<{ script_id: string; status: string }>(
+    `/${scriptId}/reanalyze`,
+    {},
+    withScripts(options),
+  )
+  return data
+}
+
+// ============================================================
+// View（按角色重排报告）—— PRD §三-4)「不同视角」
+// ============================================================
+
+export type ScriptViewRole = 'selection' | 'writer' | 'review'
+
+export interface ScriptViewResponseDTO {
+  script_id: string
+  role: ScriptViewRole
+  decision: DecisionCardDTO
+  overall_score: number | null
+  summary: string
+  scorecard: ScorecardItemDTO[]
+  must_read_scene_ids: string[]
+  risk_flags: RiskFlagDTO[]
+  role_focus: string[]
+  evidence_refs: EvidenceRefDTO[]
+}
+
+export async function fetchScriptView(
+  scriptId: string,
+  role: ScriptViewRole,
+  options?: AxiosRequestConfig,
+): Promise<ScriptViewResponseDTO> {
+  const { data } = await request.get<ScriptViewResponseDTO>(
+    `/${scriptId}/view`,
+    withScripts({
+      ...(options ?? {}),
+      params: { role, ...(options?.params ?? {}) },
+    }),
+  )
+  return data
+}
+
+export async function fetchScriptDetail(
+  scriptId: string,
+  options?: AxiosRequestConfig,
+): Promise<ScriptDetailDTO> {
+  const { data } = await request.get<ScriptDetailDTO>(
+    `/${scriptId}`,
+    withScripts(options),
+  )
+  return data
+}
+
+// ============================================================
+// Rewrite（场景改写：同步接口，返回 original / rewritten / diff）
+// ============================================================
+
+export type RewriteDimension =
+  | 'opening_hook'
+  | 'reward_density'
+  | 'motivation'
+  | 'pacing'
+  | 'risk'
+
+export interface RewriteRequestPayload {
+  scene_id: string
+  target_dimension: RewriteDimension
+  issue: string
+}
+
+export interface RewriteResponseDTO {
+  script_id: string
+  scene_id: string
+  target_dimension: RewriteDimension
+  issue: string
+  original_text: string
+  rewritten_text: string
+  rationale: string
+  diff: string
+}
+
+export async function rewriteScript(
+  scriptId: string,
+  payload: RewriteRequestPayload,
+  options?: AxiosRequestConfig,
+): Promise<RewriteResponseDTO> {
+  const { data } = await request.post<RewriteResponseDTO>(
+    `/${scriptId}/rewrite`,
+    payload,
+    withScripts(options),
+  )
+  return data
+}
+
+// ============================================================
+// Feedback（PRD §10 P3 skill 机制）—— ScriptLens-native schema
+// ============================================================
+
+export type ScriptFeedbackScope = 'general' | 'dimension' | 'rewrite' | 'scene'
+
+export interface ScriptFeedbackPayload {
+  scope: ScriptFeedbackScope
+  scope_ref?: string | null
+  message: string
+}
+
+export interface ScriptFeedbackItem {
+  id: string
+  scope: ScriptFeedbackScope
+  scope_ref?: string | null
+  message: string
+  created_at: string
+}
+
+export async function submitScriptFeedback(
+  scriptId: string,
+  payload: ScriptFeedbackPayload,
+  options?: AxiosRequestConfig,
+): Promise<ScriptFeedbackItem> {
+  const { data } = await request.post<ScriptFeedbackItem>(
+    `/${scriptId}/feedback`,
+    payload,
+    withScripts(options),
+  )
+  return data
+}
+
+export async function fetchScriptFeedback(
+  scriptId: string,
+  limit = 50,
+  options?: AxiosRequestConfig,
+): Promise<{ script_id: string; items: ScriptFeedbackItem[] }> {
+  const { data } = await request.get<{ script_id: string; items: ScriptFeedbackItem[] }>(
+    `/${scriptId}/feedback`,
+    withScripts({
+      ...(options ?? {}),
+      params: { limit, ...(options?.params ?? {}) },
+    }),
+  )
+  return data
+}
+
+// ============================================================
+// 反馈（部分对齐：traceId 当作 scope_ref，scope=general）
+// ============================================================
+
+export async function sendAgentFeedback(
+  params: {
+    traceId: string
+    rating: DocStudioAPI.AgentFeedbackRating
+    comment?: string
+    scriptId?: string
+  },
+  _options?: AxiosRequestConfig,
+) {
+  if (!params.scriptId) {
+    // doc-studio 原协议不带 scriptId，必须由调用方补；不补就 fail aloud
+    unsupported('sendAgentFeedback 需要 scriptId（请在调用处传入当前 workspaceId）')
+  }
+  return request.post(
+    `/${params.scriptId}/feedback`,
+    {
+      scope: 'general',
+      scope_ref: params.traceId,
+      message: `[${params.rating}]${params.comment ? ' ' + params.comment : ''}`,
+    },
+    withScripts(),
+  )
+}
+
+// ============================================================
+// 监控（UI 上的 metrics / llm health 面板，业务无关，返空）
+// ============================================================
+
+export async function fetchMetricsSummary(
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.MetricsSummary> {
+  return {
+    tools: {},
+    intents: {},
+    plans: {},
+    workspace_scans: { count: 0, total_duration_seconds: 0 },
+    workspace_cache_events: {},
+    feedback: {},
+  }
+}
+
+export async function fetchLlmHealth(
+  _options?: AxiosRequestConfig,
+): Promise<DocStudioAPI.LlmHealthSummary> {
+  return {
+    providers: [],
+    fallback_enabled: false,
+    fallback_allow_explicit_provider: false,
+    failure_threshold: 0,
+    cooldown_seconds: 0,
+    request_timeout: 0,
+  }
+}

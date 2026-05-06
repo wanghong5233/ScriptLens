@@ -1,0 +1,146 @@
+.com-markdown {
+  line-height: 1.6 !important;
+
+  > :first-child {
+    margin-top: 0 !important;
+  }
+
+  > :last-child {
+    margin-bottom: 0 !important;
+  }
+
+  h1, h2, h3, h4, h5, h6 {
+    font-weight: bold !important;
+    margin-top: 1em !important;
+    margin-bottom: 0.5em !important;
+  }
+
+  h1 { font-size: 2em !important; }
+  h2 { font-size: 1.5em !important; }
+  h3 { font-size: 1.25em !important; }
+  h4 { font-size: 1em !important; }
+
+  strong { font-weight: bold !important; }
+  em { font-style: italic !important; }
+
+  ul, ol {
+    margin: 0.5em 0 !important;
+    padding-left: 2em !important;
+    list-style: disc !important;
+  }
+
+  ol { list-style: decimal !important; }
+
+  li {
+    margin: 0.25em 0 !important;
+    display: list-item !important;
+  }
+
+  p {
+    margin: 0.5em 0 !important;
+    display: block !important;
+  }
+
+  .inline-code {
+    background-color: rgba(0, 0, 0, 0.05);
+    border-radius: 4px;
+    padding: 0 4px;
+    font-family: 'Fira Code', Consolas, monospace;
+  }
+
+  .code-block {
+    background-color: #fff;
+    display: block;
+    padding: 12px;
+    border-radius: 6px;
+    overflow-x: auto;
+    white-space: pre;
+    font-family: 'Fira Code', Consolas, monospace;
+    line-height: 1.5;
+  }
+
+  pre {
+    background-color: #f6f8fa;
+    border-radius: 6px;
+    padding: 12px;
+    overflow-x: auto;
+
+    > code {
+      background-color: transparent;
+      padding: 0;
+    }
+  }
+
+  table {
+    background-color: white;
+    border-collapse: collapse;
+    border-spacing: 0;
+    border-radius: 6px;
+
+    &,
+    td,
+    th {
+      border: 1px solid #ddd;
+    }
+
+    td,
+    th {
+      padding: 8px 12px;
+    }
+  }
+
+  // 引用 chip 兜底样式：result.module.scss 的 :global 规则会在 chat 场景里
+  // 进一步定制，但当 Markdown 在其它场景渲染时，仍能保证可读、可点。
+  .refrence-token {
+    display: inline-block;
+    min-width: 18px;
+    padding: 0 6px;
+    margin: 0 2px;
+    line-height: 18px;
+    font-size: 12px;
+    font-weight: 600;
+    text-align: center;
+    color: var(--ant-color-primary);
+    background-color: rgba(22, 119, 255, 0.08);
+    border-radius: 10px;
+    cursor: pointer;
+    user-select: none;
+    transition: background-color 0.15s ease, color 0.15s ease;
+
+    &:hover,
+    &:focus-visible {
+      background-color: var(--ant-color-primary);
+      color: #fff;
+      outline: none;
+    }
+  }
+}
+
+// 引用 chip 的 hover 预览（antd Tooltip 渲染到 body，需要全局样式）
+.refchip-preview {
+  max-width: 320px;
+  font-size: 12px;
+  line-height: 1.5;
+
+  .refchip-preview__title {
+    font-weight: 600;
+    color: #fff;
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .refchip-preview__body {
+    color: rgba(255, 255, 255, 0.85);
+    word-break: break-word;
+    margin-bottom: 6px;
+  }
+
+  .refchip-preview__hint {
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 11px;
+    border-top: 1px solid rgba(255, 255, 255, 0.15);
+    padding-top: 4px;
+  }
+}
