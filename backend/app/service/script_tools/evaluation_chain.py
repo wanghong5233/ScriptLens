@@ -1,6 +1,7 @@
-"""评估层封装：5 维评分 + 风险 + 改写候选。
+"""评估层封装：阅文五力评分 + 改写候选（docs/08-evaluation-framework.md）。
 
-该模块不重新评分，只把现有评分结果整理成 ReportPayload.v3 的 evaluation 字段。
+该模块不重新评分，只把上游评分结果整理成 ReportPayload.evaluation 字段。
+合规审核（compliance）独立成 ReportPayload.compliance 字段，不在五力评分里。
 """
 
 from __future__ import annotations
@@ -8,16 +9,14 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 
+# 阅文五力 + 短剧场景化文案（详见 docs/08-evaluation-framework.md §3）
 _DIM_LABELS = {
-    "opening_hook": "开场抓人",
-    "reward_density": "看点密度",
-    "motivation": "动机成立",
-    "pacing": "节奏清楚",
-    "risk": "审核风险",
+    "story": "故事力",
+    "character": "人物力",
+    "concept": "题材力",
+    "emotion": "情感力",
+    "pacing": "叙事力",
 }
-
-_LOW_RISK_LEVELS = {"high_risk", "medium_risk", "major"}
-
 
 def build_evaluation_payload(
     *,
@@ -55,25 +54,20 @@ def _derive_rewrite_seed_dicts(
 ) -> List[dict]:
     evi_by_id: Dict[str, dict] = {str(ref.get("id")): ref for ref in evidence_refs}
 
-    candidates: List[tuple[int, int, dict]] = []
+    candidates: List[tuple[int, dict]] = []
     for item in scorecard:
-        level = str(item.get("level") or "")
         score: Optional[int] = item.get("score")
-        is_risk_flag = level in _LOW_RISK_LEVELS
-        score_low = score is not None and score < 7
-        if not (is_risk_flag or score_low):
+        if score is None or score >= 7:
             continue
         if not item.get("evidence_ref_ids"):
             continue
-        risk_key = 0 if is_risk_flag else 1
-        score_key = score if score is not None else 99
-        candidates.append((risk_key, score_key, item))
+        candidates.append((score, item))
 
-    candidates.sort(key=lambda t: (t[0], t[1]))
+    candidates.sort(key=lambda t: t[0])
 
     seeds: List[dict] = []
     used_scenes: set[str] = set()
-    for _risk_key, _score_key, item in candidates:
+    for _score_key, item in candidates:
         if len(seeds) >= max_seeds:
             break
         evi = _first_existing_evidence(item.get("evidence_ref_ids") or [], evi_by_id)
@@ -105,11 +99,10 @@ def _first_existing_evidence(ref_ids: List[str], evi_by_id: Dict[str, dict]) -> 
 
 
 def _severity(item: dict) -> str:
-    level = str(item.get("level") or "")
     score = item.get("score")
-    if level in {"high_risk", "major"}:
+    if score is not None and score < 3:
         return "high"
-    if level == "medium_risk" or (score is not None and score < 5):
+    if score is not None and score < 5:
         return "medium"
     return "low"
 

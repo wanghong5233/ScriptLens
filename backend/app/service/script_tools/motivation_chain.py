@@ -17,7 +17,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.scene_repo import (
     Scene,
     get_all_scenes,
@@ -196,7 +196,10 @@ async def _filter_real_decisions(
         + '\n\n输出 JSON：{"scene_nos": ["1-3", "5-2", ...]}'
     )
     try:
-        resp = await caller.call_json(prompt, tier=ModelTier.MINI, temperature=0.1, max_tokens=512)
+        resp = await caller.call_json(
+            prompt, tier=ModelTier.MINI, temperature=0.1,
+            max_tokens=TokenBudget.DECISION_FILTER,
+        )
     except ScoreLLMError as e:
         logger.warning("decision filter failed, fall back to keyword-only: %s", e)
         return candidates  # 失败时全保留
@@ -246,7 +249,8 @@ async def _judge_one(
     )
     try:
         resp = await caller.call_json(
-            prompt, tier=ModelTier.PRIMARY, temperature=0.1, max_tokens=512
+            prompt, tier=ModelTier.PRIMARY, temperature=0.1,
+            max_tokens=TokenBudget.DECISION_JUDGE,
         )
     except ScoreLLMError as e:
         logger.warning(

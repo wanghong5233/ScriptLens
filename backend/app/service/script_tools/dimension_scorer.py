@@ -1,19 +1,28 @@
-"""3 维 LLM 评分入口：opening_hook / reward_density / pacing。
+"""阅文五力评分（v2，docs/08-evaluation-framework.md §3）。
 
-motivation / risk 各自走专用 scorer（motivation_chain / risk_screener），
-不放本模块；本模块只放「档位 prompt + LLM」型评分。
+5 维：story / character / concept / emotion / pacing。
+risk 不在本模块；合规审核走 risk_screener.py，落到 ReportPayload.compliance（与 scorecard 平级）。
 
-为什么不把所有维度装一个万能 score_dimension：
-- opening_hook 输入是「前 3 集场景文本」
-- reward_density 输入是「reward 事件列表 + 全剧集数」
-- pacing 输入是「分集事件数序列（纯数字）+ 方差」
-三者的 prompt 形态完全不同，强行统一 prompt 会让档位判据失焦。
+设计：
+- 每维以**规则评分**为骨架（信号来自上游 chain：beat_sheet / character_graph / coverage_card / motivation_chain
+  决策回扫 / reward_events 统计），不再让 LLM 自己决定档位
+- evidence_ref_ids 来自规则锚定的具体场景（beat anchor / 决策回扫 / reward 命中 / coverage anchor），
+  不需要 LLM 二次重试给证据
+- LLM 仍参与的是上游 chain（如 character_graph、motivation_chain.score_motivation），
+  不再在本模块单独发评分 prompt
 
-不变式（rubric §6 + core-principles fail aloud）：
-- 任何 LLM 调用失败：先重试一次（提温度提多样性）；二次仍失败 → 抛 ScoreLLMError
-- LLM 返回 evidence_scene_nos 为空：用强化 prompt 重试一次；二次仍空 →
-  返回 score=None / level=None / reason="证据不足"（**不允许伪造默认 5/medium**）
-- LLM 返回的 evidence_scene_nos 必须出自输入场号集；非法 scene_no 直接丢弃
+为什么不让 LLM 评档：
+- v1 让 LLM 同时打分 + 写理由 + 给证据，三件事互相打架（LLM 给不出证据时 score 也变 None）
+- 短剧评分维度的判据本身可量化（节拍完整性 / 反转密度 / OOC 计数 / 题材关键词），让 LLM 决定档
+  位是把可解释性让给幻觉
+- 评分稳定性：规则评分 100% 复现，CI 可断言；LLM 评分跑一次一个分数
+
+依赖：
+- score_story 需要 BeatSheet + reward_events + total_episodes
+- score_character 需要 MotivationResult + CharacterGraph
+- score_concept 需要 CoverageCard + 全剧前 N 场（题材关键词扫描）
+- score_emotion 需要 reward_events + total_episodes
+- score_pacing 需要 全剧 scenes + reward_events
 """
 
 from __future__ import annotations
@@ -21,32 +30,28 @@ from __future__ import annotations
 import logging
 import statistics
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+from sqlalchemy.engine import Engine
+
+from service.script_tools.beat_chain import BeatSheet
+from service.script_tools.character_graph_chain import CharacterGraph
+from service.script_tools.coverage_chain import CoverageCard
+from service.script_tools.motivation_chain import MotivationResult
 from service.script_tools.reward_extractor import RewardEvent
 from service.script_tools.scene_repo import (
     Scene,
     get_all_scenes,
     get_first_episode_scenes,
 )
+from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
 
 
-# rubric §4.1 通用骨架硬约束（评分 prompt 必须包含）
-_HARD_CONSTRAINTS = """【硬约束】
-1. evidence_scene_nos 必须 ≥1 条且属于上面给出的场号集合，否则你的输出无效。
-2. reason 不准出现「秒/镜头/画面/特效/分镜/拍摄」等成片词汇（剧本是文本）。
-3. score 与 level 必须落到同一档（9-10→high；6-8→high；3-5→medium；0-2→low）。"""
-
-_RETRY_HINT = """\n\n注意：你刚才的输出未给 evidence_scene_nos（或非法）。请重新打分，"""\
-"""**必须**给出 ≥1 条 evidence_scene_nos，并且只能从下方【场景】里给出的 scene_no 里挑。"""
-
-
 @dataclass
 class ScoreOutput:
-    """rubric §6：score/level 在「证据不足」时为 None；其余正常 0-10/三档。"""
+    """统一评分输出。score / level 在「证据不足」时为 None。"""
 
     score: Optional[int]
     level: Optional[str]  # high | medium | low
@@ -58,163 +63,445 @@ _INSUFFICIENT = ScoreOutput(score=None, level=None, reason="证据不足", evide
 
 
 # ============================================================
-# opening_hook（rubric §3.1）
+# 共用：分档辅助
 # ============================================================
 
 
-_OPENING_PROMPT = (
-    """你是中文短剧爆款分析师。下面是某剧的【前 3 集前若干场】原文。
-
-任务：判定 opening_hook（开场钩子强度），按以下 4 档锚点选最匹配的一档：
-
-| 档 | 信号 |
-|---|---|
-| 9-10（high） | 首场 20 段内出现死亡 / 绝症 / 离婚 / 重生 / 穿越 / 阴谋揭露 / 当众羞辱 任一；首集结尾留明确钩子 |
-| 6-8（high） | 首场内有冲突或反差但非极强；首集前 3 场至少 2 次冲突事件 |
-| 3-5（medium） | 首集前 3 场只有 1 次冲突 / 多数在交代背景或日常 |
-| 0-2（low） | 首集前 3 场只有人物介绍和环境描写，无冲突 / 首场超过 30 段没有事件 |
-
-【场景】
-{scenes_block}
-
-输出 JSON（严格契约）：
-{{
-  "score": <0-10 整数>,
-  "level": "high|medium|low",
-  "reason": "<≤80 字，必须引用具体场号>",
-  "evidence_scene_nos": ["1-1", "1-2"]
-}}
-
-"""
-    + _HARD_CONSTRAINTS
-)
+def _level_from_score(score: int) -> str:
+    if score >= 6:
+        return "high"
+    if score >= 3:
+        return "medium"
+    return "low"
 
 
-async def score_opening_hook(
+def _score_from_signals(*, high: bool, mid_high: bool, mid_low: bool) -> Tuple[int, str]:
+    """4 档锚点的统一映射。每档取该档中位作为分数，避免 9 / 6 这种边界点重复出现。"""
+    if high:
+        return 9, "high"
+    if mid_high:
+        return 7, "high"
+    if mid_low:
+        return 4, "medium"
+    return 2, "low"
+
+
+# ============================================================
+# 1. score_story —— 故事力
+# ============================================================
+#
+# rubric §3.1：核心主线清晰度 + 情节推进密度 + 反转密度
+# 信号：
+#   - 关键节拍完整性（opening / inciting / midpoint / climax / closing 五个）
+#   - 反转事件密度（reward_events 中 reversal / face_slap / scheme_exposed / identity_reveal 计数）
+
+
+_KEY_BEATS = ("opening", "inciting", "midpoint", "climax", "closing")
+_TWIST_EVENT_TYPES = ("reversal", "face_slap", "scheme_exposed", "identity_reveal")
+
+
+def score_story(
     *,
-    script_id: str,
-    caller: Optional[LlmCaller] = None,
-    n_episodes: int = 3,
-    max_scenes: int = 9,
-    max_text_per_scene: int = 800,
+    beat_sheet: Optional[BeatSheet],
+    reward_events: List[RewardEvent],
+    total_episodes: int,
 ) -> ScoreOutput:
-    """rubric §3.1。fail aloud：LLM 二次失败抛错；evidence 二次为空 → score=None。"""
-    caller = caller or LlmCaller()
-    scenes = get_first_episode_scenes(script_id=script_id, n_episodes=n_episodes)
-    scenes = scenes[:max_scenes]
-    if not scenes:
-        # 信息缺失（rubric §6）：剧本切分异常或集号缺失
+    if total_episodes <= 0:
+        total_episodes = max(1, len({ev.episode_no for ev in reward_events if ev.episode_no}))
+
+    present_beats: set[str] = set()
+    anchor_by_type: dict[str, str] = {}
+    if beat_sheet is not None:
+        for act in beat_sheet.acts:
+            for beat in act.beats:
+                if beat.type in _KEY_BEATS and beat.anchor_scene_id:
+                    present_beats.add(beat.type)
+                    anchor_by_type.setdefault(beat.type, beat.anchor_scene_id)
+
+    twist_count = sum(1 for ev in reward_events if ev.event_type in _TWIST_EVENT_TYPES)
+    twist_per_ep = twist_count / total_episodes
+    missing_beats = [b for b in _KEY_BEATS if b not in present_beats]
+
+    if not present_beats and twist_count == 0:
         return ScoreOutput(
             score=None,
             level=None,
-            reason="无开场场景可读（剧本切分可能异常）",
+            reason="无三幕节拍且未识别到反转事件，故事力维度证据不足",
             evidence_ref_ids=[],
         )
 
-    blocks = []
-    for sc in scenes:
-        text = (sc.text or "")[:max_text_per_scene]
-        ep = f"第{sc.episode_no}集" if sc.episode_no else "未编集"
-        blocks.append(f"[scene_no={sc.scene_no}] [{ep}] [{sc.scene_label}]\n{text}")
-    base_prompt = _OPENING_PROMPT.format(scenes_block="\n\n---\n\n".join(blocks))
+    high = (not missing_beats) and twist_per_ep >= 2.0
+    mid_high = len(missing_beats) <= 1 and twist_per_ep >= 1.0
+    mid_low = len(missing_beats) <= 2 and twist_per_ep >= 0.3
+    score, level = _score_from_signals(high=high, mid_high=mid_high, mid_low=mid_low)
 
-    return await _call_with_evidence_retry(
-        caller=caller,
-        base_prompt=base_prompt,
-        scenes=scenes,
-        log_tag="score_opening_hook",
+    if missing_beats:
+        beat_text = f"缺关键节拍：{ '/'.join(missing_beats) }"
+    else:
+        beat_text = "三幕关键节拍齐全"
+    reason = f"{beat_text}；反转 / 集 = {twist_per_ep:.1f}（共 {twist_count} 处反转）"
+
+    evidence_ref_ids: List[str] = []
+    for beat_type in ("climax", "midpoint", "inciting", "closing"):
+        sid = anchor_by_type.get(beat_type)
+        if sid and sid not in evidence_ref_ids:
+            evidence_ref_ids.append(sid)
+        if len(evidence_ref_ids) >= 3:
+            break
+
+    return ScoreOutput(score=score, level=level, reason=reason, evidence_ref_ids=evidence_ref_ids)
+
+
+# ============================================================
+# 2. score_character —— 人物力
+# ============================================================
+#
+# rubric §3.2：主角辨识度 + 动机弧光 + 关键关系冲突
+# 信号：
+#   - 关键决策铺垫充足度（motivation_chain 决策回扫：setup>=2 占比 / OOC 计数）
+#   - 主角动机文本是否填充（character_graph protagonist 节点的 motivation 字段）
+#   - 强关系数（weight >= 0.3 的 character_graph 边数）+ 是否含 1 条 negative 主对手
+
+
+def score_character(
+    *,
+    motivation_result: Optional[MotivationResult],
+    character_graph: Optional[CharacterGraph],
+) -> ScoreOutput:
+    if motivation_result is None and character_graph is None:
+        return ScoreOutput(
+            score=None,
+            level=None,
+            reason="动机回扫与人物图均缺失，人物力维度证据不足",
+            evidence_ref_ids=[],
+        )
+
+    judged = list(getattr(motivation_result, "judged_decisions", None) or [])
+    n_decisions = len(judged)
+    setup2 = sum(1 for j in judged if j.setup_count >= 2)
+    setup1plus = sum(1 for j in judged if j.setup_count >= 1)
+    no_setup = sum(1 for j in judged if j.setup_count == 0)
+    ooc = sum(1 for j in judged if j.is_ooc)
+    setup2_ratio = setup2 / n_decisions if n_decisions else 0.0
+    setup1_ratio = setup1plus / n_decisions if n_decisions else 0.0
+
+    protagonist_motivation = ""
+    antagonist_first_scene: Optional[str] = None
+    strong_edges = 0
+    has_negative_opponent = False
+    if character_graph is not None:
+        for node in character_graph.nodes:
+            if node.role == "protagonist" and node.motivation.strip():
+                protagonist_motivation = node.motivation
+            if node.role == "antagonist" and antagonist_first_scene is None:
+                antagonist_first_scene = node.first_scene_id
+        for edge in character_graph.edges:
+            if edge.weight >= 0.3:
+                strong_edges += 1
+                if edge.polarity == "negative":
+                    has_negative_opponent = True
+
+    high = (
+        bool(protagonist_motivation)
+        and setup2_ratio >= 0.8
+        and ooc == 0
+        and strong_edges >= 3
+        and has_negative_opponent
     )
+    mid_high = (
+        bool(protagonist_motivation)
+        and setup1_ratio >= 0.6
+        and ooc <= 2
+        and strong_edges >= 2
+    )
+    mid_low = (
+        (no_setup / n_decisions if n_decisions else 1.0) <= 0.3
+        and ooc <= 5
+        and strong_edges <= 1
+    ) or (n_decisions == 0 and strong_edges >= 2)
+    score, level = _score_from_signals(high=high, mid_high=mid_high, mid_low=mid_low)
+
+    parts: List[str] = []
+    if n_decisions:
+        parts.append(
+            f"评估 {n_decisions} 个关键决策："
+            f"{setup2} 个铺垫充足 / {no_setup} 个无铺垫 / {ooc} 个 OOC"
+        )
+    if protagonist_motivation:
+        parts.append(f"主角动机已锚定：{protagonist_motivation[:24]}")
+    elif character_graph is not None:
+        parts.append("主角动机字段为空")
+    if character_graph is not None:
+        parts.append(
+            f"强关系 {strong_edges} 条 · {'有' if has_negative_opponent else '缺'}主对手"
+        )
+    reason = "；".join(parts) or "人物维度仅有弱信号"
+
+    evidence_ref_ids: List[str] = []
+    for sid in getattr(motivation_result, "evidence_ref_ids", None) or []:
+        if sid and sid not in evidence_ref_ids:
+            evidence_ref_ids.append(sid)
+    if antagonist_first_scene and antagonist_first_scene not in evidence_ref_ids:
+        evidence_ref_ids.append(antagonist_first_scene)
+    evidence_ref_ids = evidence_ref_ids[:5]
+
+    return ScoreOutput(score=score, level=level, reason=reason, evidence_ref_ids=evidence_ref_ids)
 
 
 # ============================================================
-# reward_density（rubric §3.2）—— 比值驱动 + LLM 翻译
+# 3. score_concept —— 题材力
 # ============================================================
+#
+# rubric §3.3：赛道辨识度 + 卖点钩子 + 商业可行性
+# 信号：
+#   - genre 标签是否落到主流赛道
+#   - core_value 是否非空（≤30 字差异化卖点）
+#   - 首集前 3 场是否出现题材标识事件（关键词扫描）
 
 
-_REWARD_PROMPT = (
-    """你是中文短剧爆款分析师。下面是某剧的【reward 事件统计 + 抽样事件清单】。
+_MAINSTREAM_GENRES = {
+    "重生", "穿越", "复仇", "战神", "豪门", "甜宠", "逆袭", "战神归来",
+    "都市重生", "总裁", "替身", "弃妇", "扮猪吃虎", "马甲", "认亲",
+    "古言", "现言", "玄幻", "悬疑", "权谋",
+}
 
-任务：基于统计指标按 4 档锚点判定 reward_density（爽点密度）：
-
-| 档 | 信号 |
-|---|---|
-| 9-10（high） | reward / 集数比值 ≥ 3.0 ；连续 ≥3 集无 reward 段 ≤ 1 处 |
-| 6-8（high） | 比值 1.5-3.0 ；连续 ≥3 集无 reward 段 ≤ 3 处 |
-| 3-5（medium） | 比值 0.5-1.5 ；存在连续 5+ 集无 reward 段 |
-| 0-2（low） | 比值 < 0.5 ；中后段连续 8+ 集无 reward |
-
-【统计】
-总集数：{n_episodes}
-reward 事件总数：{n_rewards}
-比值（events / episodes）：{ratio:.2f}
-最长连续无 reward 集数：{max_dry_streak}
-
-【抽样 reward 事件（前 6 个）】
-{events_block}
-
-输出 JSON：
-{{
-  "score": <0-10 整数>,
-  "level": "high|medium|low",
-  "reason": "<≤80 字，必须引用比值或具体场号>",
-  "evidence_scene_nos": ["..."]
-}}
-
-"""
-    + _HARD_CONSTRAINTS
+_CONCEPT_KEYWORDS = (
+    "死亡", "绝症", "离婚", "出轨", "重生", "穿越", "复仇", "退婚", "分手",
+    "当众", "羞辱", "阴谋", "真相", "误会", "反目", "重逢", "追妻", "认亲",
 )
 
 
-async def score_reward_density(
+def score_concept(
     *,
+    coverage_card: Optional[CoverageCard],
     script_id: str,
+    engine: Engine = default_engine,
+    n_episodes_to_scan: int = 1,
+    max_scenes_to_scan: int = 3,
+) -> ScoreOutput:
+    if coverage_card is None:
+        return ScoreOutput(
+            score=None,
+            level=None,
+            reason="速览卡未生成，题材力维度证据不足",
+            evidence_ref_ids=[],
+        )
+
+    genre_tags = [g.strip() for g in (coverage_card.genre or []) if g and g.strip()]
+    has_mainstream = any(
+        any(key in tag for key in _MAINSTREAM_GENRES) for tag in genre_tags
+    )
+    has_core_value = bool((coverage_card.core_value or "").strip())
+
+    head_scenes = get_first_episode_scenes(
+        script_id=script_id,
+        n_episodes=n_episodes_to_scan,
+        engine=engine,
+    )[:max_scenes_to_scan]
+
+    keyword_hit_scene_id: Optional[str] = None
+    for sc in head_scenes:
+        text = sc.text or ""
+        if any(kw in text for kw in _CONCEPT_KEYWORDS):
+            keyword_hit_scene_id = sc.id
+            break
+    early_keyword_hit = keyword_hit_scene_id is not None
+
+    high = has_mainstream and has_core_value and early_keyword_hit
+    mid_high = has_mainstream and (has_core_value or early_keyword_hit)
+    mid_low = bool(genre_tags) and not has_mainstream
+    score, level = _score_from_signals(high=high, mid_high=mid_high, mid_low=mid_low)
+
+    parts: List[str] = []
+    if genre_tags:
+        parts.append(f"题材：{', '.join(genre_tags[:3])}")
+    else:
+        parts.append("无题材标签")
+    if has_core_value:
+        parts.append(f"核心卖点：{coverage_card.core_value[:24]}")
+    else:
+        parts.append("核心卖点缺失")
+    if early_keyword_hit:
+        parts.append("首集 3 场内出现题材标识事件")
+    else:
+        parts.append("首集 3 场内无题材标识事件")
+    reason = "；".join(parts)
+
+    evidence_ref_ids: List[str] = []
+    if keyword_hit_scene_id:
+        evidence_ref_ids.append(keyword_hit_scene_id)
+    for point in (coverage_card.strengths or [])[:2]:
+        sid = point.anchor_scene_id
+        if sid and sid not in evidence_ref_ids:
+            evidence_ref_ids.append(sid)
+
+    return ScoreOutput(score=score, level=level, reason=reason, evidence_ref_ids=evidence_ref_ids)
+
+
+# ============================================================
+# 4. score_emotion —— 情感力
+# ============================================================
+#
+# rubric §3.4：情绪密度 + 爽点频率 + 共情触达（沿用 v1 reward_density 算法 + 改名）
+# 信号：
+#   - reward 事件 / 集数比值
+#   - 最长连续无 reward 集数（情感塌陷段）
+
+
+def score_emotion(
+    *,
     reward_events: List[RewardEvent],
     total_episodes: int,
-    caller: Optional[LlmCaller] = None,
 ) -> ScoreOutput:
-    """rubric §3.2。reward 事件为 0 时直接 score=0/level=low（不需 LLM）。"""
-    caller = caller or LlmCaller()
-
     if total_episodes <= 0:
-        # 集号缺失（fallback 切分）→ 用场景数 / 30 估算等效集数
         total_episodes = max(1, len(reward_events) // 2)
 
     n_rewards = len(reward_events)
-    ratio = n_rewards / total_episodes
-
-    # 0 reward → 不需要 LLM，按 rubric §3.2 直接 0-2 档（low）
     if n_rewards == 0:
         return ScoreOutput(
             score=1,
             level="low",
-            reason=f"全剧未识别到 reward 事件（{total_episodes} 集），爽点密度极低",
+            reason=f"全剧未识别到 reward 事件（{total_episodes} 集），情感力极低",
             evidence_ref_ids=[],
         )
 
+    ratio = n_rewards / total_episodes
     max_dry = _max_dry_streak(reward_events, total_episodes)
 
-    sample_events = reward_events[:6]
-    events_block = "\n".join(
-        f"- [scene_no={ev.scene_no}] [{ev.event_type}] {ev.evidence}"
-        for ev in sample_events
+    high = ratio >= 3.0 and max_dry <= 2
+    mid_high = ratio >= 1.5 and max_dry <= 4
+    mid_low = ratio >= 0.5
+    score, level = _score_from_signals(high=high, mid_high=mid_high, mid_low=mid_low)
+
+    reason = (
+        f"reward / 集 = {ratio:.1f}（{n_rewards} 个爽点 · {total_episodes} 集）"
+        f"；最长连续无 reward {max_dry} 集"
     )
 
-    base_prompt = _REWARD_PROMPT.format(
-        n_episodes=total_episodes,
-        n_rewards=n_rewards,
-        ratio=ratio,
-        max_dry_streak=max_dry,
-        events_block=events_block,
-    )
+    evidence_ref_ids: List[str] = []
+    for ev in reward_events[:3]:
+        if ev.scene_id and ev.scene_id not in evidence_ref_ids:
+            evidence_ref_ids.append(ev.scene_id)
 
-    out = await _call_with_evidence_retry(
-        caller=caller,
-        base_prompt=base_prompt,
-        scenes=_scenes_from_events(reward_events),
-        log_tag="score_reward_density",
-    )
-    if out.score is not None and not out.reason:
-        out.reason = f"reward/集数比 {ratio:.2f}，最长连续无 reward {max_dry} 集"
+    return ScoreOutput(score=score, level=level, reason=reason, evidence_ref_ids=evidence_ref_ids)
+
+
+# ============================================================
+# 5. score_pacing —— 叙事力
+# ============================================================
+#
+# rubric §3.5：开场抓人速度 + 节奏方差 + 信息密度（v1 opening_hook 折叠进本维度）
+# 信号：
+#   - 首场 20 段内是否出现冲突事件（开场速度）
+#   - 单集事件密度方差
+#   - 中段（中间 1/3 集）平均事件数 / 全剧均值
+
+
+_OPENING_CONFLICT_KEYWORDS = (
+    "死", "绝症", "离婚", "出轨", "重生", "穿越", "复仇", "退婚", "分手",
+    "当众", "羞辱", "阴谋", "真相", "反目", "打", "推倒", "巴掌",
+)
+
+
+def score_pacing(
+    *,
+    script_id: str,
+    reward_events: List[RewardEvent],
+    engine: Engine = default_engine,
+) -> ScoreOutput:
+    scenes = get_all_scenes(script_id=script_id, engine=engine)
+    if not scenes:
+        return ScoreOutput(
+            score=None,
+            level=None,
+            reason="无场景数据可评（剧本切分可能异常）",
+            evidence_ref_ids=[],
+        )
+
+    opening_fast = False
+    opening_evidence_id: Optional[str] = None
+    for sc in scenes[:5]:
+        text = sc.text or ""
+        head = text[:600]
+        if any(kw in head for kw in _OPENING_CONFLICT_KEYWORDS):
+            opening_fast = True
+            opening_evidence_id = sc.id
+            break
+
+    by_ep_scene = _count_by_episode([s.episode_no for s in scenes])
+    by_ep_reward = _count_by_episode([ev.episode_no for ev in reward_events])
+
+    if not by_ep_scene:
+        return ScoreOutput(
+            score=None,
+            level=None,
+            reason="剧本无集号信息（fallback 切分），节奏维度不可评",
+            evidence_ref_ids=[],
+        )
+
+    if len(by_ep_scene) < 3:
+        return ScoreOutput(
+            score=None,
+            level=None,
+            reason=f"剧本仅 {len(by_ep_scene)} 集，集数过少无法评节奏",
+            evidence_ref_ids=[],
+        )
+
+    eps_sorted = sorted(by_ep_scene.keys())
+    series = [by_ep_scene[e] + by_ep_reward.get(e, 0) for e in eps_sorted]
+    n_eps = len(series)
+    mean = statistics.fmean(series) if series else 0.0
+    variance = statistics.pvariance(series) if len(series) > 1 else 0.0
+    cv = (variance ** 0.5) / mean if mean > 0 else 0.0
+
+    mid_lo = n_eps // 3
+    mid_hi = max(mid_lo + 1, 2 * n_eps // 3)
+    mid_series = series[mid_lo:mid_hi]
+    mid_mean = statistics.fmean(mid_series) if mid_series else mean
+    mid_ratio = mid_mean / mean if mean > 0 else 1.0
+
+    threshold = mean * 0.5
+    max_dry = 0
+    cur = 0
+    for v in series:
+        if v < threshold:
+            cur += 1
+            if cur > max_dry:
+                max_dry = cur
+        else:
+            cur = 0
+
+    high = opening_fast and cv <= 0.5 and mid_ratio >= 0.9
+    mid_high = (opening_fast or cv <= 0.6) and mid_ratio >= 0.8 and max_dry <= 3
+    mid_low = mid_ratio >= 0.7 and max_dry <= 5
+    score, level = _score_from_signals(high=high, mid_high=mid_high, mid_low=mid_low)
+
+    parts = [
+        f"开场{'快' if opening_fast else '慢'}",
+        f"方差 {variance:.1f}（CV={cv:.2f}）",
+        f"中段占均值 {mid_ratio:.0%}",
+        f"最长低密度段 {max_dry} 集",
+    ]
+    reason = "；".join(parts)
+
+    evidence_ref_ids: List[str] = []
+    if opening_evidence_id:
+        evidence_ref_ids.append(opening_evidence_id)
+
+    return ScoreOutput(score=score, level=level, reason=reason, evidence_ref_ids=evidence_ref_ids)
+
+
+# ============================================================
+# 工具函数
+# ============================================================
+
+
+def _count_by_episode(episodes: List[Optional[int]]) -> dict[int, int]:
+    out: dict[int, int] = {}
+    for ep in episodes:
+        if ep is None:
+            continue
+        out[ep] = out.get(ep, 0) + 1
     return out
 
 
@@ -239,7 +526,8 @@ def _max_dry_streak(events: List[RewardEvent], total_eps: int) -> int:
 
 
 def _scenes_from_events(events: List[RewardEvent]) -> List[Scene]:
-    """伪 Scene 对象列表：让 _build_score_output 能反查 scene_no -> scene_id。"""
+    """伪 Scene 对象列表（仅用于历史 evidence 反查）。本模块当前不再用，
+    保留是为了 `script_report_service.score_one_dimension` 这类老入口的兼容。"""
     return [
         Scene(
             id=ev.scene_id,
@@ -254,266 +542,3 @@ def _scenes_from_events(events: List[RewardEvent]) -> List[Scene]:
         )
         for ev in events
     ]
-
-
-# ============================================================
-# pacing（rubric §3.4）—— 纯量化 + LLM 翻译
-# ============================================================
-
-
-_PACING_PROMPT = (
-    """你是中文短剧节奏审稿专家。下面是某剧分集事件数（场景数 + reward 事件数）的统计。
-
-判定 pacing（节奏控制）档位：
-
-| 档 | 信号 |
-|---|---|
-| 9-10（high） | 方差小；无连续 3+ 集低密度段 |
-| 6-8（high） | 方差中等；连续 3+ 集低密度段 ≤ 2 处 |
-| 3-5（medium） | 中段塌陷（中段平均 < 全剧均值 70%）|
-| 0-2（low） | 中后段连续 5+ 集低密度 / 总集 ≥ 60 但 reward ≤ 30 |
-
-【统计】
-总集数：{n_episodes}
-全剧均值（事件/集）：{mean:.2f}
-方差：{variance:.2f}
-最长连续低密度段（事件数 < 均值 50%）集数：{max_dry_streak}
-中段（中间 1/3 集）平均：{mid_mean:.2f}（占全剧均值 {mid_ratio:.0%}）
-
-【分集事件序列】
-{series}
-
-输出 JSON：
-{{
-  "score": <0-10 整数>,
-  "level": "high|medium|low",
-  "reason": "<≤80 字，引用方差/塌陷集数等具体数字>",
-  "evidence_scene_nos": []
-}}
-
-【pacing 维度特别说明】evidence_scene_nos 可为空（pacing 是分布维度，不强制定位单场景）。
-其它硬约束：
-1. reason 不准出现「秒/镜头/画面/特效/分镜/拍摄」等成片词汇。
-2. score 与 level 必须落到同一档。"""
-)
-
-
-async def score_pacing(
-    *,
-    script_id: str,
-    reward_events: List[RewardEvent],
-    caller: Optional[LlmCaller] = None,
-) -> ScoreOutput:
-    """rubric §3.4。pacing 是分布量化维度，**不强制 evidence**（与 §6 重试规则不同）。"""
-    caller = caller or LlmCaller()
-    scenes = get_all_scenes(script_id=script_id)
-    if not scenes:
-        return ScoreOutput(
-            score=None,
-            level=None,
-            reason="无场景数据可评（剧本切分可能异常）",
-            evidence_ref_ids=[],
-        )
-
-    by_ep_scene = _count_by_episode([s.episode_no for s in scenes])
-    by_ep_reward = _count_by_episode([ev.episode_no for ev in reward_events])
-
-    if not by_ep_scene:
-        return ScoreOutput(
-            score=None,
-            level=None,
-            reason="剧本无集号信息（fallback 切分），pacing 维度不可评",
-            evidence_ref_ids=[],
-        )
-
-    if len(by_ep_scene) < 3:
-        # rubric §6：集数 < 5 时 pacing 不输出（样本量不够）；放宽到 < 3 才彻底拒
-        return ScoreOutput(
-            score=None,
-            level=None,
-            reason=f"剧本仅 {len(by_ep_scene)} 集，集数过少无法评 pacing 维度",
-            evidence_ref_ids=[],
-        )
-
-    eps_sorted = sorted(by_ep_scene.keys())
-    series = [by_ep_scene[e] + by_ep_reward.get(e, 0) for e in eps_sorted]
-    n_eps = len(series)
-    mean = statistics.fmean(series) if series else 0.0
-    variance = statistics.pvariance(series) if len(series) > 1 else 0.0
-
-    mid_lo = n_eps // 3
-    mid_hi = max(mid_lo + 1, 2 * n_eps // 3)
-    mid_series = series[mid_lo:mid_hi]
-    mid_mean = statistics.fmean(mid_series) if mid_series else mean
-    mid_ratio = mid_mean / mean if mean > 0 else 1.0
-
-    threshold = mean * 0.5
-    max_dry = 0
-    cur = 0
-    for v in series:
-        if v < threshold:
-            cur += 1
-            if cur > max_dry:
-                max_dry = cur
-        else:
-            cur = 0
-
-    series_str = ", ".join(f"E{e}={by_ep_scene[e] + by_ep_reward.get(e, 0)}" for e in eps_sorted[:30])
-    if len(eps_sorted) > 30:
-        series_str += f" ...（共 {len(eps_sorted)} 集，仅展示前 30）"
-
-    prompt = _PACING_PROMPT.format(
-        n_episodes=n_eps,
-        mean=mean,
-        variance=variance,
-        max_dry_streak=max_dry,
-        mid_mean=mid_mean,
-        mid_ratio=mid_ratio,
-        series=series_str,
-    )
-    # pacing 不要求 evidence；LLM 失败抛 fail aloud
-    try:
-        resp = await caller.call_json(prompt, tier=ModelTier.PRIMARY, temperature=0.1, max_tokens=512)
-    except ScoreLLMError as e:
-        logger.warning("score_pacing first attempt failed, retrying: %s", e)
-        # 二次重试：换 temperature
-        resp = await caller.call_json(prompt, tier=ModelTier.PRIMARY, temperature=0.4, max_tokens=512)
-
-    out = _build_score_output_strict(resp.parsed, [], require_evidence=False)
-    if out.score is not None and not out.reason:
-        out.reason = f"方差 {variance:.1f}，中段占均值 {mid_ratio:.0%}"
-    return out
-
-
-def _count_by_episode(episodes: List[Optional[int]]) -> dict[int, int]:
-    out: dict[int, int] = {}
-    for ep in episodes:
-        if ep is None:
-            continue
-        out[ep] = out.get(ep, 0) + 1
-    return out
-
-
-# ============================================================
-# 共用：调 LLM + evidence 重试（rubric §6）
-# ============================================================
-
-
-async def _call_with_evidence_retry(
-    *,
-    caller: LlmCaller,
-    base_prompt: str,
-    scenes: List[Scene],
-    log_tag: str,
-) -> ScoreOutput:
-    """rubric §6 重试链：
-    1. LLM 一次（temperature=0.1）
-    2. 若 LLM 抛错 → 二次重试（temperature=0.4），仍失败 → raise ScoreLLMError
-    3. 若返回 evidence_scene_nos 为空或全部非法 → 用强化 prompt 重试一次
-    4. 二次仍空 → score=None / level=None / reason="证据不足"
-    """
-    # 第 1 次
-    try:
-        resp = await caller.call_json(
-            base_prompt, tier=ModelTier.PRIMARY, temperature=0.1, max_tokens=512
-        )
-    except ScoreLLMError as e:
-        logger.warning("%s LLM first attempt failed, retrying: %s", log_tag, e)
-        # 第 2 次（升 temperature 防 transient 失败）
-        resp = await caller.call_json(
-            base_prompt, tier=ModelTier.PRIMARY, temperature=0.4, max_tokens=512
-        )
-
-    out = _build_score_output_strict(resp.parsed, scenes, require_evidence=True)
-    if out.evidence_ref_ids:
-        return out
-
-    # evidence 缺失 → 重试一次
-    logger.info("%s evidence 缺失，启动证据补强重试", log_tag)
-    retry_prompt = base_prompt + _RETRY_HINT
-    try:
-        resp2 = await caller.call_json(
-            retry_prompt, tier=ModelTier.PRIMARY, temperature=0.3, max_tokens=512
-        )
-    except ScoreLLMError as e:
-        logger.warning("%s evidence retry LLM failed: %s", log_tag, e)
-        return _INSUFFICIENT
-
-    out2 = _build_score_output_strict(resp2.parsed, scenes, require_evidence=True)
-    if out2.evidence_ref_ids:
-        return out2
-
-    logger.warning("%s evidence 二次仍空，按 rubric §6 标记证据不足", log_tag)
-    return _INSUFFICIENT
-
-
-def _build_score_output_strict(
-    parsed,
-    scenes: List[Scene],
-    *,
-    require_evidence: bool,
-) -> ScoreOutput:
-    """严格解析 LLM 输出：违反契约的字段直接抛 ScoreLLMError，不做静默 fallback。
-
-    require_evidence=True：evidence_scene_nos 必须 ≥1 条且全部出自 scenes 集合，
-    否则返回 evidence_ref_ids=[]（让上层 _call_with_evidence_retry 触发重试）。
-    """
-    if not isinstance(parsed, dict):
-        raise ScoreLLMError(f"LLM 输出非 JSON 对象：{type(parsed).__name__}")
-
-    raw_score = parsed.get("score")
-    if raw_score is None:
-        raise ScoreLLMError("LLM 输出缺 score 字段")
-    try:
-        score = int(raw_score)
-    except (ValueError, TypeError) as e:
-        raise ScoreLLMError(f"LLM score 非整数：{raw_score!r}") from e
-    if score < 0 or score > 10:
-        raise ScoreLLMError(f"LLM score 越界（0-10）：{score}")
-
-    level_raw = str(parsed.get("level") or "").strip().lower()
-    expected_level = _level_from_score(score)
-    if level_raw not in ("high", "medium", "low"):
-        # rubric §4.1 硬约束：score 与 level 必须落到同一档；如果 LLM 漏写 level，按 score 推断
-        logger.info("LLM 输出 level=%r 非法，按 score=%d 推断为 %s", level_raw, score, expected_level)
-        level = expected_level
-    elif level_raw != expected_level:
-        # 档位不一致 → 强制对齐 score（rubric §4.1 第 3 条）
-        logger.info(
-            "LLM score=%d 与 level=%s 档位不一致（应为 %s），按 score 推断",
-            score, level_raw, expected_level,
-        )
-        level = expected_level
-    else:
-        level = level_raw
-
-    reason = str(parsed.get("reason") or "").strip()[:200]
-    if not reason:
-        raise ScoreLLMError("LLM 输出 reason 为空（rubric §4.1 不允许）")
-
-    evidence_ref_ids: List[str] = []
-    if require_evidence or scenes:
-        scene_no_to_id = {sc.scene_no: sc.id for sc in scenes if sc.id and sc.scene_no}
-        raw_evidence = parsed.get("evidence_scene_nos", [])
-        if isinstance(raw_evidence, list):
-            for sno in raw_evidence:
-                sid = scene_no_to_id.get(str(sno).strip())
-                if sid and sid not in evidence_ref_ids:
-                    evidence_ref_ids.append(sid)
-                elif sno:
-                    logger.info("LLM 给的 evidence_scene_no=%r 不在输入场号集，丢弃", sno)
-
-    return ScoreOutput(
-        score=score,
-        level=level,
-        reason=reason,
-        evidence_ref_ids=evidence_ref_ids,
-    )
-
-
-def _level_from_score(score: int) -> str:
-    if score >= 6:
-        return "high"
-    if score >= 3:
-        return "medium"
-    return "low"

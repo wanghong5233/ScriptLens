@@ -20,7 +20,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import List, Optional
 
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.risk_terms import (
     HIGH_RISK_TERMS,
     LOW_RISK_TERMS,
@@ -178,7 +178,10 @@ async def _judge_one(rec: _Record, caller: LlmCaller) -> Optional[RiskHit]:
         text=text,
     )
     try:
-        resp = await caller.call_json(prompt, tier=ModelTier.MINI, temperature=0, max_tokens=128)
+        resp = await caller.call_json(
+            prompt, tier=ModelTier.MINI, temperature=0,
+            max_tokens=TokenBudget.RISK_CONFIRM,
+        )
     except ScoreLLMError as e:
         logger.warning("risk judge failed scene_no=%s term=%s: %s", rec.scene.scene_no, rec.matched_term, e)
         # 二级判定失败 → 保守起见保留为「未确认」，不算入正式分级
