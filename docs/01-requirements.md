@@ -57,7 +57,7 @@ ScriptLens 是面向**短剧选品 / 编剧统筹 / 平台审核**的爆款短�
 | Q2 | 5 个决策维度各打几分？依据是什么？ | scorecard，每条带 `evidence_ref_ids` |
 | Q3 | 某个判断的原文依据是什么？（追问） | Agent 多轮，回答必须带证据片段 |
 | Q4 | 哪 1-2 个低分段最值得改？怎么改？ | 改写工具输出原文 + 改写版 + diff + 解释 |
-| Q5 | 不同岗位关心什么？ | 视角切换：选品 / 编剧 / 审核 三套优先级（前端纯重排，不重生成报告） |
+| Q5 | 不同岗位关心什么？ | 「行动」segment 同时呈现三张 Persona Action Card（选品 / 编剧 / 审核），每张卡 = 一句话结论 + 优先证据 ≤3 + Next Action ≤3，详见 [`09-action-lens.md`](09-action-lens.md) |
 
 Q1–Q4 是 MVP 必做，Q5 是加分项。
 
@@ -131,7 +131,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 }
 ```
 
-视角切换不重新生成报告，只是基于上述 schema 重排 `scorecard` / `must_read_scene_ids` 优先级。
+视角切换由「行动」segment 的三张 Persona Action Card 实装；`scorecard` / `must_read_scene_ids` 在底层契约里顺序固定，不按角色重排（详见 [`09-action-lens.md`](09-action-lens.md)）。
 
 **v3 扩展字段**（`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` / `evaluation`）契约见 [`05-report-architecture.md §5`](05-report-architecture.md#5-数据契约)；本节是 v1 基线契约，过渡期内 `scorecard` 与 `evaluation.dimensions` 同源。
 
@@ -147,7 +147,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 | 多轮追问 | `POST /api/scripts/{id}/chat`，SSE 流式 + `Last-Event-ID` 重连。后端走 ReAct Agent（`app/agent_runtime/` 子包，in-process 调用，不起独立微服务），工具栈含 RAG / 评分 / 改写 / **联网检索（web_search）**；Agent 调用 web_search 的边界与 query 模式见 [`00-reuse-matrix.md §5.1`](00-reuse-matrix.md#51-web_search_tool-短剧场景调用边界) |
 | 证据高亮 | 报告中 `evidence_ref_ids` → 前端跳转左侧原文 + 高亮场景 |
 | 改写片段 | `POST /api/scripts/{id}/rewrite` 带 `target_dimension` |
-| 视角切换 | `GET /api/scripts/{id}/view?role=selection\|writer\|review`（前端纯重排） |
+| 视角切换 | `GET /api/scripts/{id}/view`（无 `?role=` 参数）；前端「行动」segment 派生三张 Persona Action Card（选品 / 编剧 / 审核），契约见 [`09-action-lens.md`](09-action-lens.md) |
 | 反馈 / 修正 | `POST /api/scripts/{id}/feedback` 带 `scope`（general / dimension / rewrite / scene）+ `scope_ref` + `message`，写入 `script_feedback` 表，下次 chat 自动注入 prompt |
 
 ## 9. 边界与失效场景
@@ -181,7 +181,8 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 - 不做剧本市场数据库对标
 - 不做多用户协作权限
 - 不做完整账号体系（沿用 `testuser` demo-entry 即可）
-- 不做 6 个用户角色全套视角，只做 3 个
+- 不做 6 个用户角色全套视角，只做 3 个 Persona Action Card（选品 / 编剧 / 审核）
+- 不做全局视角 tab / 视角重排报告（数据 lens 假象，详见 [`09-action-lens.md §3`](09-action-lens.md)）
 - 不做 3 套时间预算分层（30s / 3min / 10min），单层报告 + 可下钻就够
 - 不做完整 skill 调度库 / RL 训练 pipeline / reward model（仅 §10 P3 的轻量反馈注入）
 - 不做老 `.doc` 二进制解析（提示用户另存为 docx）
@@ -195,7 +196,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 - [ ] 用户可点击任一证据，左侧原文高亮跳转到对应场景
 - [ ] 用户可多轮追问，Agent 回答必须引用原文
 - [ ] 用户可对任一低分维度请求改写，输出原文 + 改写版 + diff
-- [ ] 至少支持 3 种视角（选品 / 编剧 / 审核）的优先级重排
+- [ ] 「行动」segment 同时呈现选品 / 编剧 / 审核三张 Persona Action Card，每张卡含一句话结论 + 优先证据 + Next Action（详见 [`09-action-lens.md`](09-action-lens.md)）
 - [ ] 用户可在报告 / 维度 / 改写 / 场景任一处提交反馈，下一次 chat Agent 能感知该反馈并据此调整回答
 
 加分（按 §10 优先级）：

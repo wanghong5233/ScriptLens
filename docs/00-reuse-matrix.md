@@ -27,7 +27,7 @@ ScriptLens 逐项审视后，**这些拆分理由全部不成立**：
 - 短剧专用 segmenter（识别第N集 / 场号 / 角色对白）
 - 短剧报告 schema + 5 个评分维度的 prompt
 - 4 个剧本专属 ReAct 工具（评分 / 定位 / 角色 / 改写），与既有的 `web_search_tool` + `reply_to_user_tool` 共 6 个工具组成 ScriptLens Agent **实际工具栈**（详见 §5.2）
-- 视角切换重排（`view_rt`，前端纯重排不重生成）
+- `view_rt`：返回 `ReportPayload` 全字段（不接受 `?role=`），视角由前端「行动」segment 派生 Persona Action Card（[`09-action-lens.md`](09-action-lens.md)）
 - 用户反馈机制（`feedback_rt` + `feedback_service` + `script_feedback` 表，下次 chat 注入）
 - 前端的「场景树 + 证据高亮 + 反馈按钮」交互
 - 评估脚本（`eval/run_eval.py`：证据召回率 + 维度分一致性）
@@ -73,7 +73,7 @@ ScholarMind `app_main.py` 注册的 10 个 router：
 | `internal_rt` | 微服务间调用 | ⚠️ 全拷但 MVP 不挂载 | 单服务架构下无跨进程调用；代码保留以备未来拆服务 |
 | `history_rt` | 消息历史 | ✅ 拷 | 不动 |
 | `config_rt` | 前端读配置 | ✅ 拷 | 删与短剧无关的 flag |
-| `view_rt`（**自建**） | 视角切换排序 | ✅ 新建 | `GET /api/scripts/{id}/view?role=selection\|writer\|review`，前端拉取重排后的 scorecard / must_read（不重生成报告） |
+| `view_rt`（**自建**） | 报告视图 + Persona Action Card 数据源 | ✅ 新建 | `GET /api/scripts/{id}/view`（无 `?role=` 参数），返回 `ReportPayload` 全字段；视角由前端「行动」segment 派生（[`09-action-lens.md`](09-action-lens.md)） |
 | `feedback_rt`（**自建**） | 用户反馈记录 | ✅ 新建 | `POST /api/scripts/{id}/feedback` → 写 `script_feedback` 表（按 scope 标记），下次 chat 注入 prompt |
 | `admin_rt` / `gateway_rt` / `debug_rt` | 管理 / 网关 / 调试 | ❌ MVP 不要 | — |
 
@@ -311,7 +311,7 @@ D2-5/D2-6 进行中：
 - [ ] **D2-6a**：`POST /api/scripts/{id}/chat` SSE，in-process 调 `agent_runtime.service.agent_service`，复用 `sessions` / `messages` 表，`surface='script'`
 - [ ] **D2-6b**：`POST /api/scripts/{id}/rewrite`，单步调 `propose_rewrite_tool`
 - [ ] **D2-6c**：`POST /api/scripts/{id}/feedback` + `feedback_service` + chat prompt 注入
-- [ ] **D2-6d**：`GET /api/scripts/{id}/view?role=...`（后端纯重排，不调 LLM）
+- [ ] **D2-6d**：`GET /api/scripts/{id}/view`（无 `?role=`，返回 ReportPayload 全字段，前端「行动」segment 派生 Persona Action Card）
 
 ### D3 —— 前端 + 部署 + README
 

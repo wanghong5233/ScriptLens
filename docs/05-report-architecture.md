@@ -177,7 +177,7 @@ ReportPayload (v3) {
 | **人物** | `character_graph` 完整（force-directed） | 5 分钟读懂人物 | 点节点 → 编辑器跳首场；点边 → 看共现场列表 |
 | **评估** | `evaluation` + `evidence_refs` | 验证 + 行动 | 点证据跳原文；点改写候选派 Agent |
 
-`role` 视角切换（选品 / 编剧 / 审核）只在 segment 内部重排，不重生成报告（PRD §7 不变式）。
+视角切换由 segment「行动」的三张 Persona Action Card 实装，`scorecard` 与 `must_read_scene_ids` 不按角色重排（详见 [`09-action-lens.md`](09-action-lens.md)）。
 
 ## 7. 可逆性
 
