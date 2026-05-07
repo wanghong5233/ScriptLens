@@ -513,7 +513,8 @@ class FeedbackListResponse(BaseModel):
 # ============================================================
 
 
-ViewRole = Literal["selection", "writer", "review"]
+# ViewRole 已移除：视角切换由前端「行动」segment 派生 Persona Action Card
+# （详见 docs/09-action-lens.md），ViewResponse 不再按角色重排。
 
 
 class RewriteSeed(BaseModel):
@@ -546,17 +547,16 @@ class RewriteTaskStatus(BaseModel):
 
 
 class ViewResponse(BaseModel):
-    """GET /api/scripts/{id}/view?role=... 响应。
+    """GET /api/scripts/{id}/view 响应。
 
-    不重生成评分，仅基于 reports.report_json 按 role 重排 scorecard 优先级
-    + 重选 must_read_scene_ids。报告未生成时返回 not_ready 兜底。
-
+    透传 reports.report_json 全字段（scorecard 顺序固定为五力声明序，不按角色重排）；
     rewrite_seeds / task_status 为派生字段（不进 reports.report_json 持久层），
     详见 docs/03-system-mental-model.md §6 §8。
+
+    视角由前端「行动」segment 派生 Persona Action Card，详见 docs/09-action-lens.md。
     """
 
     script_id: str
-    role: ViewRole
     decision: ReportDecision
     overall_score: Optional[float] = Field(
         None,
@@ -569,10 +569,6 @@ class ViewResponse(BaseModel):
     compliance: Optional[ReportCompliance] = None
     must_read_scene_ids: List[str]
     risk_flags: List[str]
-    role_focus: List[str] = Field(
-        default_factory=list,
-        description="该角色优先关注的维度（已排在 scorecard 前面）",
-    )
     evidence_refs: List[ReportEvidenceRef] = Field(
         default_factory=list,
         description=(

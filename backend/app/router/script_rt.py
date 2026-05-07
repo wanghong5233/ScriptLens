@@ -942,27 +942,20 @@ def revert_script_operation(
 @router.get(
     "/{script_id}/view",
     response_model=ViewResponse,
-    summary="按角色重排报告（selection/writer/review）",
+    summary="返回报告全字段（含派生 rewrite_seeds / task_status）",
     description=(
         "不重新生成评分。基于已生成的 reports.report_json："
-        "1) 按角色优先级重排 scorecard "
-        "2) 把该角色优先关注维度对应的 evidence_ref_ids 推到 must_read_scene_ids 头部 "
-        "3) 派生 rewrite_seeds（最值得改的 N 场）+ task_status（已尝试改写次数 / 状态）。"
-        "报告未生成时返回 409。"
+        "1) 透传 scorecard（顺序固定为五力声明序）+ must_read_scene_ids + 全部 evidence_refs "
+        "2) 派生 rewrite_seeds（最值得改的 N 场）+ task_status（已尝试改写次数 / 状态）。"
+        "视角切换由前端「行动」segment 派生 Persona Action Card（详见 docs/09-action-lens.md），"
+        "本接口不接受 role 参数、不按角色重排。报告未生成时返回 409。"
     ),
 )
 def get_script_view(
     script_id: str,
-    role: str,
     current_user: User = Depends(get_current_user),
 ) -> ViewResponse:
     from service import script_view_service  # noqa: PLC0415  局部 import 与同模块其他 service 一致
-
-    if not script_view_service.is_role_supported(role):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"非法 role={role}；可选：{script_view_service.supported_roles()}",
-        )
 
     try:
         s_status, _ = get_script_status(script_id=script_id, user_id=current_user.id)
@@ -986,6 +979,5 @@ def get_script_view(
     return script_view_service.build_view(
         script_id=script_id,
         user_id=current_user.id,
-        role=role,
         report=report,
     )
