@@ -102,9 +102,12 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: Optional[str] = "https://api.openai.com/v1"
 
     # 模型名称
-    DASHSCOPE_MODEL_NAME: str = "qwen3-max"
+    # qwen-max-latest = 阿里官方"始终指向最新最强 qwen-max"的别名，避免版本号迁移成本
+    # （详见 docs/08-evaluation-framework.md §6.2）。短剧分析对 reasoning 强度敏感，
+    # 弱化模型（qwen-turbo / qwen-plus）已从 candidate 中移除。
+    DASHSCOPE_MODEL_NAME: str = "qwen-max-latest"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
-    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-plus,qwen3-max,qwen-max,qwen-turbo,qwen-vl-max,qwen-vl-plus"
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-max-latest,qwen-max,qwen3-max"
     OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-5,gpt-5-mini,gpt-4.1,gpt-4o"
     # 按任务拆分模型（为空时回退到 DASHSCOPE_MODEL_NAME / OPENAI_MODEL_NAME）
     SM_LLM_MODEL_ANSWER: Optional[str] = None

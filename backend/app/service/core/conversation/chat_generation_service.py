@@ -598,6 +598,7 @@ class ChatGenerationService:
             "gpt-5.1": 400000,
             "gpt-5.2": 400000,
             "gpt-3.5-turbo": 16000,
+            "qwen-max-latest": 200000,
             "qwen-plus": 200000,
             "qwen2.5-plus": 200000,
             "qwen3-max": 200000,

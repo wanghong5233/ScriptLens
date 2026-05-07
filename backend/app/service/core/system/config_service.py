@@ -325,6 +325,7 @@ class ConfigService:
     @staticmethod
     def _context_window_hint(model_name: str) -> int | None:
         hints = {
+            "qwen-max-latest": 200000,
             "qwen-plus": 200000,
             "qwen3-max": 200000,
             "qwen-max": 200000,

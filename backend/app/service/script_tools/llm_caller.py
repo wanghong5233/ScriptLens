@@ -186,11 +186,14 @@ def _resolve_capability(model: str) -> ModelCapability:
 
 
 class ModelTier:
-    """逻辑档位 → 真实 model name 解析；env 改一次到处生效。"""
+    """逻辑档位 → 真实 model name 解析；env 改一次到处生效。
 
-    # 评分主模型（5 维档位锚点判定）
+    DashScope 兜底统一用 `qwen-max-latest` 别名（阿里官方"始终指向最新最强 qwen-max"），
+    避免版本号在升级时迁移成本。短剧分析对 reasoning 强度敏感，
+    弱化模型（qwen-turbo / qwen-plus）已从 fallback 中移除（详见 docs/08-evaluation-framework.md §6.2）。
+    """
+
     PRIMARY = "primary"
-    # 高频小任务（关键词命中后的二级过滤）
     MINI = "mini"
 
     @staticmethod
@@ -199,10 +202,81 @@ class ModelTier:
             if tier == ModelTier.MINI:
                 return getattr(settings, "OPENAI_MINI_MODEL_NAME", None) or "gpt-5-mini"
             return settings.OPENAI_MODEL_NAME or "gpt-5.2"
-        # dashscope
         if tier == ModelTier.MINI:
-            return getattr(settings, "SM_LLM_MODEL_AUX", None) or "qwen-turbo"
-        return settings.DASHSCOPE_MODEL_NAME or "qwen3-max"
+            return getattr(settings, "SM_LLM_MODEL_AUX", None) or "qwen-max-latest"
+        return settings.DASHSCOPE_MODEL_NAME or "qwen-max-latest"
+
+
+# ============================================================
+# Token 预算表（docs/08-evaluation-framework.md §6）
+# ============================================================
+#
+# 第一性原理：max_tokens（在本层语义为「调用方想要的 content tokens 预算」）
+# 必须按输出 JSON schema 推导，不写魔法数字。
+#
+# 推导公式：budget = ceil_to_pow2(field_count × avg_field_tokens × safety_factor)
+#   - field_count：JSON 输出字段数
+#   - avg_field_tokens：单字段平均 token（中文 ≈ 1.5 字符 / token）
+#   - safety_factor = 1.5-2.0（防 LLM 啰嗦）
+#   - ceil_to_pow2：向上对齐到 256/384/512/768/1024/1536/2048/2560/3072/4096
+#
+# 模型上限约束：DashScope qwen-max-latest 输出 cap 8K → 任何常量 ≤ 8192。
+# reasoning model 的 reasoning_token_overhead 由 capability 表自动加在上面，
+# 调用方仍然只传 content_budget，不需要预留 reasoning 预算。
+
+
+class TokenBudget:
+    """JSON 输出 token 预算常量表。每个值的计算依据见 docs/08-evaluation-framework.md §6.3。
+
+    使用约定：调用方需要新预算时，**先在本表加一行带计算依据的常量**，
+    不允许在调用点写 inline magic number。
+    """
+
+    # 4 字段（score + level + reason ≤80 字 + evidence_scene_nos ≤5 个）
+    # ≈ 280 token × 1.8 = 504 → 512
+    SCORE_DIMENSION = 512
+
+    # scene_nos 数组最多 24 项 × 8 字符 ≈ 240 token × 2.0 = 480 → 512
+    DECISION_FILTER = 512
+
+    # 3 字段（setup_count + is_ooc + rationale ≤80 字）
+    # ≈ 180 token × 2.0 = 360 → 384
+    DECISION_JUDGE = 384
+
+    # 2 字段（is_real_violation + rationale ≤60 字）
+    # ≈ 130 token × 2.0 = 260 → 256（已对齐 risk 二级判定的实测稳定区间）
+    RISK_CONFIRM = 256
+
+    # 4 字段（label + confidence + one_sentence_reason ≤60 字 + summary 3-5 句 ≤300 字）
+    # ≈ 600 token × 1.7 = 1020 → 1024
+    DECISION_AGGREGATE = 1024
+
+    # logline + recommendation + confidence + genre + core_value + 3 优 + 3 劣（8 段 × ≤80 字）
+    # ≈ 900 token × 1.7 = 1530 → 1536
+    COVERAGE_CARD = 1536
+
+    # 3 幕 × 6 节拍 × (type + summary ≤50 字 + anchor_scene_id)
+    # ≈ 1500 token × 1.7 = 2550 → 2560
+    BEAT_SHEET = 2560
+
+    # 12 节点 × (id + role + 3×30字) + 30 边 × (src + tgt + type + polarity + description ≤30字)
+    # ≈ 2500 token × 1.6 = 4000 → 4096
+    CHARACTER_GRAPH = 4096
+
+    # 单 batch 30 事件 × (scene_no + type + evidence ≤80 字)
+    # ≈ 1500 token × 1.7 = 2550 → 2560
+    REWARD_EXTRACT = 2560
+
+    # 8 场 × summary ≤90 字 ≈ 540 token × 1.9 = 1026 → 1024
+    SCENE_SUMMARY = 1024
+
+    # propose_rewrite_tool：rewritten_excerpt（≤500 字 ≈ 600 token）+ rationale（≤100 字 ≈ 80 token）
+    # ≈ 700 token × 1.7 = 1190 → 1536（短剧场景改写偶尔需要扩写，给 1.5K 留余量）
+    REWRITE_EXCERPT = 1536
+
+    # script_rag llm-pick：scene_ids 数组 top_k=10 × 36 字 UUID
+    # ≈ 250 token × 2.0 = 500 → 512（与 DECISION_FILTER 同形态：candidate 选 ID 数组）
+    RAG_PICK = 512
 
 
 # ============================================================

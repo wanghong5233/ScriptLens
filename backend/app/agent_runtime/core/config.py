@@ -17,8 +17,8 @@ class Settings(BaseSettings):
     # LLM 配置（使用和主API服务相同的环境变量名）
     DASHSCOPE_API_KEY: Optional[str] = None  # 从 .env 加载
     DASHSCOPE_BASE_URL: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    DASHSCOPE_MODEL_NAME: str = "qwen3-max"  # 基础模型（API 调用）
-    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-plus,qwen3-max,qwen-max,qwen-turbo"
+    DASHSCOPE_MODEL_NAME: str = "qwen-max-latest"  # 阿里官方别名，始终指向最新最强 qwen-max
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-max-latest,qwen-max,qwen3-max"
     DASHSCOPE_VISION_MODEL_NAME: str = "qwen-vl-max"  # 图片问答默认模型
     OPENAI_API_KEY: Optional[str] = None  # 可选：OpenAI API Key
     OPENAI_BASE_URL: str = "https://api.openai.com/v1"

@@ -118,7 +118,7 @@ class LLMClient:
         default_model = (
             getattr(settings, "OPENAI_MODEL_NAME", "gpt-5.2")
             if provider == "openai"
-            else getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen3-max")
+            else getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen-max-latest")
         )
         answer = getattr(settings, "SM_LLM_MODEL_ANSWER", None)
         aux = getattr(settings, "SM_LLM_MODEL_AUX", None)
@@ -158,7 +158,7 @@ class LLMClient:
             default_model = str(getattr(settings, "OPENAI_MODEL_NAME", "gpt-5.2") or "")
         elif provider == "dashscope":
             raw_candidates = self._split_csv(getattr(settings, "DASHSCOPE_MODEL_CANDIDATES", ""))
-            default_model = str(getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen3-max") or "")
+            default_model = str(getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen-max-latest") or "")
         else:
             return []
 
