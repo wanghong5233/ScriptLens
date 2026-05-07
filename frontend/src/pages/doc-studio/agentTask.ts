@@ -19,12 +19,14 @@ import type * as Monaco from 'monaco-editor'
 
 export type AgentTaskKind = 'evidence_lookup' | 'rewrite_seed' | 'dim_inquiry'
 
+// 阅文五力（docs/08-evaluation-framework.md §3）；compliance 独立合规审核，不进 scorecard
 export type DimensionKey =
-  | 'opening_hook'
-  | 'reward_density'
-  | 'motivation'
+  | 'story'
+  | 'character'
+  | 'concept'
+  | 'emotion'
   | 'pacing'
-  | 'risk'
+export type ComplianceKey = 'compliance'
 
 export interface EvidenceLookupTask {
   kind: 'evidence_lookup'
@@ -48,7 +50,8 @@ export interface RewriteSeedTask {
 
 export interface DimInquiryTask {
   kind: 'dim_inquiry'
-  dimension: DimensionKey
+  // 五力 + compliance：用户可以对任何报告卡片询问 Agent
+  dimension: DimensionKey | ComplianceKey
   current_score: number | null
 }
 
@@ -86,12 +89,13 @@ export function decodeTaskParam(param: string): AgentTask | null {
 // 维度中文标签（与 report rail / report 页保持同步）
 // ============================================================
 
-const DIM_LABEL: Record<DimensionKey, string> = {
-  opening_hook: '开场钩子',
-  reward_density: '爽点密度',
-  motivation: '动机自洽',
-  pacing: '节奏控制',
-  risk: '审核风险',
+const DIM_LABEL: Record<DimensionKey | ComplianceKey, string> = {
+  story: '故事力',
+  character: '人物力',
+  concept: '题材力',
+  emotion: '情感力',
+  pacing: '叙事力',
+  compliance: '合规审核',
 }
 
 // ============================================================

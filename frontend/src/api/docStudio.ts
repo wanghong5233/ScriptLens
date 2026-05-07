@@ -86,30 +86,32 @@ type ScriptUploadResponseDTO = {
 // Report DTO（与 backend/app/schemas/script.py ReportPayload 对齐）
 // ============================================================
 
+// 阅文五力（docs/08-evaluation-framework.md §3）；compliance 独立见 ComplianceDTO
 export type DimensionKey =
-  | 'opening_hook'
-  | 'reward_density'
-  | 'motivation'
+  | 'story'
+  | 'character'
+  | 'concept'
+  | 'emotion'
   | 'pacing'
-  | 'risk'
 
-// 与 backend schemas/script.py 的 DimensionLevel 对齐（含 risk 4 档 + 通用 3 档）
-// rubric §6 失败模式：证据不足时 score / level 都为 null
-export type ScoreLevel =
-  | 'high'
-  | 'medium'
-  | 'low'
-  | 'clean'
-  | 'high_risk'
-  | 'medium_risk'
-  | 'low_risk'
-  | 'minor'
-  | 'major'
+// 五力评分档位（合规审核 4 档另见 ComplianceLevel）
+export type ScoreLevel = 'high' | 'medium' | 'low'
 
 export interface ScorecardItemDTO {
   dimension: DimensionKey
   score: number | null
   level: ScoreLevel | null
+  reason: string
+  evidence_ref_ids: string[]
+}
+
+// 合规审核独立字段（不进 scorecard，不计入 overall_score）
+export type ComplianceLevel = 'high_risk' | 'medium_risk' | 'low_risk' | 'clean'
+
+export interface ComplianceDTO {
+  dimension: 'compliance'
+  score: number | null
+  level: ComplianceLevel | null
   reason: string
   evidence_ref_ids: string[]
 }
@@ -303,7 +305,10 @@ export interface ReportPayloadDTO {
   overall_score?: number | null
   summary?: string
   must_read_scene_ids: string[]
+  /** 阅文五力评分（docs/08-evaluation-framework.md §3） */
   scorecard: ScorecardItemDTO[]
+  /** 合规审核独立字段（docs/08 §4），不进 scorecard 不计入 overall_score */
+  compliance?: ComplianceDTO | null
   evidence_refs: EvidenceRefDTO[]
   /** 主要看点 / 钩子 / 反转 / 爽点列表（与 reward_events 同源，前端按 type 分组渲染） */
   highlights?: HighlightDTO[]
@@ -315,7 +320,7 @@ export interface ReportPayloadDTO {
   character_graph?: CharacterGraphDTO | null
   /** v3 故事：每集事件密度 + 情感弧 */
   pacing_curve?: PacingCurvePointDTO[]
-  /** v3 评估：5 维评分 + 风险 + 改写候选 */
+  /** v3 评估：五力评分 + 改写候选 */
   evaluation?: EvaluationPayloadDTO | null
   risk_flags: RiskFlagDTO[]
   report_id?: string
@@ -1191,6 +1196,8 @@ export interface ScriptViewResponseDTO {
   overall_score: number | null
   summary: string
   scorecard: ScorecardItemDTO[]
+  /** 合规审核独立字段（透传自 ReportPayload.compliance） */
+  compliance?: ComplianceDTO | null
   must_read_scene_ids: string[]
   risk_flags: RiskFlagDTO[]
   role_focus: string[]
@@ -1243,12 +1250,13 @@ export async function fetchScriptDetail(
 // Rewrite（场景改写：同步接口，返回 original / rewritten / diff）
 // ============================================================
 
+// 改写聚焦维度（阅文五力，docs/08 §3）；合规违规不通过 LLM 改写，不在此枚举
 export type RewriteDimension =
-  | 'opening_hook'
-  | 'reward_density'
-  | 'motivation'
+  | 'story'
+  | 'character'
+  | 'concept'
+  | 'emotion'
   | 'pacing'
-  | 'risk'
 
 export interface RewriteRequestPayload {
   scene_id: string

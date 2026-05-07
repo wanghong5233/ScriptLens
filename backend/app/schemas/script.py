@@ -123,10 +123,12 @@ class ReportProgressResponse(BaseModel):
 # ============================================================
 
 
-DimensionName = Literal["opening_hook", "reward_density", "motivation", "pacing", "risk"]
+# 阅文五力（docs/08-evaluation-framework.md §3）；compliance 独立成 ReportPayload.compliance
+DimensionName = Literal["story", "character", "concept", "emotion", "pacing"]
 DecisionLabel = Literal["recommend_continue", "cautious_continue", "not_recommended"]
 ConfidenceLevel = Literal["high", "medium", "low"]
-DimensionLevel = Literal["high", "medium", "low", "high_risk", "medium_risk", "low_risk", "clean"]
+DimensionLevel = Literal["high", "medium", "low"]
+ComplianceLevel = Literal["high_risk", "medium_risk", "low_risk", "clean"]
 
 
 class ReportDecision(BaseModel):
@@ -139,9 +141,9 @@ class ReportDecision(BaseModel):
 
 
 class ReportScorecardItem(BaseModel):
-    """5 维 scorecard 的一项。
+    """阅文五力 scorecard 的一项（docs/08-evaluation-framework.md §3）。
 
-    rubric §6 失败模式：LLM 二次未给出 evidence → score=null/level=null/reason="证据不足"。
+    失败模式：上游信号缺失 → score=null/level=null/reason 写明缺什么。
     前端展示规则：score 为 null 时不画分数条，只显示 reason。
     """
 
@@ -150,13 +152,27 @@ class ReportScorecardItem(BaseModel):
         None,
         ge=0,
         le=10,
-        description="0-10；rubric §6 证据不足或维度不可评时为 null（不能伪造默认值）",
+        description="0-10；上游信号缺失或维度不可评时为 null（不能伪造默认值）",
     )
     level: Optional[DimensionLevel] = Field(
         None,
-        description="档位；score=null 时同步为 null",
+        description="档位 high/medium/low；score=null 时同步为 null",
     )
     reason: str
+    evidence_ref_ids: List[str] = Field(default_factory=list)
+
+
+class ReportCompliance(BaseModel):
+    """合规审核单独字段（docs/08-evaluation-framework.md §4）。
+
+    与五力 scorecard 平级、独立展示；不计入 overall_score。
+    high_risk 时强制 decision label = not_recommended（在 service 层硬约束，不通过分数透传）。
+    """
+
+    dimension: Literal["compliance"] = "compliance"
+    score: Optional[int] = Field(None, ge=0, le=10)
+    level: Optional[ComplianceLevel] = None
+    reason: str = ""
     evidence_ref_ids: List[str] = Field(default_factory=list)
 
 
@@ -343,6 +359,13 @@ class ReportPayload(BaseModel):
         description="evidence_refs.id 列表（最多 3 个），不是 scene_id",
     )
     scorecard: List[ReportScorecardItem]
+    compliance: Optional[ReportCompliance] = Field(
+        None,
+        description=(
+            "合规审核（docs/08-evaluation-framework.md §4），与五力 scorecard 平级独立。"
+            "前端在右栏单独的「合规审核」面板展示；不参与 overall_score。"
+        ),
+    )
     evidence_refs: List[ReportEvidenceRef] = Field(default_factory=list)
     highlights: List[ReportHighlight] = Field(
         default_factory=list,
@@ -435,8 +458,8 @@ class RewriteRequest(BaseModel):
 
     scene_id: str = Field(..., description="目标场景 ID（来自 /scenes 列表）")
     target_dimension: Literal[
-        "opening_hook", "reward_density", "motivation", "pacing", "risk"
-    ] = Field(..., description="改写聚焦维度")
+        "story", "character", "concept", "emotion", "pacing"
+    ] = Field(..., description="改写聚焦维度（阅文五力）")
     issue: str = Field(..., min_length=1, max_length=500, description="问题描述（如'动机不成立'）")
 
 
@@ -543,6 +566,7 @@ class ViewResponse(BaseModel):
     )
     summary: str
     scorecard: List[ReportScorecardItem]
+    compliance: Optional[ReportCompliance] = None
     must_read_scene_ids: List[str]
     risk_flags: List[str]
     role_focus: List[str] = Field(
@@ -568,8 +592,9 @@ class ViewResponse(BaseModel):
     rewrite_seeds: List[RewriteSeed] = Field(
         default_factory=list,
         description=(
-            "派生：从 score<7 / *_risk / major 维度的第一条 evidence 派生的改写候选，"
+            "派生：从 score<7 的五力维度第一条 evidence 派生的改写候选，"
             "前端在报告里渲染「最值得改的 N 场」卡组，点击后 dispatchTask({kind:'rewrite_seed'})。"
+            "合规违规不进改写候选（合规问题需人工二次审核，不交给 LLM 改写）。"
         ),
     )
     task_status: Dict[str, RewriteTaskStatus] = Field(
