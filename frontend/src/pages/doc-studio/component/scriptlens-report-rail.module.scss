@@ -70,23 +70,6 @@
     flex-shrink: 0;
   }
 
-  .roleSwitch {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    padding: 8px 10px;
-    background: #FFFCF8;
-    border: 1px solid #F1ECE7;
-    border-radius: 10px;
-  }
-
-  .roleHint {
-    font-size: 11.5px;
-    color: #9C8E89;
-    line-height: 1.45;
-    padding: 0 2px;
-  }
-
   // ==================== 顶部：决策卡（醒目层） ====================
   .headlineCard {
     background: linear-gradient(135deg, #FBF7F3 0%, #F8F1EB 100%);
@@ -133,9 +116,132 @@
   .scorecardSection,
   .mustReadSection,
   .seedsSection,
-  .riskSection {
+  .riskSection,
+  .actionSegment {
     padding: 12px 0 4px;
     border-top: 1px dashed #EFE8E2;
+  }
+
+  // ==================== 行动 segment：3 张 Persona Action Card ====================
+  // 详见 docs/09-action-lens.md §4
+  .actionCard {
+    background: #FFFCF8;
+    border: 1px solid #ECE0D6;
+    border-radius: 12px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .actionCardHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  .actionCardTitle {
+    font-size: 13.5px;
+    color: #3F3835;
+    line-height: 1.4;
+  }
+
+  .actionCardBadge {
+    font-size: 12px;
+    font-weight: 500;
+    padding: 2px 10px;
+    margin: 0;
+    border-radius: 6px;
+  }
+
+  .actionCardVerdict {
+    font-size: 14.5px;
+    font-weight: 600;
+    color: #2F2A26;
+    line-height: 1.5;
+  }
+
+  .actionCardReason {
+    font-size: 12.5px !important;
+    color: #6B5F58 !important;
+    line-height: 1.55 !important;
+    margin: 0 !important;
+  }
+
+  .actionCardEvidence {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 0 4px;
+    border-top: 1px dashed #F1ECE7;
+  }
+
+  .actionCardEvidenceLabel {
+    font-size: 11.5px;
+    color: #B0A39E;
+  }
+
+  .actionCardEvidenceItem {
+    appearance: none;
+    width: 100%;
+    text-align: left;
+    background: #FAF5F0;
+    border: 1px solid #F1ECE7;
+    border-radius: 8px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+
+    &:hover {
+      background: #F4ECE3;
+      border-color: #E5D6C8;
+    }
+  }
+
+  .actionCardEvidenceItemActive {
+    background: #F0E2D2 !important;
+    border-color: #D8B89B !important;
+  }
+
+  .actionCardEvidenceMeta {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .actionCardEvidenceLocator {
+    font-size: 11.5px;
+    color: #6B5F58;
+  }
+
+  .actionCardEvidenceCaption {
+    font-size: 12.5px;
+    color: #4A4137;
+    line-height: 1.5;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  .actionCardHint {
+    padding: 6px 0 4px;
+    border-top: 1px dashed #F1ECE7;
+  }
+
+  .actionCardHintText {
+    font-size: 11.5px;
+    color: #9C8E89;
+    line-height: 1.5;
+  }
+
+  .actionCardActions {
+    margin-top: 4px;
   }
 
   .sectionHeader {

@@ -1157,10 +1157,9 @@ export async function fetchScriptReportProgress(
 }
 
 // ============================================================
-// View（按角色重排报告）—— PRD §三-4)「不同视角」
+// View：返回报告全字段（含派生 rewrite_seeds / task_status）
+// 视角切换由前端「行动」segment 派生 Persona Action Card（详见 docs/09-action-lens.md）
 // ============================================================
-
-export type ScriptViewRole = 'selection' | 'writer' | 'review'
 
 /**
  * 改写候选种子（任务派发器入口）。
@@ -1191,7 +1190,6 @@ export interface RewriteTaskStatusDTO {
 
 export interface ScriptViewResponseDTO {
   script_id: string
-  role: ScriptViewRole
   decision: DecisionCardDTO
   overall_score: number | null
   summary: string
@@ -1200,7 +1198,6 @@ export interface ScriptViewResponseDTO {
   compliance?: ComplianceDTO | null
   must_read_scene_ids: string[]
   risk_flags: RiskFlagDTO[]
-  role_focus: string[]
   evidence_refs: EvidenceRefDTO[]
   /** 主要看点 / 钩子 / 反转 / 爽点列表（透传自 ReportPayload.highlights） */
   highlights?: HighlightDTO[]
@@ -1222,15 +1219,11 @@ export interface ScriptViewResponseDTO {
 
 export async function fetchScriptView(
   scriptId: string,
-  role: ScriptViewRole,
   options?: AxiosRequestConfig,
 ): Promise<ScriptViewResponseDTO> {
   const { data } = await request.get<ScriptViewResponseDTO>(
     `/${scriptId}/view`,
-    withScripts({
-      ...(options ?? {}),
-      params: { role, ...(options?.params ?? {}) },
-    }),
+    withScripts(options),
   )
   return data
 }

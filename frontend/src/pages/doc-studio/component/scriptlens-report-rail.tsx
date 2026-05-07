@@ -8,7 +8,10 @@
  *       a) 溯源（evidence chip / 关键场景 / 看点条）→ 跳原文 + 双向持久高亮，**不派 Agent**
  *       b) 改写 / 追问（"让 Agent 改写" / 维度 search 按钮）→ 切 chat tab 派 AgentTask
  *
- * 数据源：fetchScriptView(role='selection')，view 包含派生的 rewrite_seeds + task_status。
+ * 数据源：fetchScriptView(scriptId)，view 包含派生的 rewrite_seeds + task_status。
+ *
+ * Segment 顺序：速览 → 故事 → 人物 → 评估 → 行动；视角切换由「行动」segment 的
+ * 三张 Persona Action Card（选品 / 编剧 / 审核）实装，详见 docs/09-action-lens.md。
  */
 
 import {
@@ -61,10 +64,9 @@ import {
   type RewriteSeedDTO,
   type RewriteTaskStatusDTO,
   type ScorecardItemDTO,
-  type ScriptViewRole,
   type ScriptViewResponseDTO,
 } from '@/api/docStudio'
-import { formatSceneLocator, type AgentTask } from '../agentTask'
+import { formatSceneLocator, type AgentTask, type DimensionKey } from '../agentTask'
 import ScriptlensReportProgress, {
   ProgressFallbackPanel,
 } from './scriptlens-report-progress'
@@ -202,19 +204,14 @@ interface Props {
 const VIEW_CACHE_TTL_MS = 60_000
 const viewCache = new Map<string, { view: ScriptViewResponseDTO; scriptTitle: string; cachedAt: number }>()
 
-const ROLE_OPTIONS: Array<{ label: string; value: ScriptViewRole; hint: string }> = [
-  { label: '选品视角', value: 'selection', hint: '先看能不能抓人、值不值得继续跟' },
-  { label: '编剧视角', value: 'writer', hint: '先看人物动机、结构节奏和可改写点' },
-  { label: '审核视角', value: 'review', hint: '先看风险、价值观红线和可优化表达' },
-]
-
-type ReportMode = 'overview' | 'story' | 'characters' | 'evaluation'
+type ReportMode = 'overview' | 'story' | 'characters' | 'evaluation' | 'action'
 
 const REPORT_MODE_OPTIONS: Array<{ label: string; value: ReportMode }> = [
   { label: '速览', value: 'overview' },
   { label: '故事', value: 'story' },
   { label: '人物', value: 'characters' },
   { label: '评估', value: 'evaluation' },
+  { label: '行动', value: 'action' },
 ]
 
 const SCRIPT_STATUS_LABELS: Record<string, string> = {
@@ -233,8 +230,8 @@ const SCRIPT_STATUS_PROGRESS: Record<string, number> = {
   failed: 100,
 }
 
-function cacheKey(scriptId: string, role: ScriptViewRole): string {
-  return `${scriptId}:${role}`
+function cacheKey(scriptId: string): string {
+  return scriptId
 }
 
 // ============================================================
@@ -249,9 +246,8 @@ export default function ScriptlensReportRail({
   onDispatchTask,
   onScriptDetailLoaded,
 }: Props) {
-  const [role, setRole] = useState<ScriptViewRole>('selection')
   const [state, setState] = useState<LoadState>(() => {
-    const cached = viewCache.get(cacheKey(scriptId, 'selection'))
+    const cached = viewCache.get(cacheKey(scriptId))
     if (cached && Date.now() - cached.cachedAt < VIEW_CACHE_TTL_MS) {
       return { phase: 'ready', view: cached.view, scriptTitle: cached.scriptTitle }
     }
@@ -277,9 +273,9 @@ export default function ScriptlensReportRail({
         return false
       }
       try {
-        const view = await fetchScriptView(scriptId, role, { errorToast: false })
+        const view = await fetchScriptView(scriptId, { errorToast: false })
         setState({ phase: 'ready', view, scriptTitle: detail.title })
-        viewCache.set(cacheKey(scriptId, role), { view, scriptTitle: detail.title, cachedAt: Date.now() })
+        viewCache.set(cacheKey(scriptId), { view, scriptTitle: detail.title, cachedAt: Date.now() })
         return true
       } catch (err: unknown) {
         const status = (err as { response?: { status?: number } })?.response?.status
@@ -298,11 +294,11 @@ export default function ScriptlensReportRail({
       })
       return true
     }
-  }, [scriptId, role, onScriptDetailLoaded])
+  }, [scriptId, onScriptDetailLoaded])
 
   useEffect(() => {
     let cancelled = false
-    const cached = viewCache.get(cacheKey(scriptId, role))
+    const cached = viewCache.get(cacheKey(scriptId))
     if (cached && Date.now() - cached.cachedAt < VIEW_CACHE_TTL_MS) {
       setState({ phase: 'ready', view: cached.view, scriptTitle: cached.scriptTitle })
     } else {
@@ -319,7 +315,7 @@ export default function ScriptlensReportRail({
       cancelled = true
       stopPolling()
     }
-  }, [scriptId, role, loadOnce, stopPolling])
+  }, [scriptId, loadOnce, stopPolling])
 
   // 重新诊断 == 上传后那条全链路重新跑一遍：清缓存 + 切到 no_report 阶段，
   // 让 ScriptlensReportProgress 接管，把 6 阶段实时进度面板替换掉旧报告。
@@ -329,10 +325,7 @@ export default function ScriptlensReportRail({
     setReanalyzing(true)
     try {
       await reanalyzeScript(scriptId)
-      // 清掉本剧本所有视角的缓存，避免轮询时 cache hit 又把旧报告闪回来
-      for (const r of ['selection', 'writer', 'review'] as ScriptViewRole[]) {
-        viewCache.delete(cacheKey(scriptId, r))
-      }
+      viewCache.delete(cacheKey(scriptId))
       // 关键：切到 no_report 阶段触发 <ScriptlensReportProgress>，与首次上传完全一致；
       // alreadyTriggered=true 让 progress 组件不要再 auto-trigger 一次造成竞态
       setState({ phase: 'no_report', alreadyTriggered: true })
@@ -439,8 +432,6 @@ export default function ScriptlensReportRail({
       reanalyzing={reanalyzing}
       onReanalyze={handleReanalyze}
       activeEvidenceId={activeEvidenceId}
-      role={role}
-      onRoleChange={setRole}
       onTraceEvidence={onTraceEvidence}
       onClearTrace={onClearTrace}
       onDispatchTask={onDispatchTask}
@@ -458,8 +449,6 @@ interface ReadyRailProps {
   reanalyzing: boolean
   onReanalyze: () => void
   activeEvidenceId: string | null
-  role: ScriptViewRole
-  onRoleChange: (role: ScriptViewRole) => void
   onTraceEvidence: Props['onTraceEvidence']
   onClearTrace: () => void
   onDispatchTask: (task: AgentTask) => void
@@ -471,8 +460,6 @@ function ReadyRail({
   reanalyzing,
   onReanalyze,
   activeEvidenceId,
-  role,
-  onRoleChange,
   onTraceEvidence,
   onClearTrace,
   onDispatchTask,
@@ -506,7 +493,6 @@ function ReadyRail({
   // 主要看点（按 type 分组渲染）
   const highlights = (view.highlights || []) as HighlightDTO[]
   const highlightsGrouped = useMemo(() => groupHighlights(highlights), [highlights])
-  const roleMeta = ROLE_OPTIONS.find((x) => x.value === role)
   const keySceneRefs = view.must_read_scene_ids
     .map((rid) => evidenceMap.get(rid))
     .filter((ref): ref is EvidenceRefDTO => Boolean(ref))
@@ -533,17 +519,6 @@ function ReadyRail({
             重新诊断
           </Button>
         </Tooltip>
-      </div>
-
-      <div className={styles.roleSwitch}>
-        <Segmented
-          size="small"
-          value={role}
-          options={ROLE_OPTIONS.map((item) => ({ label: item.label, value: item.value }))}
-          onChange={(next) => onRoleChange(next as ScriptViewRole)}
-          block
-        />
-        {roleMeta ? <div className={styles.roleHint}>{roleMeta.hint}</div> : null}
       </div>
 
       <div className={styles.headlineCard}>
@@ -737,6 +712,17 @@ function ReadyRail({
         </>
       ) : null}
 
+      {reportMode === 'action' ? (
+        <ActionSegment
+          view={view}
+          evidenceMap={evidenceMap}
+          activeEvidenceId={activeEvidenceId}
+          onTraceEvidence={onTraceEvidence}
+          onDispatchTask={onDispatchTask}
+          onSwitchMode={setReportMode}
+        />
+      ) : null}
+
       {/* 底部：清除高亮快捷入口（有 active 时才显示） */}
       {activeEvidenceId ? (
         <Button
@@ -751,6 +737,434 @@ function ReadyRail({
       ) : null}
     </div>
   )
+}
+
+// ============================================================
+// 行动 segment：3 张 Persona Action Card（详见 docs/09-action-lens.md §4）
+// 数据 100% derive 自 ViewResponse；视角切换由这里实装，不重排报告。
+// ============================================================
+
+const DECISION_VERDICT: Record<string, string> = {
+  recommend_continue: '建议立项 · 抓人',
+  cautious_continue: '审慎推进',
+  not_recommended: '不建议立项',
+}
+
+const COMPLIANCE_VERDICT: Record<string, string> = {
+  clean: '过审',
+  low_risk: '修改后过',
+  medium_risk: '修改后过 · 需复审',
+  high_risk: '退回 · 不建议立项',
+}
+
+const COMPLIANCE_VERDICT_COLOR: Record<string, string> = {
+  clean: 'green',
+  low_risk: 'gold',
+  medium_risk: 'orange',
+  high_risk: 'red',
+}
+
+interface ActionCardCommonProps {
+  view: ScriptViewResponseDTO
+  evidenceMap: Map<string, EvidenceRefDTO>
+  activeEvidenceId: string | null
+  onTraceEvidence: Props['onTraceEvidence']
+  onDispatchTask: (task: AgentTask) => void
+}
+
+interface ActionSegmentProps extends ActionCardCommonProps {
+  onSwitchMode: (mode: ReportMode) => void
+}
+
+function ActionSegment(props: ActionSegmentProps) {
+  return (
+    <div className={styles.actionSegment}>
+      <SectionHeader
+        title="行动 · 三角色同屏"
+        hint="基于报告 derived，三张卡同时呈现：每张卡 = 一句话结论 + 优先证据 + Next Action"
+      />
+      <Space direction="vertical" size={12} style={{ width: '100%', marginTop: 12 }}>
+        <SelectionActionCard {...props} />
+        <WriterActionCard {...props} />
+        <ReviewActionCard {...props} />
+      </Space>
+    </div>
+  )
+}
+
+interface ActionEvidenceItem {
+  dimension: string
+  score: number | null
+  ref: EvidenceRefDTO
+  caption: string
+}
+
+interface ActionItem {
+  label: string
+  type?: 'primary' | 'default'
+  onClick: () => void
+  disabled?: boolean
+}
+
+function ActionCardShell({
+  title,
+  badge,
+  badgeColor,
+  verdict,
+  reason,
+  evidence,
+  hint,
+  actions,
+  activeEvidenceId,
+  onTraceEvidence,
+}: {
+  title: string
+  badge: string
+  badgeColor: string
+  verdict: string
+  reason?: string | null
+  evidence: ActionEvidenceItem[]
+  hint?: React.ReactNode
+  actions: ActionItem[]
+  activeEvidenceId: string | null
+  onTraceEvidence: Props['onTraceEvidence']
+}) {
+  return (
+    <div className={styles.actionCard}>
+      <div className={styles.actionCardHeader}>
+        <Text strong className={styles.actionCardTitle}>{title}</Text>
+        <Tag color={badgeColor} className={styles.actionCardBadge}>{badge}</Tag>
+      </div>
+      <div className={styles.actionCardVerdict}>{verdict}</div>
+      {reason ? (
+        <Paragraph className={styles.actionCardReason}>{humanizeReportText(reason)}</Paragraph>
+      ) : null}
+      {evidence.length > 0 ? (
+        <div className={styles.actionCardEvidence}>
+          <Text type="secondary" className={styles.actionCardEvidenceLabel}>
+            优先证据 {evidence.length}
+          </Text>
+          <Space direction="vertical" size={6} style={{ width: '100%', marginTop: 4 }}>
+            {evidence.map((evi, i) => {
+              const active = activeEvidenceId === evi.ref.id
+              const locator = formatSceneLocator(
+                evi.ref.episode_no ?? null,
+                evi.ref.scene_no ?? null,
+                evi.ref.scene_label ?? null,
+              ) || evi.ref.scene_id.slice(0, 6)
+              return (
+                <button
+                  key={`${evi.dimension}:${evi.ref.id}:${i}`}
+                  type="button"
+                  className={`${styles.actionCardEvidenceItem} ${active ? styles.actionCardEvidenceItemActive : ''}`}
+                  onClick={() =>
+                    onTraceEvidence({
+                      evidenceRefId: evi.ref.id,
+                      sceneId: evi.ref.scene_id,
+                      startLine: evi.ref.start_line ?? null,
+                      endLine: evi.ref.end_line ?? null,
+                    })
+                  }
+                >
+                  <span className={styles.actionCardEvidenceMeta}>
+                    <Tag color={evi.score != null && evi.score < 5 ? 'red' : 'blue'} bordered={false}>
+                      {DIMENSION_LABELS[evi.dimension] || evi.dimension}
+                      {evi.score != null ? ` ${evi.score}/10` : ''}
+                    </Tag>
+                    <Text type="secondary" className={styles.actionCardEvidenceLocator}>{locator}</Text>
+                  </span>
+                  <span className={styles.actionCardEvidenceCaption}>
+                    {humanizeReportText(evi.caption)}
+                  </span>
+                </button>
+              )
+            })}
+          </Space>
+        </div>
+      ) : null}
+      {hint ? <div className={styles.actionCardHint}>{hint}</div> : null}
+      {actions.length > 0 ? (
+        <Space wrap size={6} className={styles.actionCardActions}>
+          {actions.map((a, i) => (
+            <Button
+              key={`${a.label}:${i}`}
+              size="small"
+              type={a.type ?? 'default'}
+              disabled={a.disabled}
+              onClick={a.onClick}
+              icon={a.type === 'primary' ? <ThunderboltOutlined /> : <SearchOutlined />}
+            >
+              {a.label}
+            </Button>
+          ))}
+        </Space>
+      ) : null}
+    </div>
+  )
+}
+
+function SelectionActionCard({
+  view,
+  evidenceMap,
+  activeEvidenceId,
+  onTraceEvidence,
+  onDispatchTask,
+}: ActionSegmentProps) {
+  const verdict = DECISION_VERDICT[view.decision.label] || view.decision.label
+  const decisionInfo = DECISION_LABEL[view.decision.label] || { text: view.decision.label, color: 'default' }
+
+  // 优先证据：按 concept → emotion → story 取每维 evidence_ref_ids[0]
+  const evidence = useMemo<ActionEvidenceItem[]>(() => {
+    const orders: DimensionKey[] = ['concept', 'emotion', 'story']
+    const out: ActionEvidenceItem[] = []
+    for (const dim of orders) {
+      const sc = view.scorecard.find((s) => s.dimension === dim)
+      if (!sc?.evidence_ref_ids?.length) continue
+      const ref = evidenceMap.get(sc.evidence_ref_ids[0])
+      if (!ref) continue
+      out.push({ dimension: dim, score: sc.score, ref, caption: sc.reason })
+    }
+    return out.slice(0, 3)
+  }, [view.scorecard, evidenceMap])
+
+  // 关键提示：题材徽章 + 综合分 + compliance（非 clean 时）
+  const hint = (
+    <Space size={4} wrap>
+      {(view.coverage_card?.genre || []).slice(0, 3).map((g) => (
+        <Tag key={g}>{g}</Tag>
+      ))}
+      {view.overall_score != null ? (
+        <Tag color="blue">综合 {view.overall_score.toFixed(1)}/10</Tag>
+      ) : null}
+      {view.compliance?.level && view.compliance.level !== 'clean' ? (
+        <Tag color={COMPLIANCE_VERDICT_COLOR[view.compliance.level]}>
+          合规 · {COMPLIANCE_VERDICT[view.compliance.level]}
+        </Tag>
+      ) : null}
+    </Space>
+  )
+
+  // 让 Agent 解释整体判断：用 dim_inquiry 把 lowest 维度作为追问目标
+  const lowest = useMemo(() => {
+    return [...view.scorecard]
+      .filter((s) => s.score != null)
+      .sort((a, b) => (a.score ?? 99) - (b.score ?? 99))[0]
+  }, [view.scorecard])
+
+  return (
+    <ActionCardShell
+      title="选品 · 签不签"
+      badge={decisionInfo.text}
+      badgeColor={decisionInfo.color}
+      verdict={verdict}
+      reason={view.decision.one_sentence_reason}
+      evidence={evidence}
+      hint={hint}
+      actions={[
+        {
+          label: lowest ? `追问 · ${DIMENSION_LABELS[lowest.dimension] || lowest.dimension}` : '追问 · 综合判断',
+          onClick: () =>
+            onDispatchTask({
+              kind: 'dim_inquiry',
+              dimension: (lowest?.dimension ?? 'concept') as DimensionKey,
+              current_score: lowest?.score ?? null,
+            }),
+        },
+      ]}
+      activeEvidenceId={activeEvidenceId}
+      onTraceEvidence={onTraceEvidence}
+    />
+  )
+}
+
+function WriterActionCard({
+  view,
+  evidenceMap,
+  activeEvidenceId,
+  onTraceEvidence,
+  onDispatchTask,
+  onSwitchMode,
+}: ActionSegmentProps) {
+  const seedCount = view.rewrite_seeds?.length || 0
+  const verdict =
+    seedCount >= 2
+      ? `${seedCount} 段建议重写`
+      : seedCount === 1
+        ? '1 段建议优化'
+        : '整体可保留 · 无紧急改写点'
+
+  const badge = seedCount >= 2 ? '高优' : seedCount === 1 ? '中优' : '低优'
+  const badgeColor = seedCount >= 2 ? 'red' : seedCount === 1 ? 'orange' : 'green'
+
+  // 优先证据：直接用 rewrite_seeds 派生
+  const evidence = useMemo<ActionEvidenceItem[]>(() => {
+    const out: ActionEvidenceItem[] = []
+    for (const seed of (view.rewrite_seeds || []).slice(0, 3)) {
+      const ref = evidenceMap.get(seed.evidence_ref_id)
+      if (!ref) continue
+      const sc = view.scorecard.find((s) => s.dimension === seed.dimension)
+      out.push({
+        dimension: seed.dimension,
+        score: sc?.score ?? null,
+        ref,
+        caption: seed.issue,
+      })
+    }
+    return out
+  }, [view.rewrite_seeds, view.scorecard, evidenceMap])
+
+  // OOC 警示：从 character 维度 reason 抽，无则降级
+  const characterReason = view.evaluation?.dimensions?.find((d) => d.key === 'character')?.reason
+  const hint = (
+    <Space size={4} wrap>
+      <Tag>{`改写候选 ${seedCount}`}</Tag>
+      {characterReason ? (
+        <Text type="secondary" className={styles.actionCardHintText}>
+          {humanizeReportText(_firstSentence(characterReason, 60))}
+        </Text>
+      ) : (
+        <Text type="secondary" className={styles.actionCardHintText}>主角动机弧光稳定</Text>
+      )}
+    </Space>
+  )
+
+  const firstSeed = view.rewrite_seeds?.[0]
+  const lowest = useMemo(() => {
+    return [...view.scorecard]
+      .filter((s) => s.score != null)
+      .sort((a, b) => (a.score ?? 99) - (b.score ?? 99))[0]
+  }, [view.scorecard])
+
+  const actions: ActionItem[] = []
+  if (firstSeed) {
+    actions.push({
+      label: `派改第一段 · ${formatSceneLocator(null, null, firstSeed.scene_label) || '低分段'}`,
+      type: 'primary',
+      onClick: () =>
+        onDispatchTask({
+          kind: 'rewrite_seed',
+          dimension: firstSeed.dimension,
+          scene_id: firstSeed.scene_id,
+          scene_label: firstSeed.scene_label ?? null,
+          issue: firstSeed.issue,
+          evidence_ref_id: firstSeed.evidence_ref_id,
+        }),
+    })
+  }
+  if (lowest) {
+    actions.push({
+      label: `追问 · ${DIMENSION_LABELS[lowest.dimension] || lowest.dimension} 怎么改`,
+      onClick: () =>
+        onDispatchTask({
+          kind: 'dim_inquiry',
+          dimension: lowest.dimension as DimensionKey,
+          current_score: lowest.score ?? null,
+        }),
+    })
+  }
+  actions.push({
+    label: '看完整节奏曲线',
+    onClick: () => onSwitchMode('story'),
+  })
+
+  return (
+    <ActionCardShell
+      title="编剧 · 改哪段"
+      badge={badge}
+      badgeColor={badgeColor}
+      verdict={verdict}
+      reason={null}
+      evidence={evidence}
+      hint={hint}
+      actions={actions}
+      activeEvidenceId={activeEvidenceId}
+      onTraceEvidence={onTraceEvidence}
+    />
+  )
+}
+
+function ReviewActionCard({
+  view,
+  evidenceMap,
+  activeEvidenceId,
+  onTraceEvidence,
+  onDispatchTask,
+  onSwitchMode,
+}: ActionSegmentProps) {
+  const compliance = view.compliance
+  const level = compliance?.level ?? null
+  const verdict = level ? COMPLIANCE_VERDICT[level] : '合规审核未运行'
+  const badge = level ? COMPLIANCE_VERDICT[level] : '未评估'
+  const badgeColor = level ? COMPLIANCE_VERDICT_COLOR[level] : 'default'
+
+  // 优先证据：compliance.evidence_ref_ids[:3]
+  const evidence = useMemo<ActionEvidenceItem[]>(() => {
+    const out: ActionEvidenceItem[] = []
+    for (const rid of (compliance?.evidence_ref_ids || []).slice(0, 3)) {
+      const ref = evidenceMap.get(rid)
+      if (!ref) continue
+      out.push({
+        dimension: 'compliance',
+        score: compliance?.score ?? null,
+        ref,
+        caption: ref.quote || ref.scene_label || '',
+      })
+    }
+    return out
+  }, [compliance, evidenceMap])
+
+  const hint = (
+    <Space size={4} wrap>
+      {compliance?.score != null ? <Tag color="blue">合规分 {compliance.score}/10</Tag> : null}
+      <Tag>{`红线证据 ${compliance?.evidence_ref_ids?.length ?? 0}`}</Tag>
+      {(view.risk_flags || []).slice(0, 3).map((f) => (
+        <Tag key={f} color="red">{humanizeReportText(f)}</Tag>
+      ))}
+    </Space>
+  )
+
+  return (
+    <ActionCardShell
+      title="审核 · 过不过"
+      badge={badge}
+      badgeColor={badgeColor}
+      verdict={verdict}
+      reason={compliance?.reason || null}
+      evidence={evidence}
+      hint={hint}
+      actions={[
+        {
+          label: '追问 · 合规审核细则',
+          onClick: () =>
+            onDispatchTask({
+              kind: 'dim_inquiry',
+              dimension: 'compliance',
+              current_score: compliance?.score ?? null,
+            }),
+        },
+        {
+          label: '看完整风险列表',
+          onClick: () => onSwitchMode('evaluation'),
+        },
+      ]}
+      activeEvidenceId={activeEvidenceId}
+      onTraceEvidence={onTraceEvidence}
+    />
+  )
+}
+
+function _firstSentence(text: string, maxLen = 80): string {
+  if (!text) return ''
+  let chunk = text.trim()
+  for (const sep of ['\n', '。', '；', '！', '?']) {
+    if (chunk.includes(sep)) {
+      chunk = chunk.split(sep)[0]
+      break
+    }
+  }
+  chunk = chunk.trim()
+  if (chunk.length > maxLen) chunk = chunk.slice(0, maxLen - 1) + '…'
+  return chunk
 }
 
 // ============================================================
