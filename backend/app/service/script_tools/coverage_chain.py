@@ -11,7 +11,7 @@ from typing import List, Optional
 
 from sqlalchemy.engine import Engine
 
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.scene_repo import get_all_scenes
 from utils.database import engine as default_engine
 
@@ -115,7 +115,7 @@ async def extract_coverage_card(
         tier=ModelTier.PRIMARY,
         system_message=_SYSTEM_PROMPT,
         temperature=0.2,
-        max_tokens=1200,
+        max_tokens=TokenBudget.COVERAGE_CARD,
     )
     parsed = resp.parsed if isinstance(resp.parsed, dict) else None
     if parsed is None:

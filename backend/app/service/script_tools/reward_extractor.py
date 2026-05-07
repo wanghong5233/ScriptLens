@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 from typing import List, Optional
 
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.risk_terms import REWARD_TERMS, all_reward_terms
 from service.script_tools.scene_repo import Scene, get_all_scenes, locate_scenes_by_keyword
 
@@ -162,7 +162,7 @@ async def _judge_batch(batch: List[Scene], caller: LlmCaller) -> List[RewardEven
         prompt,
         tier=ModelTier.MINI,
         temperature=0.1,
-        max_tokens=1024,
+        max_tokens=TokenBudget.REWARD_EXTRACT,
     )
 
     parsed = resp.parsed if isinstance(resp.parsed, dict) else {}

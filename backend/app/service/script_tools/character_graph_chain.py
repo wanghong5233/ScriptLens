@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import re
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -13,9 +14,11 @@ from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.engine import Engine
 
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.scene_repo import Scene, get_all_scenes
 from utils.database import engine as default_engine
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -102,6 +105,10 @@ _SYSTEM_PROMPT = """你是中文短剧人物关系分析师。
 - 只有当正负行为都推动剧情、且都不是边缘细节时，才用 mixed
 
 不要编造没有根据的人物。输出短句，面向编剧和选品人员。
+
+输出契约（必须严格遵守）：
+- 只能输出**一个 JSON 对象**，不要 markdown / 代码块 / 解释 / 多余前后缀。
+- motivation / goal / obstacle 各 ≤30 字，避免长理由把整体输出撑爆。
 """
 
 _PROMPT = """下面是人物共现统计和部分原文场景。请补充人物关系图信息。
@@ -115,7 +122,7 @@ _PROMPT = """下面是人物共现统计和部分原文场景。请补充人物�
 【场景样本】
 {scenes_block}
 
-输出 JSON：
+输出 JSON（只能是一个 JSON 对象，不要任何额外文字）：
 {{
   "nodes": [
     {{"id": "<node_id>", "role": "protagonist|antagonist|support|minor", "motivation": "≤30字", "goal": "≤30字", "obstacle": "≤30字"}}
@@ -144,8 +151,17 @@ async def extract_character_graph(
     if not nodes:
         return CharacterGraph()
 
-    enriched = await _enrich_graph(nodes, raw_edges, scenes, caller)
-    return enriched
+    # LLM enrichment 是「锦上添花」：role / motivation / goal / obstacle / type / polarity 都依赖 LLM。
+    # 共现节点和边本身（name / appearance_count / weight）都不依赖 LLM，永远拿得到。
+    # enrichment 失败时不该让整张图消失——退化成「只有共现的图」远比「图整个没了」对用户更友好。
+    try:
+        return await _enrich_graph(nodes, raw_edges, scenes, caller)
+    except ScoreLLMError as exc:
+        logger.exception(
+            "character_graph_chain: LLM enrichment 失败，降级返回纯共现图（保留 %d 节点 / %d 边）: %s",
+            len(nodes), len(raw_edges), exc,
+        )
+        return CharacterGraph(nodes=nodes, edges=raw_edges)
 
 
 def _cooccurrence_graph(
@@ -228,11 +244,14 @@ async def _enrich_graph(
         tier=ModelTier.PRIMARY,
         system_message=_SYSTEM_PROMPT,
         temperature=0.2,
-        max_tokens=1600,
+        max_tokens=TokenBudget.CHARACTER_GRAPH,
     )
     parsed = resp.parsed if isinstance(resp.parsed, dict) else None
     if parsed is None:
-        raise ScoreLLMError("character_graph_chain: LLM 返回非 JSON object")
+        raise ScoreLLMError(
+            f"character_graph_chain: LLM 返回非 JSON object（type={type(resp.parsed).__name__}，"
+            f"raw 前 200 字：{(getattr(resp, 'raw', '') or '')[:200]!r}）"
+        )
 
     _apply_node_enrichment(nodes, parsed.get("nodes"), node_by_id)
     _apply_edge_enrichment(edges, parsed.get("edges"), edge_by_pair)
