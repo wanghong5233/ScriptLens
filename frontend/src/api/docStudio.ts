@@ -128,13 +128,171 @@ export type RiskFlagDTO = string
 export interface EvidenceRefDTO {
   id: string
   scene_id: string
+  episode_no?: number | null
   scene_no?: string | null
   scene_label?: string | null
   start_line?: number | null
   end_line?: number | null
   quote: string
+  /** 对整场戏的摘要，不是 quote 碎片；用于「关键场景」卡片 */
+  scene_summary?: string | null
   reason: string
   confidence?: 'high' | 'medium' | 'low'
+}
+
+/**
+ * 「主要看点」节点（reward / hook / twist / risk 等剧本关键事件）。
+ *
+ * 与 backend.ReportPayload.highlights 对齐。前端在报告里渲染成一条条「人话坐标 + 一句话」
+ * 列表，点击单条时联动编辑器跳到原文 + 持久高亮（溯源语义，不派 Agent）。
+ *
+ * highlight_type 设计：
+ *   - hook       开场钩子（首集核心冲突）
+ *   - face_slap  打脸 / 反转
+ *   - reversal   命运反转
+ *   - revenge    复仇 / 报应
+ *   - cp_progress  CP 进展
+ *   - identity_reveal 身份揭露
+ *   - villain_fall    反派败落
+ *   - underdog_rise   逆袭
+ *   - scheme_exposed  阴谋败露
+ *   - risk             审核风险点
+ */
+export type HighlightType =
+  | 'hook'
+  | 'face_slap'
+  | 'reversal'
+  | 'revenge'
+  | 'cp_progress'
+  | 'identity_reveal'
+  | 'villain_fall'
+  | 'underdog_rise'
+  | 'scheme_exposed'
+  | 'risk'
+
+export interface HighlightDTO {
+  id: string
+  type: HighlightType
+  scene_id: string
+  episode_no?: number | null
+  scene_no?: string | null
+  scene_label?: string | null
+  start_line?: number | null
+  end_line?: number | null
+  /** 一句话点题（"宁卓 vs 苏怀瑾摊牌"），≤ 40 字 */
+  oneliner: string
+  /** 原文片段（≤ 80 字，给 tooltip / 折叠态用） */
+  evidence?: string | null
+}
+
+export type RecommendationDTO = 'recommend' | 'consider' | 'pass'
+
+export interface CoveragePointDTO {
+  title: string
+  detail: string
+  anchor_scene_id?: string | null
+}
+
+export interface CoverageCardDTO {
+  logline: string
+  recommendation: RecommendationDTO
+  confidence: 'high' | 'medium' | 'low'
+  genre: string[]
+  core_value: string
+  strengths: CoveragePointDTO[]
+  concerns: CoveragePointDTO[]
+}
+
+export type BeatTypeDTO =
+  | 'opening'
+  | 'inciting'
+  | 'midpoint'
+  | 'climax'
+  | 'closing'
+  | 'twist'
+  | 'reward'
+
+export interface BeatNodeDTO {
+  type: BeatTypeDTO
+  summary: string
+  anchor_scene_id: string
+}
+
+export interface BeatActDTO {
+  act: 1 | 2 | 3
+  title: string
+  scene_range: string[]
+  beats: BeatNodeDTO[]
+}
+
+export interface BeatSheetDTO {
+  acts: BeatActDTO[]
+}
+
+export type CharacterGraphRoleDTO =
+  | 'protagonist'
+  | 'antagonist'
+  | 'support'
+  | 'minor'
+
+export type CharacterRelationTypeDTO =
+  | 'family'
+  | 'romance'
+  | 'rival'
+  | 'ally'
+  | 'authority'
+  | 'deception'
+  | 'mentor'
+
+export type RelationPolarityDTO = 'positive' | 'negative' | 'mixed'
+
+export interface CharacterGraphNodeDTO {
+  id: string
+  name: string
+  role: CharacterGraphRoleDTO
+  motivation: string
+  goal: string
+  obstacle: string
+  first_scene_id?: string | null
+  appearance_count: number
+}
+
+export interface CharacterGraphEdgeDTO {
+  source_id: string
+  target_id: string
+  type: CharacterRelationTypeDTO
+  weight: number
+  polarity: RelationPolarityDTO
+}
+
+export interface CharacterGraphDTO {
+  nodes: CharacterGraphNodeDTO[]
+  edges: CharacterGraphEdgeDTO[]
+}
+
+export interface PacingCurvePointDTO {
+  episode_no: number
+  scene_count: number
+  event_count: number
+  hooks: number
+  twists: number
+  reward_events: number
+  sentiment: number
+}
+
+export interface EvaluationDimensionDTO {
+  key: DimensionKey
+  label: string
+  score: number | null
+  level: ScoreLevel | null
+  reason: string
+  evidence_ref_ids: string[]
+}
+
+export interface EvaluationPayloadDTO {
+  dimensions: EvaluationDimensionDTO[]
+  risk_flags: string[]
+  rewrite_seeds: unknown[]
 }
 
 export interface ReportPayloadDTO {
@@ -147,6 +305,18 @@ export interface ReportPayloadDTO {
   must_read_scene_ids: string[]
   scorecard: ScorecardItemDTO[]
   evidence_refs: EvidenceRefDTO[]
+  /** 主要看点 / 钩子 / 反转 / 爽点列表（与 reward_events 同源，前端按 type 分组渲染） */
+  highlights?: HighlightDTO[]
+  /** v3 速览：logline + recommendation + 优劣点 */
+  coverage_card?: CoverageCardDTO | null
+  /** v3 故事：三幕骨架 + 关键节拍 */
+  beat_sheet?: BeatSheetDTO | null
+  /** v3 人物：角色节点 + 关系边 */
+  character_graph?: CharacterGraphDTO | null
+  /** v3 故事：每集事件密度 + 情感弧 */
+  pacing_curve?: PacingCurvePointDTO[]
+  /** v3 评估：5 维评分 + 风险 + 改写候选 */
+  evaluation?: EvaluationPayloadDTO | null
   risk_flags: RiskFlagDTO[]
   report_id?: string
   generated_at?: string
@@ -214,6 +384,26 @@ function sceneFileName(s: SceneItemDTO): string {
  *
  * 注意：前端 scene_no 在 DTO 里已经是数字字符串。
  */
+/**
+ * 按 scene_id（UUID）精确查找。
+ *
+ * 与 `findSceneByRef` 的区别：
+ *   - findSceneByRef 接受 LLM 输出里的人类可读引用（"5-3" / "第5集第3场" / scene_label）；
+ *   - findSceneById 接受报告里 evidence_refs[].scene_id（UUID），任务派发器走这条；
+ *
+ * 用 UUID 走 findSceneByRef 会误判"不存在"——它的匹配规则只认场号字符串。
+ */
+export function findSceneById(
+  workspaceId: string,
+  sceneId: string,
+): SceneItemDTO | null {
+  const scenes = sceneCache.get(workspaceId)
+  if (!scenes || scenes.length === 0) return null
+  const id = (sceneId || '').trim()
+  if (!id) return null
+  return scenes.find((s) => String(s.id) === id) || null
+}
+
 export function findSceneByRef(
   workspaceId: string,
   ref: string,
@@ -401,10 +591,28 @@ export async function bindWorkspaceSession(
 }
 
 export async function deleteWorkspace(
-  _params: { workspaceId: string },
-  _options?: AxiosRequestConfig,
-): Promise<{ deleted: boolean; workspace_id: string }> {
-  return unsupported('deleteWorkspace（剧本删除未实现）')
+  params: { workspaceId: string },
+  options?: AxiosRequestConfig,
+): Promise<{
+  deleted: boolean
+  workspace_id: string
+  storage_deleted: boolean
+  deleted_counts: Record<string, number>
+}> {
+  const { data } = await request.delete<{
+    deleted: boolean
+    script_id: string
+    title: string
+    storage_deleted: boolean
+    deleted_counts: Record<string, number>
+  }>(`/${params.workspaceId}`, withScripts(options))
+  sceneCache.delete(params.workspaceId)
+  return {
+    deleted: Boolean(data.deleted),
+    workspace_id: data.script_id,
+    storage_deleted: Boolean(data.storage_deleted),
+    deleted_counts: data.deleted_counts || {},
+  }
 }
 
 // ============================================================
@@ -898,10 +1106,83 @@ export async function reanalyzeScript(
 }
 
 // ============================================================
+// Report 进度（与 backend service.script_progress_tracker 对齐）
+// ============================================================
+
+export type ReportStageState = 'pending' | 'running' | 'done' | 'failed'
+
+export interface ReportStageDTO {
+  id: string
+  label: string
+  description: string
+  state: ReportStageState
+  detail?: string | null
+  started_at?: number | null
+  completed_at?: number | null
+}
+
+export interface ReportProgressSnapshotDTO {
+  script_id: string
+  started_at: number
+  updated_at: number
+  final: boolean
+  error?: string | null
+  current_index: number
+  stages: ReportStageDTO[]
+}
+
+export interface ReportProgressResponseDTO {
+  script_id: string
+  snapshot: ReportProgressSnapshotDTO | null
+}
+
+export async function fetchScriptReportProgress(
+  scriptId: string,
+  options?: AxiosRequestConfig,
+): Promise<ReportProgressResponseDTO> {
+  const { data } = await request.get<ReportProgressResponseDTO>(
+    `/${scriptId}/progress`,
+    withScripts({
+      // 进度查询是高频轮询，4xx/5xx 全部走 UI 自己的 fallback，不要弹全局 toast
+      errorToast: false,
+      ...(options ?? {}),
+    }),
+  )
+  return data
+}
+
+// ============================================================
 // View（按角色重排报告）—— PRD §三-4)「不同视角」
 // ============================================================
 
 export type ScriptViewRole = 'selection' | 'writer' | 'review'
+
+/**
+ * 改写候选种子（任务派发器入口）。
+ *
+ * 报告**只产候选定位 + 触发**，不预生成 rewritten_excerpt。详见 docs/03-system-mental-model.md §6。
+ * 真正的 original/rewritten/diff/rationale 由用户在 chat 触发 propose_rewrite_tool 实时生产。
+ */
+export interface RewriteSeedDTO {
+  dimension: DimensionKey
+  scene_id: string
+  scene_label?: string | null
+  issue: string
+  evidence_ref_id: string
+}
+
+/**
+ * 单个 (scene_id, dimension) 上的改写任务状态（从 script_operations 派生）。
+ *
+ * 前端按 task_status[`${scene_id}:${dimension}`] lookup，渲染卡片右上角状态徽章。
+ * 状态映射详见 docs/03-system-mental-model.md §8。
+ */
+export interface RewriteTaskStatusDTO {
+  attempts: number
+  last_op_id: string | null
+  last_status: 'proposed' | 'accepted' | 'rejected' | null
+  last_at: string | null
+}
 
 export interface ScriptViewResponseDTO {
   script_id: string
@@ -914,6 +1195,22 @@ export interface ScriptViewResponseDTO {
   risk_flags: RiskFlagDTO[]
   role_focus: string[]
   evidence_refs: EvidenceRefDTO[]
+  /** 主要看点 / 钩子 / 反转 / 爽点列表（透传自 ReportPayload.highlights） */
+  highlights?: HighlightDTO[]
+  /** v3 速览：logline + recommendation + 优劣点 */
+  coverage_card?: CoverageCardDTO | null
+  /** v3 故事：三幕骨架 + 关键节拍 */
+  beat_sheet?: BeatSheetDTO | null
+  /** v3 人物：角色节点 + 关系边 */
+  character_graph?: CharacterGraphDTO | null
+  /** v3 故事：每集事件密度 + 情感弧 */
+  pacing_curve?: PacingCurvePointDTO[]
+  /** v3 评估：5 维评分 + 风险 + 改写候选 */
+  evaluation?: EvaluationPayloadDTO | null
+  /** 派生：「最值得改的 N 场」候选（详见 docs/03-system-mental-model.md §6） */
+  rewrite_seeds: RewriteSeedDTO[]
+  /** 派生：每个 (scene, dim) 上的改写任务状态，key=`${scene_id}:${dimension}` */
+  task_status: Record<string, RewriteTaskStatusDTO>
 }
 
 export async function fetchScriptView(
@@ -981,6 +1278,43 @@ export async function rewriteScript(
     withScripts(options),
   )
   return data
+}
+
+// ============================================================
+// F2/F3：导出完整剧本（已应用所有 script_operations 的最新版本）
+// ============================================================
+
+export type ScriptExportFormat = 'docx' | 'pdf' | 'txt'
+
+/**
+ * 触发后端导出 → 浏览器下载文件。
+ * 后端 GET /api/scripts/{id}/export?format=docx|pdf|txt 返回二进制流；
+ * 前端用 axios responseType=blob 接收，再用临时 <a> 触发下载。
+ */
+export async function exportFullScript(
+  scriptId: string,
+  format: ScriptExportFormat,
+): Promise<void> {
+  const response = await request.get<Blob>(
+    `/${scriptId}/export`,
+    withScripts({
+      params: { format },
+      responseType: 'blob',
+    }),
+  )
+  const blob = response.data as unknown as Blob
+  const cd = (response.headers as Record<string, string>)?.['content-disposition'] || ''
+  // Content-Disposition: attachment; filename="xxx.docx"
+  const match = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i)
+  const filename = match ? decodeURIComponent(match[1]) : `script.${format}`
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  URL.revokeObjectURL(url)
 }
 
 // ============================================================

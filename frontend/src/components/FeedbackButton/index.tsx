@@ -15,7 +15,7 @@ export interface FeedbackButtonProps {
   scriptId: string
   scope: ScriptFeedbackScope
   scopeRef?: string | null
-  /** 给反馈正文做人类可读上下文，如 "opening_hook 评分" / "决策卡" / "必读场景 1-3" */
+  /** 给反馈正文做人类可读上下文，如 "opening_hook 评分" / "决策卡" / "关键场景 1-3" */
   contextLabel: string
   size?: 'small' | 'middle'
   /** 一个 FeedbackButton 组提交后整个组进入 disabled / "已反馈" 态 */
@@ -23,7 +23,7 @@ export interface FeedbackButtonProps {
 }
 
 /**
- * 维度卡 / 决策卡 / 必读场景的好坏反馈按钮组（PRD §10 P3）。
+ * 维度卡 / 决策卡 / 关键场景的好坏反馈按钮组（PRD §10 P3）。
  *
  * 交互：[👍] [👎] → Popover 让用户填可选 comment → 提交 → 整组变"已反馈"。
  * 后端落库后，下次 chat 会把最近 N 条反馈注入 system prompt（轻量 skill 机制）。

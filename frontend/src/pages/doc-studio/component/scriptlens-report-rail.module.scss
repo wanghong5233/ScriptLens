@@ -1,0 +1,725 @@
+// ScriptLens · 右栏「分析报告」面板
+// 设计层级（与 task.md §三 信息分层一致）：
+//   1) 顶部：30 秒决策 — 标题 / 决策 / 综合分 / 一句话理由
+//   2) 中段：5 分钟核心理解 — 剧本概览 / 主要看点
+//   3) 底部：深度层 — 5 维评分 / 关键场景 / 改写候选 / 风险标签
+
+.rail {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px 14px 18px;
+  height: 100%;
+  overflow-y: auto;
+  font-size: 13px;
+
+  .parseProgressCard {
+    margin: auto 0;
+    padding: 18px 16px;
+    border: 1px solid #F1E2DA;
+    border-radius: 14px;
+    background:
+      radial-gradient(circle at 20% 0%, rgba(232, 196, 184, 0.28), transparent 34%),
+      linear-gradient(135deg, #FFFCF8 0%, #FBF5EF 100%);
+    box-shadow: 0 10px 28px rgba(90, 69, 58, 0.08);
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+
+    h3 {
+      margin: 0;
+      color: #3F3835;
+      font-size: 16px;
+      font-weight: 600;
+    }
+  }
+
+  .parseProgressDesc {
+    line-height: 1.7;
+  }
+
+  .parseProgressMeta {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    color: #8F8178;
+    font-size: 12px;
+  }
+
+  // ==================== 顶部：标题行 ====================
+  .titleRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+  }
+
+  .titleText {
+    flex: 1;
+    min-width: 0;
+    font-size: 14px;
+    font-weight: 600;
+    color: #3F3835;
+    line-height: 1.3;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .reanalyzeBtn {
+    flex-shrink: 0;
+  }
+
+  .roleSwitch {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    background: #FFFCF8;
+    border: 1px solid #F1ECE7;
+    border-radius: 10px;
+  }
+
+  .roleHint {
+    font-size: 11.5px;
+    color: #9C8E89;
+    line-height: 1.45;
+    padding: 0 2px;
+  }
+
+  // ==================== 顶部：决策卡（醒目层） ====================
+  .headlineCard {
+    background: linear-gradient(135deg, #FBF7F3 0%, #F8F1EB 100%);
+    border: 1px solid #ECE0D6;
+    border-radius: 10px;
+    padding: 12px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .headlineRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .decisionTag {
+    font-size: 13px;
+    font-weight: 500;
+    padding: 3px 12px;
+    margin: 0;
+    border-radius: 6px;
+  }
+
+  .overallNull {
+    color: #B0A39E;
+    font-size: 13px;
+  }
+
+  .oneLineReason {
+    font-size: 13px !important;
+    color: #4A4137 !important;
+    line-height: 1.6 !important;
+    margin: 0 !important;
+  }
+
+  // ==================== Section 通用 ====================
+  .summarySection,
+  .corePlotSection,
+  .charactersSection,
+  .highlightsSection,
+  .scorecardSection,
+  .mustReadSection,
+  .seedsSection,
+  .riskSection {
+    padding: 12px 0 4px;
+    border-top: 1px dashed #EFE8E2;
+  }
+
+  .sectionHeader {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 6px;
+  }
+
+  .sectionTitle {
+    font-size: 13px;
+    color: #3F3835;
+    line-height: 1.4;
+  }
+
+  .sectionHint {
+    font-size: 11.5px;
+    line-height: 1.4;
+    color: #B0A39E;
+  }
+
+  // ==================== 5 分钟核心理解：剧本概览 ====================
+  .summaryText {
+    font-size: 13px !important;
+    color: #5A4F47 !important;
+    line-height: 1.7 !important;
+    margin: 0 !important;
+    background: #FCF9F5;
+    border-left: 3px solid #E8C4B8;
+    padding: 8px 12px;
+    border-radius: 0 6px 6px 0;
+  }
+
+  // ==================== 5 分钟核心理解：核心主线（起承转合） ====================
+  .actItem {
+    background: #FFFDFB;
+    border: 1px solid #F1ECE7;
+    border-radius: 8px;
+    padding: 8px 10px;
+    transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+    cursor: pointer;
+
+    &:hover {
+      background: #FAF4EE;
+      border-color: #E8DDD3;
+      transform: translateX(2px);
+    }
+  }
+
+  .actItemActive {
+    background: #FFEDF1 !important;
+    border-color: #E07A8C !important;
+    box-shadow: 0 0 0 2px rgba(224, 122, 140, 0.15);
+  }
+
+  // ==================== 5 分钟核心理解：关键人物 ====================
+  .characterGraphPreview {
+    position: relative;
+    margin-top: 8px;
+  }
+
+  .characterGraphExpandBtn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    z-index: 2;
+    background: rgba(224, 122, 140, 0.95) !important;
+    border-color: rgba(224, 122, 140, 0.95) !important;
+    box-shadow: 0 4px 12px rgba(224, 122, 140, 0.3);
+
+    &:hover {
+      background: rgba(216, 111, 133, 1) !important;
+      border-color: rgba(216, 111, 133, 1) !important;
+    }
+  }
+
+  .characterGraphCanvas {
+    position: relative;
+    width: 100%;
+    height: 240px;
+    overflow: hidden;
+    border: 1px solid #F2E8DA;
+    border-radius: 12px;
+    background:
+      radial-gradient(circle at 30% 20%, rgba(232, 196, 184, 0.2), transparent 32%),
+      linear-gradient(135deg, #FFFCF8 0%, #FBF6EF 100%);
+  }
+
+  .characterGraphEchartsContainer {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    background: #FFFCF8;
+  }
+
+  .characterGraph3DEmpty {
+    min-height: 320px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #8E847B;
+    font-size: 14px;
+  }
+
+  .characterGraphEchartsIsolated {
+    margin: 0 18px 14px;
+    padding: 6px 12px;
+    background: rgba(255, 247, 238, 0.92);
+    border: 1px dashed #EAD8C2;
+    border-radius: 6px;
+    color: #8F7C66;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  .isolatedHint {
+    margin-top: 6px;
+    padding: 6px 10px;
+    background: #FFF7EE;
+    border: 1px dashed #EAD8C2;
+    border-radius: 6px;
+    font-size: 11.5px;
+    color: #8F7C66;
+    line-height: 1.55;
+  }
+
+  .characterGraphEmpty {
+    height: 120px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #B0A39E;
+    font-size: 12.5px;
+  }
+
+  .graphLegend {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 10px 14px;
+    margin: 10px 0 10px;
+    color: #8F8178;
+    font-size: 11.5px;
+    line-height: 1.5;
+
+    strong {
+      color: #5A4F47;
+      font-weight: 500;
+      margin-right: 2px;
+    }
+
+    span {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+
+    i {
+      display: inline-block;
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+    }
+
+    em {
+      display: inline-block;
+      width: 18px;
+      height: 2px;
+      font-style: normal;
+      border-radius: 2px;
+    }
+  }
+
+  .relationListSection {
+    margin: 4px 0 12px;
+    border: 1px solid #F2E8DA;
+    border-radius: 10px;
+    background: #FFFCF7;
+    padding: 10px 12px;
+
+    h4 {
+      margin: 0 0 6px;
+      font-size: 12.5px;
+      font-weight: 600;
+      color: #5A4F47;
+    }
+  }
+
+  .relationList {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .relationRow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12.5px;
+    color: #4A4137;
+    line-height: 1.5;
+    padding: 3px 0;
+    border-top: 1px dashed #F1E5D8;
+
+    &:first-child {
+      border-top: none;
+    }
+  }
+
+  .relationParty {
+    font-weight: 500;
+    color: #3F3835;
+  }
+
+  .relationTypeTag {
+    margin: 0;
+    font-size: 11px;
+    line-height: 18px;
+    padding: 0 6px;
+    border-radius: 4px;
+  }
+
+  .relationPolarityDot {
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .relationCharacterRelations {
+    margin-top: 6px;
+    padding-top: 6px;
+    border-top: 1px dashed #F1E5D8;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .relationCharacterRelationRow {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 5px;
+    font-size: 12px;
+    color: #5A4F47;
+    line-height: 1.5;
+  }
+
+  .characterList {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .characterCard {
+    width: 100%;
+    background: #FFFCF8;
+    border: 1px solid #F2E8DA;
+    border-radius: 8px;
+    padding: 8px 10px;
+    text-align: left;
+    cursor: pointer;
+    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+
+    &:hover {
+      border-color: #E8C4B8;
+      box-shadow: 0 4px 14px rgba(80, 54, 36, 0.06);
+      transform: translateY(-1px);
+    }
+  }
+
+  .characterHeader {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+    margin-bottom: 6px;
+  }
+
+  .characterFieldRow {
+    display: flex;
+    gap: 6px;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  .characterFieldLabel {
+    flex-shrink: 0;
+    width: 32px;
+    color: #B0A39E;
+  }
+
+  .characterFieldText {
+    flex: 1;
+    min-width: 0;
+    color: #4A4137;
+  }
+
+  .characterAnchorChipActive {
+    box-shadow: 0 0 0 2px rgba(224, 122, 140, 0.4);
+  }
+
+  // ==================== 5 分钟核心理解：主要看点列表 ====================
+  .highlightList {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .highlightGroup {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .highlightGroupTag {
+    align-self: flex-start;
+    margin: 0 0 2px 0;
+    font-size: 11.5px;
+    padding: 1px 8px;
+    border-radius: 4px;
+  }
+
+  .highlightItems {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .highlightRow {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: #FFFDFB;
+    border: 1px solid #F1ECE7;
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+
+    &:hover {
+      background: #FAF4EE;
+      border-color: #EBDDD1;
+      transform: translateX(2px);
+    }
+  }
+
+  .highlightRowActive {
+    background: #FFEDF1 !important;
+    border-color: #E07A8C !important;
+    box-shadow: 0 0 0 2px rgba(224, 122, 140, 0.15);
+  }
+
+  .highlightRowHead {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 2px;
+  }
+
+  .highlightLocator {
+    font-size: 11.5px;
+    color: #9C8E89;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+  }
+
+  .highlightOneliner {
+    font-size: 12.5px;
+    color: #4A4137;
+    line-height: 1.5;
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  // ==================== 5 维评分卡 ====================
+  .dimCard {
+    background: #FFFDFB;
+    border: 1px solid #F1ECE7;
+    border-radius: 8px;
+    padding: 8px 10px;
+    transition: box-shadow 0.18s ease, border-color 0.18s ease;
+
+    &:hover {
+      border-color: #E8DDD3;
+      box-shadow: 0 1px 4px rgba(184, 156, 149, 0.12);
+    }
+  }
+
+  .dimCardHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .dimLabel {
+    flex-shrink: 0;
+    color: #3F3835;
+    font-weight: 500;
+  }
+
+  .dimRight {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .dimLevelTag {
+    margin: 0;
+    font-size: 11px;
+    padding: 0 6px;
+    line-height: 18px;
+    border-radius: 4px;
+  }
+
+  .dimScore {
+    color: #3F3835;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+    min-width: 44px;
+    text-align: right;
+  }
+
+  .dimInquiryBtn {
+    color: #9C8E89;
+    padding: 0 4px;
+    height: 22px;
+
+    &:hover {
+      color: #E07A8C;
+      background: rgba(224, 122, 140, 0.08);
+    }
+  }
+
+  .dimReason {
+    font-size: 12.5px !important;
+    color: #6E5F58 !important;
+    margin: 4px 0 6px !important;
+    line-height: 1.6 !important;
+  }
+
+  // 证据 chip 容器：用 flex+wrap 支撑长 locator
+  .evidenceList {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    width: 100%;
+    margin-top: 2px;
+  }
+
+  .evidenceChip {
+    cursor: pointer;
+    margin: 0;
+    padding: 1px 8px;
+    font-size: 11.5px;
+    line-height: 18px;
+    border-radius: 4px;
+    transition: filter 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
+
+    &:hover {
+      filter: brightness(1.05);
+      transform: translateY(-1px);
+    }
+  }
+
+  .evidenceChipActive {
+    box-shadow: 0 0 0 2px rgba(224, 122, 140, 0.4);
+    transform: translateY(-1px);
+  }
+
+  // ==================== 关键场景 ====================
+  .mustReadItem {
+    display: block;
+    width: 100%;
+    text-align: left;
+    background: #FAF6F2;
+    border: 1px solid #F1ECE7;
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    transition: background 0.18s ease, border-color 0.18s ease, transform 0.18s ease;
+
+    &:hover {
+      background: #F6EFE8;
+      border-color: #E8DDD3;
+      transform: translateX(2px);
+    }
+  }
+
+  .mustReadItemActive {
+    background: #FFEDF1 !important;
+    border-color: #E07A8C !important;
+    box-shadow: 0 0 0 2px rgba(224, 122, 140, 0.15);
+  }
+
+  .mustReadHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+
+  .mustReadSceneTag {
+    margin: 0;
+  }
+
+  .mustReadQuote {
+    margin-top: 6px;
+    font-size: 12.5px;
+    color: #6E5F58;
+    line-height: 1.6;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    overflow: hidden;
+  }
+
+  // ==================== 改写候选卡 ====================
+  .seedCard {
+    background: #FFF7EE;
+    border: 1px solid #F2E7D7;
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+
+  .seedHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 6px;
+  }
+
+  .seedDimTag {
+    margin: 0;
+  }
+
+  .seedScene {
+    font-size: 12px;
+    color: #6E5F58;
+  }
+
+  .seedIssue {
+    font-size: 13px;
+    color: #3F3835;
+    line-height: 1.6;
+    margin-bottom: 8px;
+  }
+
+  .seedActions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .badgeIdle {
+    background: #EEEAE6;
+    color: #9C8E89;
+    border-color: #E5DED7;
+    margin: 0;
+  }
+
+  .badgeAccepted {
+    margin: 0;
+  }
+
+  // ==================== 底部清除高亮按钮 ====================
+  .clearTraceBtn {
+    margin-top: 6px;
+    color: #9C8E89;
+    font-size: 12px;
+
+    &:hover {
+      color: #E07A8C !important;
+      background: rgba(224, 122, 140, 0.06) !important;
+    }
+  }
+}

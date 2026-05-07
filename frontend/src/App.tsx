@@ -1,7 +1,6 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import DocStudio from './pages/doc-studio'
 import Login from './pages/login'
-import ReportPage from './pages/report'
 import Welcome from './pages/welcome'
 
 export default function App() {
@@ -14,7 +13,6 @@ export default function App() {
       <Route path="/login" element={<Login />} />
       <Route path="/doc-studio" element={<DocStudio />} />
       <Route path="/doc-studio/:workspaceId" element={<DocStudio />} />
-      <Route path="/scripts/:scriptId/report" element={<ReportPage />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   )

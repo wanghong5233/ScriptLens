@@ -1,34 +1,53 @@
+// ScriptLens · Doc Studio Welcome：莫兰迪暖色调，搭配 main.tsx 中的主题 token
+// 颜色与 main.tsx 中 ConfigProvider theme 对齐：
+//   colorPrimary  #E07A8C  珊瑚粉
+//   colorBgBase   #FAF7F4  奶油底
+//   colorTextBase #4A4A4A  炭色
+
 .doc-studio-welcome {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   min-height: 320px;
-  padding: 40px 24px 56px;
-  color: #8c8c8c;
+  padding: 56px 24px 64px;
+  color: #6B6360;
   user-select: none;
 
   .doc-studio-welcome__title {
-    font-size: 14px;
-    font-weight: 500;
-    color: #8c8c8c;
-    margin-bottom: 8px;
+    font-size: 22px;
+    font-weight: 600;
+    color: #4A4A4A;
+    margin-bottom: 10px;
+    letter-spacing: 0.3px;
   }
 
   .doc-studio-welcome__tagline {
-    font-size: 12px;
-    color: #bfbfbf;
-    margin-bottom: 28px;
+    font-size: 13px;
+    color: #9C8E89;
+    margin-bottom: 24px;
     text-align: center;
+    max-width: 520px;
+    line-height: 1.7;
+  }
+
+  .doc-studio-welcome__cta {
+    margin-bottom: 36px;
+    box-shadow: 0 6px 18px rgba(224, 122, 140, 0.22);
+    border-radius: 8px;
+    height: 42px;
+    padding: 0 22px;
+    font-size: 14px;
+    font-weight: 500;
   }
 
   .doc-studio-welcome__sections {
     display: flex;
     flex-direction: column;
     gap: 32px;
-    max-width: 480px;
+    max-width: 520px;
     width: 100%;
-    align-items: center;
+    align-items: stretch;
   }
 
   .doc-studio-welcome__section {
@@ -37,11 +56,11 @@
 
   .doc-studio-welcome__section-title {
     font-size: 12px;
-    font-weight: 500;
-    color: #bfbfbf;
+    font-weight: 600;
+    color: #B89C95;
     text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 12px;
+    letter-spacing: 1px;
+    margin-bottom: 14px;
   }
 
   .doc-studio-welcome__shortcuts {
@@ -53,10 +72,10 @@
   .doc-studio-welcome__shortcut {
     display: flex;
     align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
+    gap: 12px;
+    margin-bottom: 10px;
     font-size: 13px;
-    color: #8c8c8c;
+    color: #6B6360;
 
     &:last-of-type {
       margin-bottom: 0;
@@ -64,14 +83,16 @@
 
     kbd {
       display: inline-block;
-      min-width: 72px;
-      padding: 2px 8px;
+      min-width: 86px;
+      padding: 3px 10px;
       font-size: 12px;
-      font-family: inherit;
-      background: #f5f5f5;
-      border: 1px solid #e8e8e8;
-      border-radius: 4px;
-      box-shadow: 0 1px 0 rgba(0, 0, 0, 0.05);
+      font-family: 'JetBrains Mono', 'Fira Code', Consolas, 'Microsoft YaHei UI', monospace;
+      background: #F1ECE7;
+      color: #7A6E69;
+      border: 1px solid #E8DED7;
+      border-radius: 5px;
+      box-shadow: 0 1px 0 rgba(180, 160, 150, 0.18);
+      text-align: center;
     }
   }
 
@@ -84,11 +105,11 @@
   .doc-studio-welcome__highlight {
     display: flex;
     align-items: flex-start;
-    gap: 10px;
-    margin-bottom: 10px;
-    font-size: 12px;
-    line-height: 1.5;
-    color: #8c8c8c;
+    gap: 12px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 1.65;
+    color: #6B6360;
 
     &:last-of-type {
       margin-bottom: 0;
@@ -99,13 +120,13 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 24px;
-    height: 24px;
+    width: 28px;
+    height: 28px;
     flex-shrink: 0;
-    border-radius: 6px;
-    background: #f0f0f0;
-    color: #8c8c8c;
-    font-size: 12px;
+    border-radius: 8px;
+    background: #FBEEEF;
+    color: #C76A7C;
+    font-size: 14px;
   }
 
   .doc-studio-welcome__highlight-content {
@@ -113,8 +134,8 @@
     min-width: 0;
 
     strong {
-      color: #595959;
-      font-weight: 500;
+      color: #4A4A4A;
+      font-weight: 600;
     }
   }
 }

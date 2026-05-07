@@ -1,0 +1,290 @@
+// ScriptLens · 5 维评分流水线进度面板。
+// 主题色与 scriptlens-report-rail.module.scss 保持一致：
+//   奶油背景 #FAF7F4 / #FBF7F3 · 文字 #4A4A4A / 次 #6B6360 / 弱 #9C8E89
+//   强调 珊瑚粉 #E07A8C · 完成 鼠尾草绿 #7B9E89 · 失败 砖红 #C97A7A
+
+@keyframes scriptlens-progress-pulse {
+  0%   { transform: scale(1);   opacity: 0.55; }
+  70%  { transform: scale(2.4); opacity: 0;    }
+  100% { transform: scale(1);   opacity: 0;    }
+}
+
+@keyframes scriptlens-detail-blink {
+  0%, 100% { opacity: 1;   }
+  50%      { opacity: 0.3; }
+}
+
+.progress {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 14px 18px;
+}
+
+.fallbackCenter {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 12px;
+  text-align: center;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  background: linear-gradient(135deg, #FBF7F3 0%, #F6EFE8 100%);
+  border: 1px solid #EFE8E2;
+  border-radius: 8px;
+
+  .headerLeft {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+  }
+
+  .headerTitle {
+    font-size: 13px;
+    font-weight: 600;
+    color: #4A4A4A;
+    line-height: 1.3;
+  }
+
+  .headerSubtitle {
+    font-size: 11.5px;
+    color: #8A7E78;
+    line-height: 1.4;
+    word-break: break-word;
+  }
+
+  .headerRight {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+
+  .headerTime {
+    font-size: 12px;
+    color: #4A4A4A;
+    font-variant-numeric: tabular-nums;
+    font-weight: 500;
+  }
+
+  .headerProgress {
+    font-size: 11px;
+    color: #9C8E89;
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+.errorBox {
+  display: flex;
+  align-items: center;
+  padding: 8px 10px;
+  background: #FBEFEF;
+  border: 1px solid #F0D7D7;
+  border-radius: 6px;
+}
+
+.stageList {
+  list-style: none;
+  margin: 0;
+  padding: 4px 4px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+}
+
+.stage {
+  display: flex;
+  gap: 10px;
+  padding-bottom: 12px;
+
+  &:last-child {
+    padding-bottom: 0;
+  }
+}
+
+.stageRail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex-shrink: 0;
+  width: 18px;
+  padding-top: 2px;
+}
+
+.dot {
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 14px;
+  flex-shrink: 0;
+
+  &--pending {
+    background: #FBF7F3;
+    border: 1.5px solid #DCD3CD;
+  }
+
+  &--done {
+    color: #7B9E89;
+    background: transparent;
+    font-size: 16px;
+  }
+
+  &--failed {
+    color: #C97A7A;
+    background: transparent;
+    font-size: 16px;
+  }
+
+  &--running {
+    position: relative;
+    background: transparent;
+  }
+}
+
+.dotCore {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #E07A8C;
+  box-shadow: 0 0 0 2px #FBE6EB;
+  z-index: 1;
+}
+
+.dotPulse {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #E07A8C;
+  transform: translate(-50%, -50%);
+  animation: scriptlens-progress-pulse 1.6s ease-out infinite;
+}
+
+.stageLine {
+  flex: 1 1 auto;
+  width: 1.5px;
+  background: #ECE5DF;
+  margin-top: 4px;
+  min-height: 16px;
+}
+
+.stageBody {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-top: 0;
+}
+
+.stageHeadline {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.stageLabel {
+  font-size: 13px;
+  font-weight: 500;
+  color: #4A4A4A;
+  line-height: 1.4;
+}
+
+.stageElapsed {
+  font-size: 11px;
+  color: #B0A39C;
+  font-variant-numeric: tabular-nums;
+  flex-shrink: 0;
+}
+
+.stageDescription {
+  font-size: 11.5px;
+  color: #9C8E89;
+  line-height: 1.5;
+}
+
+.stageDetail {
+  display: flex;
+  align-items: center;
+  font-size: 12px;
+  color: #6B6360;
+  line-height: 1.5;
+  padding: 4px 8px;
+  background: #FBF7F3;
+  border-left: 2px solid #EFD9DD;
+  border-radius: 0 4px 4px 0;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.stageDetailDot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #E07A8C;
+  margin-right: 6px;
+  flex-shrink: 0;
+  animation: scriptlens-detail-blink 1.4s ease-in-out infinite;
+}
+
+.stage--done {
+  .stageLabel {
+    color: #6B6360;
+  }
+  .stageDetail {
+    color: #8A7E78;
+    border-left-color: #D5E0D7;
+  }
+}
+
+.stage--pending {
+  .stageLabel {
+    color: #B0A39C;
+  }
+  .stageDescription {
+    color: #C2B6AF;
+  }
+}
+
+.stage--failed {
+  .stageLabel {
+    color: #8A4A4A;
+  }
+  .stageDetail {
+    color: #8A4A4A;
+    background: #FBEFEF;
+    border-left-color: #E5B3B3;
+  }
+}
+
+.stage--running {
+  .stageLabel {
+    color: #4A4A4A;
+    font-weight: 600;
+  }
+}
+
+.scopeHint {
+  margin-top: 4px;
+  padding: 8px 10px;
+  background: #FBF7F3;
+  border: 1px dashed #EFE8E2;
+  border-radius: 6px;
+  line-height: 1.6;
+}

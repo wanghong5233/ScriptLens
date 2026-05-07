@@ -7,18 +7,49 @@ body,
 }
 
 body {
+  // ScriptLens 字体栈：系统优先 + 鸿蒙 + 雅黑 UI 兜底，中文优先级高于英文衬线
   font-family:
     -apple-system,
     BlinkMacSystemFont,
     'PingFang SC',
-    'Helvetica Neue',
-    Helvetica,
+    'HarmonyOS Sans SC',
+    'Microsoft YaHei UI',
     'Microsoft YaHei',
     'Source Han Sans CN',
+    'Noto Sans SC',
+    'Helvetica Neue',
+    Helvetica,
+    Arial,
     sans-serif;
-  background: #f5f5f7;
-  color: #262626;
+  // 与 antd theme.colorBgLayout 对齐：浅米色，比 #f5f5f7 冷灰更暖
+  background: #faf7f4;
+  color: #2c2a29;
+  font-size: 15px;
+  line-height: 1.65;
+  letter-spacing: 0.1px;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+// 等宽场景（pre/code/kbd/Monaco）统一字体栈：英文等宽 + 中文等宽友好兜底
+code,
+kbd,
+pre,
+samp,
+.monaco-editor {
+  font-family:
+    'JetBrains Mono',
+    'Cascadia Code',
+    'SF Mono',
+    Menlo,
+    Consolas,
+    'Liberation Mono',
+    'Sarasa Mono SC',
+    'Microsoft YaHei UI',
+    'PingFang SC',
+    monospace;
+  font-feature-settings: 'liga' 0, 'calt' 0; // 等宽场景关闭连字，避免对齐错位
 }
 
 * {

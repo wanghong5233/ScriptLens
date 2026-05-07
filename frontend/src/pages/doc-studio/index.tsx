@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import {
   Alert,
   Button,
@@ -12,6 +12,8 @@ import {
   message,
   Modal,
   Popconfirm,
+  Progress,
+  Radio,
   Select,
   Space,
   Spin,
@@ -61,6 +63,13 @@ import { useSnapshot } from 'valtio'
 import Editor from '@monaco-editor/react'
 import { AgentDiffReview, type AgentDiffReviewRef } from './AgentDiffReview'
 import DocStudioWelcome from './component/doc-studio-welcome'
+import ScriptlensReportRail from './component/scriptlens-report-rail'
+import {
+  buildPromptFromTask,
+  highlightLineRange,
+  type AgentTask,
+} from './agentTask'
+import { SCRIPTLENS_LIGHT_THEME } from './monacoTheme'
 import { ChatMarkdown } from '@/components/markdown/ChatMarkdown'
 import Recorder from '@/components/sender/recorder'
 import { fetchLlmModels, type LlmModelCatalog } from '@/api/config'
@@ -70,6 +79,9 @@ import {
   compileWorkspace,
   createFileOrDirectory,
   createWorkspace,
+  deleteWorkspace,
+  fetchWorkspace,
+  reanalyzeScript,
   deleteFile,
   renameFileOrDirectory,
   openAsyncEventStream,
@@ -100,7 +112,9 @@ import {
   listWorkspaceMessages,
   getWorkspaceMessagesDebug,
   findSceneByRef,
-  rewriteScript,
+  findSceneById,
+  exportFullScript,
+  type ScriptExportFormat,
 } from '@/api/docStudio'
 import {
   create as createSession,
@@ -115,6 +129,29 @@ import './index.scss'
 
 const { Sider, Content, Header } = Layout
 const { Text } = Typography
+
+const SCRIPT_PROCESSING_STATUS = new Set(['pending', 'parsing', 'indexing'])
+const SCRIPT_STATUS_LABELS: Record<string, string> = {
+  pending: '排队中',
+  parsing: '文本解析与集场切分',
+  indexing: '检索索引入库',
+  ready: '解析完成',
+  failed: '解析失败',
+}
+const SCRIPT_STATUS_PROGRESS: Record<string, number> = {
+  pending: 12,
+  parsing: 46,
+  indexing: 78,
+  ready: 100,
+  failed: 100,
+}
+
+function inferEpisodeUpperBoundFromTitle(title: string): number {
+  const match = title.match(/(?:第)?\s*\d+\s*[-~—至到]\s*(\d+)\s*(?:集|话|回)?/)
+  if (!match) return 0
+  const upper = Number(match[1])
+  return Number.isFinite(upper) ? upper : 0
+}
 
 const findFirstFile = (nodes: DocStudioAPI.FileNode[]): string | undefined => {
   for (const node of nodes) {
@@ -249,13 +286,57 @@ const collectAllFilePaths = (nodes: DocStudioAPI.FileNode[]): string[] => {
   return result
 }
 
+/**
+ * D1（左栏 C 方案）：完整剧本视图的虚拟 path 标识。
+ * 真实 scene_id 是 UUID，不会跟它撞；后端任何接口都不会接受这个 path。
+ * openFile 与 Editor readOnly 在前端各自拦截。
+ */
+const FULL_SCRIPT_VIRTUAL_PATH = '__SCRIPTLENS_FULL_SCRIPT__'
+
+/**
+ * 在场次树顶部插入「📖 完整剧本」虚拟节点。
+ * 显示「集数 / 场数」帮用户一眼看到剧本规模。
+ */
+const wrapWithFullScriptNode = (
+  files: DocStudioAPI.FileNode[] | undefined,
+): DocStudioAPI.FileNode[] => {
+  if (!files?.length) return files || []
+  let scenes = 0
+  const episodes = new Set<string>()
+  const walk = (nodes: DocStudioAPI.FileNode[]) => {
+    for (const n of nodes) {
+      if (n.type === 'directory') {
+        episodes.add(n.path)
+        if (n.children?.length) walk(n.children)
+      } else {
+        scenes += 1
+      }
+    }
+  }
+  walk(files)
+  // 单集摊平的场景：scenesToFileTree 不会建 directory，此时按 1 集统计
+  const epCount = episodes.size || (scenes > 0 ? 1 : 0)
+  const fullNode: DocStudioAPI.FileNode = {
+    name: `📖 完整剧本（${epCount} 集 · ${scenes} 场）`,
+    path: FULL_SCRIPT_VIRTUAL_PATH,
+    type: 'file',
+  }
+  return [fullNode, ...files]
+}
+
 const LIVE_TOOL_LABELS: Record<string, string> = {
+  // ScriptLens 自有工具（短剧分析）：放最前面，命中频次最高
+  score_dimension_tool: '维度评分',
+  locate_scenes_tool: '定位场次',
+  extract_characters_tool: '抽取人物',
+  propose_rewrite_tool: '改写建议',
+  // 复用 ScholarMind 通用工具：保留可显示，不破坏底层能力
   analyze_context_tool: '上下文分析',
   analyze_document_tool: '文档分析',
   semantic_code_search_tool: '语义检索',
-  search_codebase_tool: '代码检索',
+  search_codebase_tool: '原文检索',
   read_file_range_tool: '按行读取',
-  list_workspace_tree_tool: '浏览目录',
+  list_workspace_tree_tool: '浏览场次',
   create_directory_tool: '创建目录',
   create_file_tool: '创建文件',
   rename_move_path_tool: '重命名/移动',
@@ -267,10 +348,10 @@ const LIVE_TOOL_LABELS: Record<string, string> = {
   rewrite_line_range_tool: '按行改写',
   update_bibliography_tool: '更新参考文献',
   insert_text_tool: '插入文本',
-  compile_latex_tool: '编译 LaTeX',
+  compile_latex_tool: '重新诊断',
   check_citation_consistency_tool: '检查引用一致性',
   check_bibliography_tool: '检查参考文献',
-  web_search_tool: '网络搜索',
+  web_search_tool: '联网检索',
   reply_to_user_tool: '生成最终回复',
   answer_without_edit_tool: '直接回答',
 }
@@ -355,8 +436,10 @@ type FileMentionFragment = {
 }
 
 const SELECTION_PLACEHOLDER_REGEX = /@selection\d+/g
-const FILE_PLACEHOLDER_REGEX = /@file\d+/g
-const COMPOSER_PLACEHOLDER_REGEX = /@(selection|file)\d+/g
+// ScriptLens 场景：@file 占位符在显示层重命名为 @scene（一份剧本=一份"文件"，每个场次=一个子节点）
+// 保留 JS 标识符 fileMentions/FileMentionFragment 不变，只动序列化字符串，避免破坏底层数据结构
+const FILE_PLACEHOLDER_REGEX = /@scene\d+/g
+const COMPOSER_PLACEHOLDER_REGEX = /@(selection|scene)\d+/g
 const containsSelectionPlaceholder = (value: string) =>
   new RegExp(SELECTION_PLACEHOLDER_REGEX.source).test(String(value || ''))
 const containsFilePlaceholder = (value: string) =>
@@ -414,8 +497,8 @@ const normalizeSelectionFragments = (input: unknown): SelectionFragment[] => {
 
 const normalizeFileMentionPlaceholder = (value: unknown, fallbackIndex: number) => {
   const raw = String(value || '').trim()
-  if (/^@file\d+$/i.test(raw)) return raw
-  return `@file${fallbackIndex + 1}`
+  if (/^@scene\d+$/i.test(raw)) return raw
+  return `@scene${fallbackIndex + 1}`
 }
 
 const normalizeFileMentionFragments = (input: unknown): FileMentionFragment[] => {
@@ -574,7 +657,7 @@ const renderPromptWithMentionTags = (
     if (index > lastIndex) {
       nodes.push(text.slice(lastIndex, index))
     }
-    const isFileMention = placeholder.startsWith('@file')
+    const isFileMention = placeholder.startsWith('@scene')
     const mentionTarget: MentionTagClickTarget = isFileMention
       ? {
           type: 'file',
@@ -795,11 +878,13 @@ const buildLlmModelOptionsFromCatalog = (
     }))
   return remote.length ? remote : LLM_MODEL_OPTIONS
 }
+// ScriptLens 调宽（与 ScholarMind 默认值不同）：
+// 报告是主要阅读区，不是窄 chat 辅助栏；最大宽度不要替用户做死决定。
 const MIN_LEFT_SIDER_WIDTH = 200
 const MAX_LEFT_SIDER_WIDTH = 600
-const MIN_RIGHT_SIDER_WIDTH = 260
-const MAX_RIGHT_SIDER_WIDTH = 800
-const MIN_CENTER_WIDTH = 420
+const MIN_RIGHT_SIDER_WIDTH = 380
+const MAX_RIGHT_SIDER_WIDTH = 1600
+const MIN_CENTER_WIDTH = 240
 
 const normalizeLlmProvider = (value: unknown): LlmProviderValue => {
   const normalized = String(value || '').trim().toLowerCase()
@@ -927,11 +1012,16 @@ const buildTreeData = (
 const LatexEditorPage = () => {
   const params = useParams<{ workspaceId?: string }>()
   const navigate = useNavigate()
+  const location = useLocation()
   const snap = useSnapshot(docStudioState)
   const [prompt, setPrompt] = useState('')
   const [chatLoading, setChatLoading] = useState(false)
   const [reEditDraft, setReEditDraft] = useState<ReEditDraft | null>(null)
   const [reEditSubmitting, setReEditSubmitting] = useState(false)
+  const [activeScriptDetail, setActiveScriptDetail] = useState<DocStudioAPI.WorkspaceDetail | null>(null)
+  const [scriptStatusPolling, setScriptStatusPolling] = useState(false)
+  const [scriptProcessingStartedAt, setScriptProcessingStartedAt] = useState<number | null>(null)
+  const [scriptElapsedNow, setScriptElapsedNow] = useState(() => Date.now())
   const asyncMode = true
   const [selections, setSelections] = useState<SelectionFragment[]>([])
   const [fileMentions, setFileMentions] = useState<FileMentionFragment[]>([])
@@ -939,6 +1029,11 @@ const LatexEditorPage = () => {
   const [fileMentionRange, setFileMentionRange] = useState<{ start: number; end: number } | null>(null)
   const [fileMentionActiveIndex, setFileMentionActiveIndex] = useState(0)
   const [workspaceModalOpen, setWorkspaceModalOpen] = useState(false)
+  const [workspaceDeleting, setWorkspaceDeleting] = useState(false)
+  // F2：导出完整剧本 Modal（仅 ScriptLens 场景）
+  const [exportModalOpen, setExportModalOpen] = useState(false)
+  const [exportFormat, setExportFormat] = useState<ScriptExportFormat>('docx')
+  const [exporting, setExporting] = useState(false)
   const [newWorkspaceName, setNewWorkspaceName] = useState('')
   // ScriptLens 不区分 latex / markdown，但 setter 还在 onCancel/重置流程里用到，
   // 留个 _ 前缀的占位避免 TS noUnusedLocals 报错。
@@ -946,13 +1041,6 @@ const LatexEditorPage = () => {
   const [workspaceSubmitting, setWorkspaceSubmitting] = useState(false)
   // ScriptLens 上传单文件即创建剧本工作区
   const [newWorkspaceFile, setNewWorkspaceFile] = useState<File | null>(null)
-  // ScriptLens M3：场景改写 Modal（PRD §7 P1，POST /rewrite + AgentDiffReview in-place）
-  const [rewriteModalOpen, setRewriteModalOpen] = useState(false)
-  const [rewriteDimension, setRewriteDimension] = useState<
-    'opening_hook' | 'reward_density' | 'motivation' | 'pacing' | 'risk'
-  >('motivation')
-  const [rewriteIssue, setRewriteIssue] = useState('')
-  const [rewriteSubmitting, setRewriteSubmitting] = useState(false)
   const [fileModalOpen, setFileModalOpen] = useState(false)
   const [fileModalType, setFileModalType] = useState<'file' | 'directory'>('file')
   const [fileModalPath, setFileModalPath] = useState('')
@@ -969,10 +1057,10 @@ const LatexEditorPage = () => {
   const [historyDropdownOpen, setHistoryDropdownOpen] = useState(false)
   const [historySearchKeyword, setHistorySearchKeyword] = useState('')
   const [, setSessionTitleVersion] = useState(0)
-  const [rightTab, setRightTab] = useState<'chat' | 'history' | 'compile'>(() => {
+  const [rightTab, setRightTab] = useState<'chat' | 'history' | 'compile' | 'report'>(() => {
     if (typeof window === 'undefined') return 'chat'
     const saved = localStorage.getItem('doc_studio_right_tab')
-    return (saved === 'chat' || saved === 'history' || saved === 'compile') ? saved : 'chat'
+    return (saved === 'chat' || saved === 'history' || saved === 'compile' || saved === 'report') ? saved : 'chat'
   })
   const [rightPanelClosed, setRightPanelClosed] = useState(() => {
     if (typeof window === 'undefined') return false
@@ -1091,6 +1179,9 @@ const LatexEditorPage = () => {
   const promptWrapperRef = useRef<HTMLDivElement | null>(null)
   const llmOptionsAppliedRef = useRef<string>('')
   const saveInFlightRef = useRef(false)
+  const autoCompileHandledRef = useRef(false)
+  const scriptReadyRefreshRef = useRef<Record<string, true>>({})
+  const autoOpenedReportForScriptRef = useRef<Record<string, true>>({})
   
   // Diff 审阅相关状态
   const [agentDiffReviewOpen, setAgentDiffReviewOpen] = useState(false)
@@ -1144,19 +1235,24 @@ const LatexEditorPage = () => {
   })
   const [rightSiderWidth, setRightSiderWidth] = useState(() => {
     const saved = localStorage.getItem('latex_editor_right_sider_width')
-    return saved ? parseInt(saved, 10) : 360
+    // ScriptLens 默认 560：报告需要同时承载判断、证据、主线、人物与改写入口。
+    // 旧值过窄时回升，避免用户每次打开都被 360px 的 ScholarMind 旧习惯卡住。
+    if (saved) {
+      const parsed = parseInt(saved, 10)
+      if (Number.isFinite(parsed) && parsed >= 460) return parsed
+    }
+    return 560
   })
   
   const [isDraggingLeft, setIsDraggingLeft] = useState(false)
   const [isDraggingRight, setIsDraggingRight] = useState(false)
   
   const preferredKbFromUrl = useMemo(() => {
-    if (typeof window === 'undefined') return null
-    const raw = new URLSearchParams(window.location.search).get('kb_id')
+    const raw = new URLSearchParams(location.search).get('kb_id')
     if (!raw) return null
     const parsed = Number(raw)
     return Number.isFinite(parsed) ? parsed : null
-  }, [])
+  }, [location.search])
 
   useEffect(() => {
     if (typeof window === 'undefined') return
@@ -1267,7 +1363,52 @@ const LatexEditorPage = () => {
   }, [snap.workspaceId])
 
   useEffect(() => {
+    asyncStreamRef.current?.close()
+    asyncStreamRef.current = null
+    diffHunkDecorationsRef.current = []
+    diffEditorListenerRef.current.forEach((listener) => {
+      try {
+        listener.dispose()
+      } catch (error) {
+        console.warn('Failed to dispose diff listener while switching workspace', error)
+      }
+    })
+    diffEditorListenerRef.current = []
+    pendingSendRef.current = null
+    stopRequestedRef.current = true
+    asyncRunResolvedRef.current = false
+    liveDeltaStartedRef.current = false
+    seenLiveEventIdsRef.current = new Set()
+    handledInteractionIdsRef.current = new Set()
+    lastLiveEventSequenceRef.current = -1
+    activeRunIdRef.current = null
+
+    setPrompt('')
+    setChatLoading(false)
+    setReEditDraft(null)
+    setReEditSubmitting(false)
     setOperationHistory([])
+    setOperationHistoryLoading(false)
+    setAgentDiffReviewOpen(false)
+    setDiffModalOpen(false)
+    setAllFileDiffs([])
+    setCurrentDiffIndex(0)
+    setLastOperationId(null)
+    setDiffOperationId(null)
+    setDiffModalContext('agent')
+    setUndoingLastApply(false)
+    setDiffReverting(false)
+    setRevertingOperationId(null)
+    setResolvedOriginal('')
+    setResolvedModified('')
+    setLineChanges([])
+    setCurrentHunkIndex(0)
+    setLiveAgentStatus('')
+    setLiveAgentTimeline([])
+    setLiveAgentPreviewText('')
+    setLiveDeltaCharCount(0)
+    setLiveAgentElapsedSec(0)
+    autoCompileHandledRef.current = false
   }, [snap.workspaceId])
 
   useEffect(() => {
@@ -1292,18 +1433,15 @@ const LatexEditorPage = () => {
     })
   }, [llmOptionsConfig, llmOptionsReady, snap.workspaceId])
   const preferredFileFromUrl = useMemo(() => {
-    if (typeof window === 'undefined') return ''
-    const raw = new URLSearchParams(window.location.search).get('file')
+    const raw = new URLSearchParams(location.search).get('file')
     return raw ? raw.trim() : ''
-  }, [])
+  }, [location.search])
   const autoCompileFromUrl = useMemo(() => {
-    if (typeof window === 'undefined') return false
-    const raw = new URLSearchParams(window.location.search).get('auto_compile')
+    const raw = new URLSearchParams(location.search).get('auto_compile')
     if (!raw) return false
     const normalized = raw.trim().toLowerCase()
     return normalized === '1' || normalized === 'true' || normalized === 'yes'
-  }, [])
-  const autoCompileHandledRef = useRef(false)
+  }, [location.search])
   const [knowledgeBases, setKnowledgeBases] = useState<DocStudioAPI.KnowledgeBaseSummary[]>([])
   const [knowledgeLoading, setKnowledgeLoading] = useState(false)
   // ??????????????????
@@ -1362,12 +1500,83 @@ const LatexEditorPage = () => {
   )
   const isMarkdownActiveFile = activeFileExtension === '.md' || activeFileExtension === '.markdown'
   const isPlaintextActiveFile = activeFileExtension === '.txt'
-  const supportsCompilePanel = isLatexWorkspace || isMarkdownActiveFile
+  // ScriptLens 场景：剧本上传后 path 是 UUID（无扩展名），既不是 latex / markdown / txt
+  // 编译动作改为「重新诊断」—— 触发 reanalyze，重跑 5 维评分
+  const isScriptLensSession = useMemo(
+    () =>
+      !!snap.workspaceId &&
+      !isLatexWorkspace &&
+      !isMarkdownActiveFile &&
+      !isPlaintextActiveFile,
+    [snap.workspaceId, isLatexWorkspace, isMarkdownActiveFile, isPlaintextActiveFile],
+  )
+  const scriptStatus = useMemo(
+    () =>
+      String(
+        activeScriptDetail?.config?.status ||
+        snap.workspaceConfig?.status ||
+        '',
+      ).trim(),
+    [activeScriptDetail?.config, snap.workspaceConfig],
+  )
+  const isScriptProcessing = isScriptLensSession && SCRIPT_PROCESSING_STATUS.has(scriptStatus)
+  const isScriptFailed = isScriptLensSession && scriptStatus === 'failed'
+  const scriptProcessingProgress = SCRIPT_STATUS_PROGRESS[scriptStatus] ?? (isScriptProcessing ? 35 : 0)
+  const scriptProcessingElapsedSec = scriptProcessingStartedAt
+    ? Math.max(0, Math.floor((scriptElapsedNow - scriptProcessingStartedAt) / 1000))
+    : 0
+  const scriptProcessingIsLarge = Number(
+    activeScriptDetail?.config?.total_episodes ||
+    snap.workspaceConfig?.total_episodes ||
+    0,
+  ) >= 80 ||
+    Number(activeScriptDetail?.config?.total_scenes || snap.workspaceConfig?.total_scenes || 0) >= 150 ||
+    Number(activeScriptDetail?.config?.total_chars || snap.workspaceConfig?.total_chars || 0) >= 50000 ||
+    inferEpisodeUpperBoundFromTitle(activeWorkspaceName) >= 80
+
+  const handleScriptDetailLoaded = useCallback((detail: {
+    id: string
+    title: string
+    source_format?: string | null
+    status: string
+    total_episodes?: number | null
+    total_scenes?: number | null
+    total_chars?: number | null
+    failure_reason?: string | null
+  }) => {
+    const config = {
+      ...(docStudioState.workspaceConfig || {}),
+      title: detail.title,
+      source_format: detail.source_format,
+      status: detail.status,
+      total_episodes: detail.total_episodes,
+      total_scenes: detail.total_scenes,
+      total_chars: detail.total_chars,
+      failure_reason: detail.failure_reason,
+    }
+    setActiveScriptDetail({
+      workspaceId: detail.id,
+      name: detail.title,
+      mainFile: undefined,
+      fileCount: detail.total_scenes ?? 0,
+      updatedAt: Date.now(),
+      config,
+    })
+    docStudioActions.setWorkspaceConfig(config)
+  }, [])
+
+  useEffect(() => {
+    if (!isScriptProcessing) return
+    const timer = window.setInterval(() => setScriptElapsedNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [isScriptProcessing])
+  const supportsCompilePanel = isLatexWorkspace || isMarkdownActiveFile || isScriptLensSession
   const compileActionTitle = useMemo(() => {
+    if (isScriptLensSession) return '重新诊断（基于已修改场次重跑 5 维评分）'
     if (isPlaintextActiveFile) return 'TXT 文件无需编译'
     if (isMarkdownActiveFile) return '编译 Markdown'
     return '编译'
-  }, [isMarkdownActiveFile, isPlaintextActiveFile])
+  }, [isScriptLensSession, isMarkdownActiveFile, isPlaintextActiveFile])
 
   const isNotebookWorkspace = useMemo(() => {
     const workspaceType = String(
@@ -1434,6 +1643,72 @@ const LatexEditorPage = () => {
     const nextUrl = `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`
     window.history.replaceState({}, '', nextUrl)
   }, [])
+
+  /**
+   * F1：5 维改写快捷指令模板。Key 与后端 RewriteRequest.target_dimension 一致。
+   * Agent 收到这个 prompt 后，会通过 ReAct 调 locate_scenes_tool + propose_rewrite_tool。
+   *
+   * 提示词只描述「任务」，不描述「呈现」——diff / Keep / Undo 是编辑器自身机制
+   * （propose_rewrite_tool 输出的 result 由前端 chat 流接到 AgentDiffReview，跟 LLM 无关）。
+   * 强调「结合整本剧 / 前后场次 / 主线走向」是为了让 Agent 主动去 read_scene_tool
+   * 拉相邻场上下文，而非只看一场就改——剧本是连贯逻辑。
+   */
+  const REWRITE_QUICK_COMMANDS: Record<string, { label: string; prompt: string }> = useMemo(
+    () => ({
+      opening_hook: {
+        label: '改钩子',
+        prompt: '请针对「开场钩子」维度（前 3 集前 3 场抓人），结合整本剧的人物关系与主线走向，定位最弱的场次并给出具体改写建议。',
+      },
+      reward_density: {
+        label: '改爽点',
+        prompt: '请针对「爽点密度」维度（反转 / 打脸 / 逆袭），结合前后场次的铺垫与回收，定位塌陷的场次并给出具体改写建议。',
+      },
+      motivation: {
+        label: '改动机',
+        prompt: '请针对「动机自洽」维度（关键决策是否有铺垫），结合人物前情与后续走向，定位动机断裂的场次并给出具体改写建议。',
+      },
+      pacing: {
+        label: '改节奏',
+        prompt: '请针对「节奏控制」维度（中段是否塌陷），结合整本剧的节奏曲线，定位拖沓 / 跳跃的场次并给出具体改写建议。',
+      },
+      risk: {
+        label: '降风险',
+        prompt: '请针对「审核风险」维度（广电红线 / 题材合规），结合该场在整剧中的功能定位，定位高风险场次并给出「去风险化」的改写建议。',
+      },
+    }),
+    [],
+  )
+
+  const fillRewritePromptByDimension = useCallback(
+    (dimension: string) => {
+      const cmd = REWRITE_QUICK_COMMANDS[dimension]
+      if (!cmd) return
+      setPrompt(cmd.prompt)
+      requestAnimationFrame(() => {
+        promptInputDivRef.current?.focus()
+      })
+      message.info(`已预填「${cmd.label}」指令到对话框，按 Enter 发送`, 2.5)
+    },
+    [REWRITE_QUICK_COMMANDS],
+  )
+
+  // F1(a) 报告页跳转过来：解析 ?prefill_dim=xxx → 预填 chat 指令 + 清掉 query
+  useEffect(() => {
+    if (typeof window === 'undefined') return
+    if (!snap.workspaceId) return
+    const url = new URL(window.location.href)
+    const dim = url.searchParams.get('prefill_dim')
+    if (!dim || !REWRITE_QUICK_COMMANDS[dim]) return
+    fillRewritePromptByDimension(dim)
+    url.searchParams.delete('prefill_dim')
+    const nextSearch = url.searchParams.toString()
+    window.history.replaceState(
+      {},
+      '',
+      `${url.pathname}${nextSearch ? `?${nextSearch}` : ''}${url.hash}`,
+    )
+  }, [snap.workspaceId, REWRITE_QUICK_COMMANDS, fillRewritePromptByDimension])
+
 
   const expandedWorkspaceInitRef = useRef('')
 
@@ -1504,16 +1779,36 @@ const LatexEditorPage = () => {
     return calcCompactSelectWidth(label, 66, 150)
   }, [selectedKnowledgeBase?.name])
   const headerTabItems = useMemo(
-    () =>
-      snap.openedFiles.map((path) => ({
-        key: path,
-        label: (
-          <span className="doc-studio__header-tab-label" title={path}>
-            {path.split('/').pop()}
-          </span>
-        ),
-      })),
-    [snap.openedFiles],
+    () => {
+      // ScriptLens 场景：path 是场次 uuid（如 39d64ef9-...），人类可读名（"第 5 集 5-3 场《沈宅 夜 内》"）
+      // 存在 fileTree.node.name 上。优先从场次树查显示名，找不到才兜底为 path 末段。
+      const lookupName = (nodes: typeof snap.fileTree, target: string): string | null => {
+        if (!nodes || !Array.isArray(nodes)) return null
+        for (const node of nodes as Array<{ path: string; name: string; children?: any[] }>) {
+          if (node.path === target) return node.name
+          if (node.children) {
+            const found = lookupName(node.children as any, target)
+            if (found) return found
+          }
+        }
+        return null
+      }
+      return snap.openedFiles.map((path) => {
+        const displayName =
+          path === FULL_SCRIPT_VIRTUAL_PATH
+            ? '📖 完整剧本'
+            : lookupName(snap.fileTree, path) || path.split('/').pop() || path
+        return {
+          key: path,
+          label: (
+            <span className="doc-studio__header-tab-label" title={displayName}>
+              {displayName}
+            </span>
+          ),
+        }
+      })
+    },
+    [snap.openedFiles, snap.fileTree],
   )
   const compileLogGroups = useMemo<CompileLogGroup[]>(() => {
     const logs = snap.compileResult?.data?.logs
@@ -1745,7 +2040,7 @@ const LatexEditorPage = () => {
       if (filtered.length === fileMentions.length) return
       let updatedPrompt = prompt.replace(new RegExp(`${escapeRegExp(placeholder)}(?!\\d)`, 'g'), '')
       const normalized = filtered.map((item, idx) => {
-        const newPlaceholder = `@file${idx + 1}`
+        const newPlaceholder = `@scene${idx + 1}`
         if (item.placeholder !== newPlaceholder) {
           const regex = new RegExp(`${escapeRegExp(item.placeholder)}(?!\\d)`, 'g')
           updatedPrompt = updatedPrompt.replace(regex, newPlaceholder)
@@ -1771,10 +2066,10 @@ const LatexEditorPage = () => {
       let placeholder: string = existing?.placeholder || ''
       if (!placeholder) {
         if (fileMentions.length >= MAX_FILE_MENTION_COUNT) {
-          message.warning(`最多可引用 ${MAX_FILE_MENTION_COUNT} 个文件`)
+          message.warning(`最多可引用 ${MAX_FILE_MENTION_COUNT} 个场次`)
           return
         }
-        placeholder = `@file${fileMentions.length + 1}`
+        placeholder = `@scene${fileMentions.length + 1}`
         setFileMentions((prev) => [
           ...prev,
           {
@@ -1807,7 +2102,7 @@ const LatexEditorPage = () => {
         removeSelectionSnippet(placeholder)
         return
       }
-      if (placeholder.startsWith('@file')) {
+      if (placeholder.startsWith('@scene')) {
         removeFileMention(placeholder)
       }
     },
@@ -1937,7 +2232,7 @@ const LatexEditorPage = () => {
       }
       
       // ????????????????
-      const tagClass = match.startsWith('@file')
+      const tagClass = match.startsWith('@scene')
         ? 'doc-studio__prompt-tag doc-studio__prompt-tag--file'
         : 'doc-studio__prompt-tag'
       html += `<span class="${tagClass}" contenteditable="false" data-placeholder="${match}"><span class="anticon anticon-file-text"><svg viewBox="64 64 896 896" focusable="false" width="10" height="10" fill="currentColor"><path d="M854.6 288.6L639.4 73.4c-6-6-14.1-9.4-22.6-9.4H192c-17.7 0-32 14.3-32 32v832c0 17.7 14.3 32 32 32h640c17.7 0 32-14.3 32-32V311.3c0-8.5-3.4-16.7-9.4-22.7zM790.2 326H602V137.8L790.2 326zm1.8 562H232V136h302v216a42 42 0 0042 42h216v494z"></path></svg></span><span>${match}</span><span class="anticon anticon-close prompt-tag-close" data-action="remove-${match}"><svg viewBox="64 64 896 896" focusable="false" width="9" height="9" fill="currentColor"><path d="M563.8 512l262.5-312.9c4.4-5.2.7-13.1-6.1-13.1h-79.8c-4.7 0-9.2 2.1-12.3 5.7L511.6 449.8 295.1 191.7c-3-3.6-7.5-5.7-12.3-5.7H203c-6.8 0-10.5 7.9-6.1 13.1L459.4 512 196.9 824.9A7.95 7.95 0 00203 838h79.8c4.7 0 9.2-2.1 12.3-5.7l216.5-258.1 216.5 258.1c3 3.6 7.5 5.7 12.3 5.7h79.8c6.8 0 10.5-7.9 6.1-13.1L563.8 512z"></path></svg></span></span>`
@@ -2039,7 +2334,55 @@ const LatexEditorPage = () => {
 
   const openFile = useCallback(
     async (path: string, forceReload = false, silent = false) => {
-      if (!docStudioState.workspaceId) return
+      const workspaceIdAtStart = docStudioState.workspaceId
+      if (!workspaceIdAtStart) return
+      const isWorkspaceStillCurrent = () => docStudioState.workspaceId === workspaceIdAtStart
+      // D1：「完整剧本」虚拟视图——前端按 fileTree 顺序拼接所有场次内容。
+      // 后端无此 path，绝对不能走 fetchFileContent。
+      if (path === FULL_SCRIPT_VIRTUAL_PATH) {
+        const existing = docStudioState.files[path]
+        if (!forceReload && existing && !existing.loading) {
+          docStudioActions.setActiveFile(path)
+          return
+        }
+        docStudioActions.setActiveFile(path)
+        if (!silent) docStudioActions.setFileLoading(path, true)
+        try {
+          const orderedScenePaths = collectAllFilePaths(
+            (docStudioState.fileTree || []) as DocStudioAPI.FileNode[],
+          )
+          if (orderedScenePaths.length === 0) {
+            docStudioActions.setFileContent(path, '（剧本暂无场次）', 'utf-8')
+            return
+          }
+          const parts: string[] = []
+          for (const scenePath of orderedScenePaths) {
+            const buf = docStudioState.files[scenePath]
+            if (buf?.content) {
+              parts.push(buf.content)
+              continue
+            }
+            // eslint-disable-next-line no-await-in-loop
+            const file = await fetchFileContent(
+              { workspaceId: workspaceIdAtStart, path: scenePath },
+              { loading: false, errorToast: false },
+            )
+            if (!isWorkspaceStillCurrent()) return
+            docStudioActions.setFileContent(scenePath, file.content, file.encoding)
+            parts.push(file.content || '')
+          }
+          if (!isWorkspaceStillCurrent()) return
+          docStudioActions.setFileContent(path, parts.join('\n\n'), 'utf-8')
+        } catch (error) {
+          if (!isWorkspaceStillCurrent()) return
+          showRequestError(error)
+        } finally {
+          if (isWorkspaceStillCurrent()) {
+            docStudioActions.setFileLoading(path, false)
+          }
+        }
+        return
+      }
       if (!forceReload) {
         const existing = docStudioState.files[path]
         if (existing && !existing.loading) {
@@ -2053,17 +2396,21 @@ const LatexEditorPage = () => {
       }
       try {
         const file = await fetchFileContent({
-          workspaceId: docStudioState.workspaceId,
+          workspaceId: workspaceIdAtStart,
           path,
         }, {
           loading: false,
           errorToast: false,
         })
+        if (!isWorkspaceStillCurrent()) return
         docStudioActions.setFileContent(path, file.content, file.encoding)
       } catch (error) {
+        if (!isWorkspaceStillCurrent()) return
         showRequestError(error)
       } finally {
-        docStudioActions.setFileLoading(path, false)
+        if (isWorkspaceStillCurrent()) {
+          docStudioActions.setFileLoading(path, false)
+        }
       }
     },
     [showRequestError],
@@ -2090,79 +2437,12 @@ const LatexEditorPage = () => {
     [openFile],
   )
 
-  // 当前激活场景在文件树里的可读名（用于 Modal 顶部展示）
-  const activeSceneLabel = useMemo(() => {
-    if (!snap.activeFilePath) return ''
-    const find = (nodes?: typeof snap.fileTree): string | null => {
-      if (!nodes) return null
-      for (const n of nodes) {
-        if (n.type === 'file' && n.path === snap.activeFilePath) return n.name
-        if (n.type === 'directory') {
-          const r = find(n.children)
-          if (r) return r
-        }
-      }
-      return null
-    }
-    return find(snap.fileTree) || snap.activeFilePath
-  }, [snap.activeFilePath, snap.fileTree])
-
-  /**
-   * M3 场景改写：调 POST /rewrite → 注入 AgentDiffReview state pipeline。
-   * 复用 ScholarMind in-place toggle，AgentDiffReview 直接展示 unified diff。
-   */
-  const handleSubmitRewrite = useCallback(async () => {
-    const workspaceId = docStudioState.workspaceId
-    const sceneId = docStudioState.activeFilePath
-    if (!workspaceId) {
-      message.warning('请先选择剧本')
-      return
-    }
-    if (!sceneId) {
-      message.warning('请先在左侧选择一个场景')
-      return
-    }
-    const issue = rewriteIssue.trim()
-    if (!issue) {
-      message.warning('请描述本场需要改进的问题')
-      return
-    }
-    setRewriteSubmitting(true)
-    try {
-      const resp = await rewriteScript(workspaceId, {
-        scene_id: sceneId,
-        target_dimension: rewriteDimension,
-        issue,
-      })
-      // 注入 ScholarMind diff 复用管线，触发中央 pane in-place AgentDiffReview
-      setAllFileDiffs([
-        {
-          file_path: sceneId,
-          original_content: resp.original_text || '',
-          modified_content: resp.rewritten_text || '',
-        },
-      ])
-      setCurrentDiffIndex(0)
-      setAgentDiffReviewOpen(true)
-      setDiffModalContext('agent')
-      setDiffModalOpen(false)
-      setRewriteModalOpen(false)
-      setRewriteIssue('')
-      message.success(
-        resp.rationale
-          ? `改写完成：${resp.rationale.slice(0, 60)}${resp.rationale.length > 60 ? '...' : ''}`
-          : '改写完成，请在中央 diff 视图比对',
-      )
-    } catch (err: unknown) {
-      const e = err as {
-        response?: { data?: { detail?: string }; status?: number }
-        message?: string
-      }
-      message.error(`改写失败：${e?.response?.data?.detail || e?.message || '未知错误'}`)
-    } finally {
-      setRewriteSubmitting(false)
-    }
-  }, [rewriteDimension, rewriteIssue])
+  // F1 改写入口最终选择「chat 预填指令」路径（见 fillRewritePromptByDimension）：
+  //   - 走 ReAct Agent，自动 locate_scenes_tool → propose_rewrite_tool；
+  //   - 用户能在 chat 里继续追问「再激进一点」「保留女主线」等迭代式改写；
+  //   - 与 PRD §8 持续追问 / 持续改写的核心理念一致；
+  // 不再保留直接调 POST /rewrite 的捷径函数——避免「按钮一键改写后却看不到推理过程」
+  // 的"假 Agent"体验。chat 里的 propose_rewrite_tool 仍能产出 diff 走 AgentDiffReview。
 
   const revealEditorSelectionByOffset = useCallback((startOffset: number, endOffset: number) => {
     const editor = editorRef.current
@@ -2231,11 +2511,187 @@ const LatexEditorPage = () => {
     [openFile, revealEditorSelectionByOffset],
   )
 
+  // ========== 报告 ↔ 编辑器联动：两类语义严格区分 ==========
+  //
+  // 1) traceEvidence(溯源)：点 evidence chip / 关键场景 / 主要看点
+  //    → openFile + Monaco **持久高亮**（直到点别处 / 切剧本 / 显式取消）
+  //    → rail 同步设置 activeEvidenceId，UI 同色高亮对齐
+  //    → **不切 chat tab、不注入 prompt、不派 Agent**
+  //    （这是 task.md §三-2"保留原文依据"的核心：用户要"对齐论点和论据"）
+  //
+  // 2) dispatchAgentTask(派 Agent)：点"让 Agent 改写" / 维度追问按钮
+  //    → 切 chat tab + 注入 prompt（rewrite_seed / dim_inquiry）
+  //    → 同时也跳一下编辑器但**3 秒淡出**（视线引导，避免污染编辑区）
+  //
+  // 旧版本里所有点击都走 dispatchAgentTask，相当于"看一眼原文"也被强行扔到 Agent 对话；
+  // 用户反馈这是"狗屎跳转"——溯源就该是只读对齐，不该被 LLM 介入。
+
+  const [activeEvidenceId, setActiveEvidenceId] = useState<string | null>(null)
+  const traceDisposeRef = useRef<(() => void) | null>(null)
+
+  /** 显式清掉当前持久高亮（切剧本 / rail 主动取消时调用）。 */
+  const clearEvidenceTrace = useCallback(() => {
+    if (traceDisposeRef.current) {
+      try {
+        traceDisposeRef.current()
+      } catch {
+        // 编辑器已销毁等情况：静默
+      }
+      traceDisposeRef.current = null
+    }
+    setActiveEvidenceId(null)
+  }, [])
+
+  /**
+   * 溯源：跳到 scene + 持久高亮，并把 evidence_id 标记为当前激活态（rail 联动同色高亮）。
+   *
+   * @param evidenceRefId  rail 用来同色高亮的 key（不参与编辑器高亮，仅 UI 标记）
+   * @param sceneId        UUID
+   * @param startLine/endLine  scene.text 内的物理行号（1-indexed）
+   */
+  const traceEvidence = useCallback(
+    async (params: {
+      evidenceRefId: string
+      sceneId: string
+      startLine?: number | null
+      endLine?: number | null
+    }): Promise<void> => {
+      const workspaceId = docStudioState.workspaceId
+      if (!workspaceId) {
+        message.warning('请先选择剧本工作区')
+        return
+      }
+
+      const sceneExists = findSceneById(workspaceId, params.sceneId)
+      if (!sceneExists) {
+        message.warning('该证据引用的场次在当前剧本中不存在')
+        return
+      }
+
+      // 再点同一个卡片 = 取消溯源高亮。用户是在对齐论点/论据，不是在进入新任务。
+      if (activeEvidenceId === params.evidenceRefId) {
+        clearEvidenceTrace()
+        return
+      }
+
+      // 切到当前 evidence；上一次的持久高亮先清
+      if (traceDisposeRef.current) {
+        try {
+          traceDisposeRef.current()
+        } catch {
+          // ignore
+        }
+        traceDisposeRef.current = null
+      }
+      setActiveEvidenceId(params.evidenceRefId)
+
+      await openFile(params.sceneId, false, true)
+      const startLine = params.startLine ?? null
+      const endLine = params.endLine ?? null
+      if (startLine == null) return
+
+      // 等 Monaco model 挂上来；持久高亮（ttlMs=0），返回 dispose 存到 ref，下次溯源/取消时调用
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const editor = editorRef.current
+        const model = editor?.getModel?.()
+        const lineCount = Number(model?.getLineCount?.() ?? 0)
+        if (model && lineCount > 0) {
+          const dispose = highlightLineRange(
+            editor,
+            startLine,
+            endLine ?? startLine,
+            { focus: false, ttlMs: 0 },
+          )
+          traceDisposeRef.current = dispose
+          return
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => window.setTimeout(resolve, 50))
+      }
+      // editor 没及时挂上：静默降级（rail 仍然标记了 activeEvidenceId，等编辑器就绪用户可重新点）
+      // eslint-disable-next-line no-console
+      console.warn('[ScriptLens] traceEvidence: editor not ready, skip line highlight')
+    },
+    [activeEvidenceId, clearEvidenceTrace, openFile],
+  )
+
+  // 切剧本时把上一份溯源高亮 + activeEvidenceId 清掉（避免高亮残留到新剧本上）
+  useEffect(() => {
+    clearEvidenceTrace()
+  }, [snap.workspaceId, clearEvidenceTrace])
+
+  /**
+   * 任务派发器（仅用于 rewrite_seed / dim_inquiry；evidence_lookup 改走 traceEvidence）。
+   *
+   * 协议详见 docs/03-system-mental-model.md §6 §7：
+   *   1. openFile(scene_id) → revealLines(start_line, end_line) → Monaco 行级高亮 3s 淡出
+   *   2. 切右栏 tab 到 'chat'
+   *   3. composer 注入 prompt + <TASK_META> JSON（不自动 send，让用户检查 / 追加偏好）
+   */
+  const dispatchAgentTask = useCallback(
+    async (task: AgentTask) => {
+      const workspaceId = docStudioState.workspaceId
+      if (!workspaceId) {
+        message.warning('请先选择剧本工作区')
+        return
+      }
+
+      // evidence_lookup 不再走 dispatch；URL 通道遗留场景兜底转 traceEvidence
+      if (task.kind === 'evidence_lookup') {
+        await traceEvidence({
+          evidenceRefId: task.evidence_ref_id,
+          sceneId: task.scene_id,
+          startLine: task.start_line ?? null,
+          endLine: task.end_line ?? null,
+        })
+        return
+      }
+
+      setRightTab('chat')
+      const promptText = buildPromptFromTask(task)
+      setPrompt(promptText)
+
+      const sceneId = (task as { scene_id?: string }).scene_id
+      if (!sceneId) return
+
+      const sceneExists = findSceneById(workspaceId, sceneId)
+      if (!sceneExists) {
+        message.warning('该证据引用的场次在当前剧本中不存在，已仅派发到 Agent 对话')
+        return
+      }
+
+      await openFile(sceneId, false, true)
+      const startLine = (task as { start_line?: number | null }).start_line ?? null
+      const endLine = (task as { end_line?: number | null }).end_line ?? null
+      if (startLine == null) return
+
+      // 派 Agent 类用 3s 淡出（视线引导后让用户视线回到 chat composer）
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        const editor = editorRef.current
+        const model = editor?.getModel?.()
+        const lineCount = Number(model?.getLineCount?.() ?? 0)
+        if (model && lineCount > 0) {
+          highlightLineRange(editor, startLine, endLine ?? startLine, { focus: false })
+          return
+        }
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => window.setTimeout(resolve, 50))
+      }
+      // eslint-disable-next-line no-console
+      console.warn('[ScriptLens] dispatchAgentTask: editor not ready, skip line highlight')
+    },
+    [openFile, setRightTab, setPrompt, traceEvidence],
+  )
+
+
   const loadWorkspaceChatHistory = useCallback(
     async (_workspaceId: string, config: Record<string, any>, sessionIdOverride?: string | null) => {
+      const isCurrentWorkspace = () => docStudioState.workspaceId === _workspaceId
       const sessionId = sessionIdOverride ?? config?.session_id ?? config?.sessionId
       if (!sessionId) {
-        docStudioActions.setChatMessages([])
+        if (isCurrentWorkspace()) {
+          docStudioActions.setChatMessages([])
+        }
         return
       }
       try {
@@ -2248,6 +2704,7 @@ const LatexEditorPage = () => {
           loading: false,
           errorToast: false,
         })
+        if (!isCurrentWorkspace()) return
         const items = Array.isArray(data?.items) ? data.items : []
         const messages: DocStudioChatMessage[] = []
         items.forEach((item) => {
@@ -2349,27 +2806,39 @@ const LatexEditorPage = () => {
         }
       } catch (error) {
         console.warn('[DocStudio] 加载对话历史失败:', error)
-        docStudioActions.setChatMessages([])
+        if (isCurrentWorkspace()) {
+          docStudioActions.setChatMessages([])
+        }
       }
     },
     [showRequestError],
   )
 
   const isRestoringWorkspaceRef = useRef(false)
+  const workspaceListLoadSeqRef = useRef(0)
+  const workspaceFilesLoadSeqRef = useRef(0)
 
   const loadWorkspaceFiles = useCallback(
     async (workspaceId: string, shouldOpenDefault = true) => {
+      const loadSeq = ++workspaceFilesLoadSeqRef.current
+      const isStaleLoad = () =>
+        workspaceFilesLoadSeqRef.current !== loadSeq || docStudioState.workspaceId !== workspaceId
       try {
         isRestoringWorkspaceRef.current = true
         const data = await fetchWorkspaceFiles({ workspaceId }, {
           loading: false,
           errorToast: false,
         })
+        if (isStaleLoad()) return
         docStudioActions.setFileTree(data.files)
-        docStudioActions.setWorkspaceConfig(data.config)
+        docStudioActions.setWorkspaceConfig({
+          ...(docStudioState.workspaceConfig || {}),
+          ...(data.config || {}),
+        })
         applyLlmOptionsFromConfig(data.config)
         // Cursor 逻辑：有 session_id 则加载持久化对话；无则显示「新对话」
         await loadWorkspaceChatHistory(workspaceId, data.config)
+        if (isStaleLoad()) return
         setLlmOptionsReady(true)
         
         // 打印文件树（用于调试）
@@ -2398,6 +2867,7 @@ const LatexEditorPage = () => {
           try {
             if (preferredFile) {
               await openFile(preferredFile, true)
+              if (isStaleLoad()) return
               docStudioActions.setActiveFile(preferredFile)
               restored = true
             }
@@ -2414,8 +2884,10 @@ const LatexEditorPage = () => {
                 for (const path of validOpened) {
                   // eslint-disable-next-line no-await-in-loop
                   await openFile(path)
+                  if (isStaleLoad()) return
                 }
                 // 恢复上次激活的文件
+                if (isStaleLoad()) return
                 if (parsed.activeFilePath && validOpened.includes(parsed.activeFilePath)) {
                   docStudioActions.setActiveFile(parsed.activeFilePath)
                 }
@@ -2428,13 +2900,24 @@ const LatexEditorPage = () => {
           }
 
           if (!restored) {
-            docStudioActions.setActiveFile('')
+            if (isStaleLoad()) return
+            const firstFile = findFirstFile(data.files)
+            if (firstFile) {
+              await openFile(firstFile, true)
+              if (isStaleLoad()) return
+              docStudioActions.setActiveFile(firstFile)
+            } else {
+              docStudioActions.setActiveFile('')
+            }
           }
         }
       } catch (error) {
+        if (isStaleLoad()) return
         showRequestError(error)
       } finally {
-        isRestoringWorkspaceRef.current = false
+        if (workspaceFilesLoadSeqRef.current === loadSeq) {
+          isRestoringWorkspaceRef.current = false
+        }
       }
     },
     [
@@ -2456,6 +2939,7 @@ const LatexEditorPage = () => {
             errorToast: false,
           },
         )
+        if (docStudioState.workspaceId !== workspaceId) return
         docStudioActions.setFileTree(data.files)
       } catch (error) {
         console.warn('[DocStudio] 静默刷新文件树失败', error)
@@ -2530,7 +3014,7 @@ const LatexEditorPage = () => {
     const normalized = String(rawPrompt || '')
       .replace(/\[已附带图片\s*\d+\s*张\]/g, ' ')
       .replace(/@selection\d+/gi, ' ')
-      .replace(/@file\d+/gi, ' ')
+      .replace(/@scene\d+/gi, ' ')
       .replace(/`+/g, ' ')
       .replace(/\s+/g, ' ')
       .trim()
@@ -2741,7 +3225,10 @@ const LatexEditorPage = () => {
           loading: false,
           errorToast: false,
         })
-        docStudioActions.setWorkspaceConfig(data.config)
+        docStudioActions.setWorkspaceConfig({
+          ...(docStudioState.workspaceConfig || {}),
+          ...(data.config || {}),
+        })
         await loadWorkspaceChatHistory(snap.workspaceId, data.config, sessionId)
       } catch (e) {
         showRequestError(e)
@@ -2930,12 +3417,14 @@ const LatexEditorPage = () => {
 
   const loadWorkspaces = useCallback(
     async (targetWorkspace?: string) => {
+      const loadSeq = ++workspaceListLoadSeqRef.current
       docStudioActions.setWorkspaceLoading(true)
       try {
         const list = await listWorkspaces({
           loading: false,
           errorToast: false,
         })
+        if (workspaceListLoadSeqRef.current !== loadSeq) return
         docStudioActions.setWorkspaces(list)
         // 兜底候选必须排除 Notebook：Notebook 只能通过 /doc-studio/notebook 显式访问，
         // 否则用户先打开 Notebook 再切到 /doc-studio 时，会把 Notebook 误装进 Doc Studio 视图。
@@ -2946,15 +3435,19 @@ const LatexEditorPage = () => {
         if (preferred) {
           docStudioActions.setWorkspaceId(preferred)
           await loadWorkspaceFiles(preferred)
+          if (workspaceListLoadSeqRef.current !== loadSeq) return
         } else {
           // 没有任何 Doc Studio 工作区时，明确清空状态，进入 Doc Studio 空白态，
           // 避免从 /doc-studio/notebook 切回 /doc-studio 时残留 Notebook 的文件树和会话。
           docStudioActions.setWorkspaceId('')
         }
       } catch (error) {
+        if (workspaceListLoadSeqRef.current !== loadSeq) return
         showRequestError(error)
       } finally {
-        docStudioActions.setWorkspaceLoading(false)
+        if (workspaceListLoadSeqRef.current === loadSeq) {
+          docStudioActions.setWorkspaceLoading(false)
+        }
       }
     },
     [loadWorkspaceFiles, params.workspaceId],
@@ -2965,14 +3458,99 @@ const LatexEditorPage = () => {
   }, [loadWorkspaces, params.workspaceId])
 
   useEffect(() => {
+    const workspaceId = snap.workspaceId
+    if (!isScriptLensSession || !workspaceId) {
+      setActiveScriptDetail(null)
+      setScriptStatusPolling(false)
+      setScriptProcessingStartedAt(null)
+      return
+    }
+
+    let cancelled = false
+    let timer: number | undefined
+
+    const pollScriptStatus = async () => {
+      setScriptStatusPolling(true)
+      try {
+        const detail = await fetchWorkspace(
+          { workspaceId },
+          { loading: false, errorToast: false },
+        )
+        if (cancelled || docStudioState.workspaceId !== workspaceId) return
+
+        setActiveScriptDetail(detail)
+        docStudioActions.setWorkspaceConfig({
+          ...(docStudioState.workspaceConfig || {}),
+          ...(detail.config || {}),
+          title: detail.name,
+        })
+
+        const nextStatus = String(detail.config?.status || '').trim()
+        if (SCRIPT_PROCESSING_STATUS.has(nextStatus)) {
+          setScriptProcessingStartedAt((prev) => prev ?? Date.now())
+          setScriptElapsedNow(Date.now())
+          timer = window.setTimeout(
+            pollScriptStatus,
+            nextStatus === 'pending' ? 2000 : 3000,
+          )
+          return
+        }
+
+        setScriptProcessingStartedAt(null)
+        if (nextStatus === 'ready' && !scriptReadyRefreshRef.current[workspaceId]) {
+          scriptReadyRefreshRef.current[workspaceId] = true
+          if (!docStudioState.fileTree.length) {
+            await loadWorkspaceFiles(workspaceId)
+            if (!cancelled && docStudioState.workspaceId === workspaceId) {
+              message.success('剧本解析完成，已自动刷新大纲')
+            }
+          }
+        }
+      } catch (error) {
+        if (!cancelled) {
+          console.warn('[ScriptLens] 轮询剧本解析状态失败', error)
+        }
+      } finally {
+        if (!cancelled) setScriptStatusPolling(false)
+      }
+    }
+
+    void pollScriptStatus()
+    return () => {
+      cancelled = true
+      if (timer) window.clearTimeout(timer)
+    }
+  }, [isScriptLensSession, loadWorkspaceFiles, snap.workspaceId])
+
+  useEffect(() => {
     loadKnowledgeBases()
   }, [loadKnowledgeBases])
 
   useEffect(() => {
+    // 不支持编译时（如纯文本工作区）从 compile 退回 chat
     if (!supportsCompilePanel && rightTab === 'compile') {
       setRightTab('chat')
     }
-  }, [supportsCompilePanel, rightTab])
+    // ScriptLens 场景下「编译」入口被替换为「分析报告」，自动切走避免空白页
+    if (isScriptLensSession && rightTab === 'compile') {
+      setRightTab('report')
+    }
+    // 非 ScriptLens 场景误进 'report'（之前持久化的状态），切回 chat
+    if (!isScriptLensSession && rightTab === 'report') {
+      setRightTab('chat')
+    }
+  }, [supportsCompilePanel, rightTab, isScriptLensSession])
+
+  useEffect(() => {
+    const workspaceId = snap.workspaceId
+    if (!isScriptLensSession || !workspaceId) return
+    if (!SCRIPT_PROCESSING_STATUS.has(scriptStatus)) return
+    if (autoOpenedReportForScriptRef.current[workspaceId]) return
+
+    autoOpenedReportForScriptRef.current[workspaceId] = true
+    setRightPanelClosed(false)
+    setRightTab('report')
+  }, [isScriptLensSession, scriptStatus, snap.workspaceId])
 
   useEffect(() => {
     try {
@@ -3254,6 +3832,47 @@ const LatexEditorPage = () => {
     navigate(`/doc-studio/${workspaceId}`)
   }
 
+  const handleDeleteCurrentWorkspace = async () => {
+    const workspaceId = String(snap.workspaceId || '').trim()
+    if (!workspaceId) return
+    const fallbackWorkspaceId =
+      docStudioWorkspaces.find((item) => item.workspaceId !== workspaceId)?.workspaceId || ''
+
+    setWorkspaceDeleting(true)
+    try {
+      const deleted = await deleteWorkspace(
+        { workspaceId },
+        { loading: false, errorToast: false },
+      )
+      try {
+        localStorage.removeItem(`latex_editor_workspace_state_${workspaceId}`)
+      } catch (error) {
+        console.warn('清理剧本本地打开状态失败', error)
+      }
+      delete scriptReadyRefreshRef.current[workspaceId]
+      setActiveScriptDetail(null)
+      setScriptProcessingStartedAt(null)
+      setScriptElapsedNow(Date.now())
+      message.success(`已删除《${activeWorkspaceName}》及其分析报告、对话状态和时间线`)
+      if (!deleted.storage_deleted) {
+        message.warning('数据库数据已删除，但原始上传文件此前已不存在或未能删除，请检查后端日志')
+      }
+
+      if (fallbackWorkspaceId) {
+        navigate(`/doc-studio/${fallbackWorkspaceId}`)
+        await loadWorkspaces(fallbackWorkspaceId)
+      } else {
+        navigate('/doc-studio')
+        docStudioActions.setWorkspaces([])
+        docStudioActions.setWorkspaceId('')
+      }
+    } catch (error) {
+      message.error(getErrorMessage(error))
+    } finally {
+      setWorkspaceDeleting(false)
+    }
+  }
+
   const handleKnowledgeBaseChange = (value: number | string) => {
     const parsed = Number(value)
     if (Number.isFinite(parsed)) {
@@ -3326,6 +3945,10 @@ const LatexEditorPage = () => {
         name: newWorkspaceName.trim() || newWorkspaceFile.name.replace(/\.[^.]+$/, ''),
         config: { file: newWorkspaceFile },
       })
+      setActiveScriptDetail(workspace)
+      setScriptProcessingStartedAt(Date.now())
+      setScriptElapsedNow(Date.now())
+      delete scriptReadyRefreshRef.current[workspace.workspaceId]
       setWorkspaceModalOpen(false)
       setNewWorkspaceName('')
       setNewWorkspaceType('latex')
@@ -3640,9 +4263,48 @@ const LatexEditorPage = () => {
     snap.workspaceId,
   ])
 
+  /**
+   * F2：导出完整剧本（应用全部 script_operations 后的最新版本）。
+   * 后端 GET /api/scripts/{id}/export?format=docx|pdf|txt 返回二进制文件。
+   */
+  const handleExportFullScript = useCallback(async () => {
+    if (!snap.workspaceId) {
+      message.warning('请先选择剧本')
+      return
+    }
+    setExporting(true)
+    try {
+      await exportFullScript(snap.workspaceId, exportFormat)
+      message.success(`已开始下载 ${exportFormat.toUpperCase()} 文件`)
+      setExportModalOpen(false)
+    } catch (err: unknown) {
+      const e = err as { response?: { status?: number }; message?: string }
+      const status = e?.response?.status
+      const reason = e?.message || '未知错误'
+      message.error(
+        status === 404
+          ? `后端尚未实现 /export 接口（${reason}）`
+          : `导出失败：${reason}`,
+      )
+    } finally {
+      setExporting(false)
+    }
+  }, [exportFormat, snap.workspaceId])
+
   const handleCompile = async () => {
     if (!snap.workspaceId) {
-      message.warning('请先选择工作区')
+      message.warning('请先选择剧本')
+      return
+    }
+    // ScriptLens 场景：编译动作 = 重新诊断（重跑 5 维评分），优先级最高
+    if (isScriptLensSession) {
+      try {
+        await reanalyzeScript(snap.workspaceId)
+        message.success('已触发重新诊断，请稍候在「分析报告」中查看最新结果')
+      } catch (error) {
+        const reason = (error as { message?: string })?.message || String(error)
+        message.error(`重新诊断失败：${reason}`)
+      }
       return
     }
     if (!supportsCompilePanel) {
@@ -6751,40 +7413,62 @@ const LatexEditorPage = () => {
   })()
 
   const headerOverflowMenuItems = useMemo<MenuProps['items']>(() => {
-    const items: MenuProps['items'] = [
-      {
+    const items: MenuProps['items'] = []
+    if (isScriptLensSession) {
+      // F2：剧本场景下，原「下载当前场次」改为「导出完整剧本」（docx / pdf / txt）
+      // 后端已应用所有 script_operations（改写历史），导出的是当前最终版本。
+      items.push({
+        key: 'export-script',
+        label: '导出完整剧本',
+        icon: <DownloadOutlined />,
+        disabled: !snap.workspaceId,
+      })
+    } else {
+      items.push({
         key: 'download',
         label: '下载当前文件',
         icon: <DownloadOutlined />,
         disabled: !snap.activeFilePath,
-      },
-      {
-        key: 'delete',
-        label: '删除当前文件',
-        icon: <DeleteOutlined />,
-        disabled: !snap.activeFilePath,
-        danger: true,
-      },
-    ]
+      })
+    }
+    items.push({
+      key: 'delete',
+      label: isScriptLensSession ? '从工作区移除当前场次' : '删除当前文件',
+      icon: <DeleteOutlined />,
+      disabled:
+        !snap.activeFilePath || snap.activeFilePath === FULL_SCRIPT_VIRTUAL_PATH,
+      danger: true,
+    })
     if (lastOperationId && !undoingLastApply) {
       items.push({
         key: 'undo',
-        label: '撤销应用',
+        label: '撤销最近一次改写',
         icon: <SyncOutlined />,
       })
     }
     items.push({
       key: 'history',
-      label: '文件时间线',
+      label: isScriptLensSession ? '改写历史时间线' : '文件时间线',
       icon: <HistoryOutlined />,
     })
     return items
-  }, [lastOperationId, snap.activeFilePath, undoingLastApply])
+  }, [
+    isScriptLensSession,
+    lastOperationId,
+    snap.activeFilePath,
+    snap.workspaceId,
+    undoingLastApply,
+  ])
 
   const handleHeaderOverflowMenuClick = useCallback<NonNullable<MenuProps['onClick']>>(
     ({ key }) => {
       if (key === 'download') {
         void handleDownloadCurrentFile()
+        return
+      }
+      if (key === 'export-script') {
+        setExportFormat('docx')
+        setExportModalOpen(true)
         return
       }
       if (key === 'delete') {
@@ -6808,9 +7492,12 @@ const LatexEditorPage = () => {
     (node: ReadonlyFileNode) => {
       const isHovered = hoveredTreePath === node.path
       const deleteLabel = node.type === 'directory' ? '删除文件夹' : '删除文件'
+      // D1：完整剧本虚拟节点没有真实文件，禁用 hover actions（重命名 / 删除）
+      const isVirtualFullScript = node.path === FULL_SCRIPT_VIRTUAL_PATH
       const isProtectedDirectory =
         node.type === 'directory' && isNotebookSystemPath(node.path, { protectParents: true })
-      const isProtectedFile = node.type === 'file' && isNotebookSystemPath(node.path)
+      const isProtectedFile =
+        isVirtualFullScript || (node.type === 'file' && isNotebookSystemPath(node.path))
       return (
         <span
           className="doc-studio__tree-node"
@@ -6819,8 +7506,26 @@ const LatexEditorPage = () => {
             setHoveredTreePath((prev) => (prev === node.path ? '' : prev))
           }}
         >
-          <span className="doc-studio__tree-node-main">
-            {node.type === 'directory' ? (
+          <span
+            className={`doc-studio__tree-node-main ${
+              isScriptLensSession
+                ? node.type === 'directory'
+                  ? 'doc-studio__tree-node-main--episode'
+                  : isVirtualFullScript
+                    ? 'doc-studio__tree-node-main--full'
+                    : 'doc-studio__tree-node-main--scene'
+                : ''
+            }`}
+          >
+            {/* ScriptLens 场景下用大纲样式（集 = 加粗章节、场 = 缩进项目符号），
+                不再像文件管理器那样塞文件夹/文件图标——这本质上是剧本目录，不是 FS。 */}
+            {isScriptLensSession ? (
+              isVirtualFullScript ? null : node.type === 'directory' ? (
+                <span className="doc-studio__outline-mark doc-studio__outline-mark--episode" aria-hidden />
+              ) : (
+                <span className="doc-studio__outline-mark doc-studio__outline-mark--scene" aria-hidden />
+              )
+            ) : node.type === 'directory' ? (
               <FolderOpenOutlined className="doc-studio__tree-node-icon doc-studio__tree-node-icon--directory" />
             ) : (
               <FileTextOutlined className="doc-studio__tree-node-icon doc-studio__tree-node-icon--file" />
@@ -6849,33 +7554,42 @@ const LatexEditorPage = () => {
                   />
                 </Tooltip>
               )}
-              <Tooltip title={deleteLabel}>
-                <Button
-                  type="text"
-                  className="doc-studio__tree-action-btn doc-studio__tree-action-btn--danger"
-                  icon={<DeleteOutlined />}
-                  onMouseDown={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                  }}
-                  onClick={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    showDeleteConfirm(node.path, node.type)
-                  }}
-                />
-              </Tooltip>
+              {!isVirtualFullScript && (
+                <Tooltip title={deleteLabel}>
+                  <Button
+                    type="text"
+                    className="doc-studio__tree-action-btn doc-studio__tree-action-btn--danger"
+                    icon={<DeleteOutlined />}
+                    onMouseDown={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                    }}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      showDeleteConfirm(node.path, node.type)
+                    }}
+                  />
+                </Tooltip>
+              )}
             </span>
           )}
         </span>
       )
     },
-    [hoveredTreePath, isNotebookSystemPath, openRenameModal, showDeleteConfirm],
+    [hoveredTreePath, isNotebookSystemPath, openRenameModal, showDeleteConfirm, isScriptLensSession],
+  )
+
+  // D1：左栏展示层注入「📖 完整剧本」虚拟顶节点；不动 snap.fileTree，
+  // 让其他依赖原始树的逻辑（lookupName / collectAllFilePaths / findNode）保持行为不变。
+  const displayFileTree = useMemo(
+    () => wrapWithFullScriptNode((snap.fileTree || []) as DocStudioAPI.FileNode[]),
+    [snap.fileTree],
   )
 
   const treeData = useMemo(
-    () => buildTreeData(cloneFileNodes(snap.fileTree), renderTreeNodeTitle),
-    [renderTreeNodeTitle, snap.fileTree],
+    () => buildTreeData(cloneFileNodes(displayFileTree), renderTreeNodeTitle),
+    [renderTreeNodeTitle, displayFileTree],
   )
 
   const isAgentDiffReviewActive =
@@ -6883,6 +7597,105 @@ const LatexEditorPage = () => {
   const hasPendingAgentReview =
     diffModalContext === 'agent' && allFileDiffs.length > 0
   const currentReviewDiff = isAgentDiffReviewActive ? allFileDiffs[currentDiffIndex] : undefined
+
+  const renderScriptStatusPanel = () => {
+    const label = SCRIPT_STATUS_LABELS[scriptStatus] || '准备中'
+    const totalEpisodes = Number(
+      activeScriptDetail?.config?.total_episodes ||
+      snap.workspaceConfig?.total_episodes ||
+      0,
+    )
+    const inferredEpisodes = inferEpisodeUpperBoundFromTitle(activeWorkspaceName)
+    const totalScenes = Number(
+      activeScriptDetail?.config?.total_scenes ||
+      snap.workspaceConfig?.total_scenes ||
+      0,
+    )
+    const elapsedText =
+      scriptProcessingElapsedSec >= 60
+        ? `${Math.floor(scriptProcessingElapsedSec / 60)}分${scriptProcessingElapsedSec % 60}秒`
+        : `${scriptProcessingElapsedSec}秒`
+    const failureReason = String(
+      activeScriptDetail?.config?.failure_reason ||
+      snap.workspaceConfig?.failure_reason ||
+      '',
+    ).trim()
+
+    if (isScriptFailed) {
+      return (
+        <div className="doc-studio__script-status-panel doc-studio__script-status-panel--failed">
+          <div className="doc-studio__script-status-card">
+            <Tag color="error">解析失败</Tag>
+            <h2>剧本解析失败</h2>
+            <p className="doc-studio__script-status-desc">
+              {failureReason || '后台解析未返回具体原因，请查看服务日志后重新上传。'}
+            </p>
+            <Space>
+              <Button onClick={() => snap.workspaceId && loadWorkspaces(snap.workspaceId)}>
+                刷新状态
+              </Button>
+              <Button type="primary" onClick={() => setWorkspaceModalOpen(true)}>
+                重新上传剧本
+              </Button>
+            </Space>
+          </div>
+        </div>
+      )
+    }
+
+    return (
+      <div className="doc-studio__script-status-panel">
+        <div className="doc-studio__script-status-card">
+          <Tag color="pink">ScriptLens 正在准备工作区</Tag>
+          <h2>正在解析《{activeWorkspaceName}》</h2>
+          <p className="doc-studio__script-status-desc">
+            系统正在读取全文、切分集场并写入检索索引。完成后会自动刷新左侧大纲并打开正文。
+          </p>
+          <Progress
+            percent={scriptProcessingProgress}
+            status="active"
+            strokeColor="#E07A8C"
+            trailColor="#F7E9E5"
+          />
+          <div className="doc-studio__script-status-steps">
+            {['上传完成', '文本解析', '集场切分', '检索索引', '进入编辑'].map((item, index) => (
+              <span
+                key={item}
+                className={index * 25 <= scriptProcessingProgress ? 'is-active' : ''}
+              >
+                {item}
+              </span>
+            ))}
+          </div>
+          <div className="doc-studio__script-status-meta">
+            <span>当前阶段：{label}</span>
+            <span>已等待：{elapsedText}</span>
+            {totalEpisodes > 0 && <span>{totalEpisodes} 集</span>}
+            {!totalEpisodes && inferredEpisodes > 0 && <span>约 {inferredEpisodes} 集</span>}
+            {totalScenes > 0 && <span>{totalScenes} 场</span>}
+            {scriptStatusPolling && <span>正在刷新状态…</span>}
+          </div>
+          <Alert
+            type="info"
+            showIcon
+            message={
+              scriptProcessingIsLarge
+                ? '这是一份较大的短剧剧本，解析和检索索引可能需要更久。请耐心等待，不要重复上传同一文件。'
+                : '请稍等片刻，不需要刷新页面；解析完成后会自动进入剧本大纲。'
+            }
+          />
+          <Space>
+            <Button onClick={() => snap.workspaceId && loadWorkspaces(snap.workspaceId)}>
+              手动刷新状态
+            </Button>
+            <Button type="text" onClick={() => setWorkspaceModalOpen(true)}>
+              上传另一份剧本
+            </Button>
+          </Space>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <>
@@ -6912,55 +7725,73 @@ const LatexEditorPage = () => {
                   size="small"
                   onClick={() => loadWorkspaces(snap.workspaceId)}
                 />
-                {/* ScriptLens 扩展：跳转到 5 维分析报告页（PRD §三-4 决策卡 + 三视角） */}
-                <Tooltip title={snap.workspaceId ? '查看 5 维分析报告' : '请先选择剧本'}>
-                  <Button
-                    icon={<BarChartOutlined />}
-                    size="small"
-                    disabled={!snap.workspaceId}
-                    onClick={() => {
-                      if (snap.workspaceId) {
-                        navigate(`/scripts/${snap.workspaceId}/report`)
-                      }
-                    }}
-                  />
-                </Tooltip>
+                {isScriptLensSession && (
+                  <Popconfirm
+                    title="删除当前剧本？"
+                    description="会同时删除分析报告、证据引用、改写时间线和本地打开状态，删除后不可恢复。"
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true, loading: workspaceDeleting }}
+                    onConfirm={handleDeleteCurrentWorkspace}
+                  >
+                    <Tooltip title={snap.workspaceId ? '删除当前剧本' : '请先选择剧本'}>
+                      <Button
+                        danger
+                        icon={<DeleteOutlined />}
+                        size="small"
+                        disabled={!snap.workspaceId || workspaceDeleting}
+                        loading={workspaceDeleting}
+                      />
+                    </Tooltip>
+                  </Popconfirm>
+                )}
+                {/* 整剧分析入口已统一收敛到右栏「分析报告」面板（report-first）；
+                    上传后自动跑、右栏自动展开，不再开新网页。 */}
               </Space>
             </div>
             <div className="doc-studio__explorer-header" onContextMenu={handleExplorerContextMenu}>
               <span className="doc-studio__explorer-name" title={activeWorkspaceName}>
-                {explorerTitle}
+                {/* 顶部 Select 已经显示当前剧本名，这里只标示"这一栏的内容是什么"——
+                    剧本大纲（集 → 场层级），跟 markdown TOC 同义。 */}
+                {isScriptLensSession ? '剧本大纲' : explorerTitle}
               </span>
               <div className="doc-studio__explorer-actions">
-                <Tooltip title="新建文件">
-                  <Button
-                    type="text"
-                    className="doc-studio__explorer-action-btn"
-                    icon={<FileAddOutlined />}
-                    onClick={() => openFileModal('file')}
-                    disabled={!snap.workspaceId}
-                  />
-                </Tooltip>
-                <Tooltip title="新建文件夹">
-                  <Button
-                    type="text"
-                    className="doc-studio__explorer-action-btn"
-                    icon={<FolderAddOutlined />}
-                    onClick={() => openFileModal('directory')}
-                    disabled={!snap.workspaceId}
-                  />
-                </Tooltip>
-                <Tooltip title="上传文件">
-                  <Button
-                    type="text"
-                    className="doc-studio__explorer-action-btn"
-                    icon={<UploadOutlined />}
-                    loading={uploading}
-                    onClick={handleWorkspaceUploadClick}
-                    disabled={!snap.workspaceId}
-                  />
-                </Tooltip>
-                <Tooltip title="刷新文件树">
+                {/* R3：ScriptLens 场景下隐藏「新建文件 / 新建目录 / 上传文件」3 个按钮——
+                    场次由后端按集场切分而来，用户没有「手动新建一场」或「往剧本里再塞一个文件」
+                    这种语义。新增剧本走顶部「+」上传 Modal。 */}
+                {!isScriptLensSession && (
+                  <>
+                    <Tooltip title="新建文件">
+                      <Button
+                        type="text"
+                        className="doc-studio__explorer-action-btn"
+                        icon={<FileAddOutlined />}
+                        onClick={() => openFileModal('file')}
+                        disabled={!snap.workspaceId}
+                      />
+                    </Tooltip>
+                    <Tooltip title="新建文件夹">
+                      <Button
+                        type="text"
+                        className="doc-studio__explorer-action-btn"
+                        icon={<FolderAddOutlined />}
+                        onClick={() => openFileModal('directory')}
+                        disabled={!snap.workspaceId}
+                      />
+                    </Tooltip>
+                    <Tooltip title="上传文件">
+                      <Button
+                        type="text"
+                        className="doc-studio__explorer-action-btn"
+                        icon={<UploadOutlined />}
+                        loading={uploading}
+                        onClick={handleWorkspaceUploadClick}
+                        disabled={!snap.workspaceId}
+                      />
+                    </Tooltip>
+                  </>
+                )}
+                <Tooltip title={isScriptLensSession ? '刷新场次列表' : '刷新文件树'}>
                   <Button
                     type="text"
                     className="doc-studio__explorer-action-btn"
@@ -6969,7 +7800,7 @@ const LatexEditorPage = () => {
                     onClick={() => refreshFileTree(true)}
                   />
                 </Tooltip>
-                <Tooltip title="折叠文件栏 (Ctrl+B)">
+                <Tooltip title={isScriptLensSession ? '折叠场次栏 (Ctrl+B)' : '折叠文件栏 (Ctrl+B)'}>
                   <Button
                     type="text"
                     className="doc-studio__explorer-action-btn"
@@ -6985,7 +7816,10 @@ const LatexEditorPage = () => {
               style={{ display: 'none' }}
               onChange={handleFileInputChange}
             />
-            <div className="doc-studio__tree-wrapper" onContextMenu={handleExplorerContextMenu}>
+            <div
+              className={`doc-studio__tree-wrapper ${isScriptLensSession ? 'doc-studio__tree-wrapper--outline' : ''}`}
+              onContextMenu={handleExplorerContextMenu}
+            >
               {treeData.length ? (
                 <Tree
                   selectedKeys={snap.activeFilePath ? [snap.activeFilePath] : []}
@@ -6995,9 +7829,32 @@ const LatexEditorPage = () => {
                   onSelect={handleTreeSelect}
                   onRightClick={handleRightClick}
                 />
+              ) : isScriptProcessing ? (
+                <div className="doc-studio__outline-loading">
+                  <Spin size="small" />
+                  <div>
+                    <div className="doc-studio__outline-loading-title">
+                      正在生成剧本大纲
+                    </div>
+                    <div className="doc-studio__outline-loading-desc">
+                      {SCRIPT_STATUS_LABELS[scriptStatus] || '解析中'}，完成后自动出现集场目录
+                    </div>
+                  </div>
+                  <div className="doc-studio__outline-loading-bars" aria-hidden>
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                </div>
               ) : (
                 <Empty
-                  description="暂无文件"
+                  description={
+                    isScriptLensSession
+                      ? snap.workspaceId
+                        ? '该剧本暂无场次（解析中或解析失败）'
+                        : '请先在顶部「+」上传一份剧本'
+                      : '暂无文件'
+                  }
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
                 />
               )}
@@ -7053,7 +7910,13 @@ const LatexEditorPage = () => {
                         />
                       </Tooltip>
                     )}
-                    {supportsCompilePanel && (
+                    {supportsCompilePanel && !isScriptLensSession && (
+                      // ScriptLens 场景刻意不展示这个按钮：
+                      //   1. 它原本是 LaTeX/Markdown 的"编译"动作，剧本场景没有"编译当前场"语义；
+                      //   2. 把它复用为"重跑全剧 5 维评分"会让用户误以为是"分析当前场"——位置在
+                      //      编辑器顶部、又是 ▶️ 图标，左侧又开着具体一场，混淆面太大；
+                      //   3. 整剧分析的入口已经统一为：上传后自动跑 + 右栏「分析报告」面板内的
+                      //      「重新诊断」按钮（覆盖旧报告）。
                       <Tooltip title={compileActionTitle}>
                         <Button
                           type="text"
@@ -7175,7 +8038,7 @@ const LatexEditorPage = () => {
                       {snap.activeFilePath ? (
                         <Editor
                           key={snap.activeFilePath}
-                          theme="vs-dark"
+                          theme={SCRIPTLENS_LIGHT_THEME}
                           height="100%"
                           language={resolveEditorLanguage(snap.activeFilePath)}
                           loading={<Spin />}
@@ -7183,25 +8046,44 @@ const LatexEditorPage = () => {
                           onChange={handleEditorChange}
                           onMount={handleEditorMount}
                           options={{
-                            readOnly: currentFileBuffer?.loading,
+                            // D1：完整剧本视图是虚拟拼接，不能写回任何 scene，强制只读
+                            readOnly:
+                              currentFileBuffer?.loading ||
+                              snap.activeFilePath === FULL_SCRIPT_VIRTUAL_PATH,
                             minimap: { enabled: false },
-                            fontSize: 14,
+                            // 剧本场景：14 在浅色背景下偏紧凑，15 + 行高 24 阅读最舒服
+                            fontSize: 15,
+                            lineHeight: 24,
+                            letterSpacing: 0.3,
+                            fontFamily:
+                              '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Consolas, "Sarasa Mono SC", "Microsoft YaHei UI", "PingFang SC", monospace',
                             wordWrap: 'on',
                             automaticLayout: true,
                             selectOnLineNumbers: true,
                             scrollBeyondLastLine: false,
+                            renderLineHighlight: 'gutter',
+                            smoothScrolling: true,
+                            cursorBlinking: 'smooth',
+                            padding: { top: 16, bottom: 16 },
                             // ???????????????Ctrl+A, Ctrl+C, Ctrl+V, Ctrl+Z ??
                             // Monaco Editor ?????????????????
                           }}
                         />
                       ) : (
-                        // 加载工作区时不显示引导，避免刷新时闪烁
-                        snap.workspaceLoading ? null : <DocStudioWelcome />
+                        snap.workspaceLoading ? null : (
+                          isScriptProcessing || isScriptFailed
+                            ? renderScriptStatusPanel()
+                            : <DocStudioWelcome onUploadClick={() => setWorkspaceModalOpen(true)} />
+                        )
                       )}
                     </div>
                 </div>
               ) : (
-                snap.workspaceLoading ? null : <DocStudioWelcome />
+                snap.workspaceLoading ? null : (
+                  isScriptProcessing || isScriptFailed
+                    ? renderScriptStatusPanel()
+                    : <DocStudioWelcome onUploadClick={() => setWorkspaceModalOpen(true)} />
+                )
               )}
             </Content>
           </Layout>
@@ -7222,13 +8104,22 @@ const LatexEditorPage = () => {
                 >
                   Agent 对话
                 </button>
+                {/* ScriptLens 专属：分析报告摘要 tab，PRD §5 「report-first」入口 */}
+                {isScriptLensSession && (
+                  <button
+                    className={`doc-studio__custom-tab ${rightTab === 'report' ? 'doc-studio__custom-tab--active' : ''}`}
+                    onClick={() => setRightTab('report')}
+                  >
+                    分析报告
+                  </button>
+                )}
                 <button
                   className={`doc-studio__custom-tab ${rightTab === 'history' ? 'doc-studio__custom-tab--active' : ''}`}
                   onClick={() => setRightTab('history')}
                 >
                   时间线
                 </button>
-                {supportsCompilePanel && (
+                {supportsCompilePanel && !isScriptLensSession && (
                   <button
                     className={`doc-studio__custom-tab ${rightTab === 'compile' ? 'doc-studio__custom-tab--active' : ''}`}
                     onClick={() => setRightTab('compile')}
@@ -7284,31 +8175,7 @@ const LatexEditorPage = () => {
                               </div>
                             )
                           })}
-                          {(!currentChatSessionId || hasNewConversationSlot) && (
-                            <button
-                              type="button"
-                              className={`doc-studio__chat-header-tab ${!currentChatSessionId ? 'doc-studio__chat-header-tab--active' : ''}`}
-                              onClick={async () => {
-                                if (!snap.workspaceId) return
-                                docStudioActions.setChatMessages([])
-                                try {
-                                  const detail = await bindWorkspaceSession(
-                                    { workspaceId: snap.workspaceId, sessionId: null },
-                                    { loading: false, errorToast: false },
-                                  )
-                                  docStudioActions.setWorkspaceConfig(detail.config)
-                                } catch {
-                                  docStudioActions.setWorkspaceConfig({
-                                    ...snap.workspaceConfig,
-                                    session_id: null,
-                                  })
-                                }
-                              }}
-                              title="新对话"
-                            >
-                              新对话
-                            </button>
-                          )}
+                          {/* 「新对话」按钮已删除：右上角「+」就是新建语义，再放一个 tab 是重复入口。 */}
                         </div>
                         <div className="doc-studio__chat-header-actions">
                           <Tooltip title="新建对话">
@@ -7915,23 +8782,11 @@ const LatexEditorPage = () => {
                           </div>
                         )}
                       </div>
-                      {/* ScriptLens M3：场景改写入口（仅当激活了 scene 时显示） */}
-                      {snap.activeFilePath && snap.workspaceId ? (
-                        <div className="doc-studio__chat-review-actions">
-                          <Tooltip title="基于评分维度让 LLM 改写当前场景，diff 在中央 pane 比对">
-                            <Button
-                              size="small"
-                              icon={<EditOutlined />}
-                              onClick={() => {
-                                setRewriteIssue('')
-                                setRewriteModalOpen(true)
-                              }}
-                            >
-                              AI 改写本场
-                            </Button>
-                          </Tooltip>
-                        </div>
-                      ) : null}
+                      {/* R1（PRD §8 对齐）：原「AI 改写本场」按钮已移除。
+                          改写按 target_dimension 驱动而非 scene_id 驱动，入口收口到：
+                          (a) 报告页低分维度卡片「获取改写建议」按钮
+                          (b) chat 输入框上方「针对 X 维度给改写建议」快捷指令
+                          chat 内调用 propose_rewrite_tool 的能力保留，由 Agent 自然触发。 */}
                       {hasPendingAgentReview && (
                         <div className="doc-studio__chat-review-actions">
                           <Button
@@ -7965,6 +8820,26 @@ const LatexEditorPage = () => {
                         </div>
                       )}
                       <div ref={chatInputContainerRef} className="doc-studio__chat-input">
+                        {/* F1(b)：剧本场景下，输入框上方的「5 维改写」快捷指令。
+                            点一下预填到 composer，让用户可继续追加细节再发送。 */}
+                        {isScriptLensSession && snap.workspaceId ? (
+                          <div className="doc-studio__rewrite-quick-row">
+                            <Space size={6} wrap>
+                              <span className="doc-studio__rewrite-quick-label">改写建议：</span>
+                              {Object.entries(REWRITE_QUICK_COMMANDS).map(([dim, cmd]) => (
+                                <Tooltip key={dim} title={cmd.prompt}>
+                                  <Button
+                                    size="small"
+                                    type="default"
+                                    onClick={() => fillRewritePromptByDimension(dim)}
+                                  >
+                                    {cmd.label}
+                                  </Button>
+                                </Tooltip>
+                              ))}
+                            </Space>
+                          </div>
+                        ) : null}
                         {chatImageAttachments.length > 0 && (
                           <div className="doc-studio__image-attachments">
                             <Space wrap size={[8, 8]}>
@@ -8013,7 +8888,9 @@ const LatexEditorPage = () => {
                             data-placeholder={
                               selections.length || fileMentions.length
                                 ? `已选 ${selections.length} 段，已引 ${fileMentions.length} 个文件，输入 @ 可引用文件`
-                                : '输入指令，Ctrl+V 粘贴图片，Ctrl+L 引用选区，Enter 发送，Shift+Enter 换行'
+                                : isScriptLensSession
+                                  ? '针对当前场提问 / 改写（整剧 5 维分析请用左上「整剧分析」）—— Enter 发送，Shift+Enter 换行'
+                                  : '输入指令，Ctrl+V 粘贴图片，Ctrl+L 引用选区，Enter 发送，Shift+Enter 换行'
                             }
                             onInput={(e) => {
                               const target = e.currentTarget
@@ -8281,6 +9158,26 @@ const LatexEditorPage = () => {
                         />
                       </div>
                     </div>
+                )}
+                {/* ScriptLens Report Rail：右栏分析报告（report-first，所有内容直接展示） */}
+                {isScriptLensSession && rightTab === 'report' && (
+                  snap.workspaceId ? (
+                    <ScriptlensReportRail
+                      scriptId={snap.workspaceId}
+                      activeEvidenceId={activeEvidenceId}
+                      onTraceEvidence={traceEvidence}
+                      onClearTrace={clearEvidenceTrace}
+                      onDispatchTask={dispatchAgentTask}
+                      onScriptDetailLoaded={handleScriptDetailLoaded}
+                    />
+                  ) : (
+                    <div style={{ padding: 16 }}>
+                      <Empty
+                        description="请先在左侧选择剧本"
+                        image={Empty.PRESENTED_IMAGE_SIMPLE}
+                      />
+                    </div>
+                  )
                 )}
                 {/* History Panel */}
                 {rightTab === 'history' && (
@@ -8635,63 +9532,39 @@ const LatexEditorPage = () => {
           </Form.Item>
         </Form>
       </Modal>
+      {/* R1：旧的「AI 改写本场」Modal 已移除——改写按 target_dimension 驱动，
+          入口在报告页（低分维度卡）和 chat 快捷指令上。 */}
+      {/* F2：导出完整剧本 Modal（应用所有改写历史后的最终版本） */}
       <Modal
-        title="AI 改写本场（rubric §3 五维之一）"
-        open={rewriteModalOpen}
+        title="导出完整剧本"
+        open={exportModalOpen}
         onOk={() => {
-          void handleSubmitRewrite()
+          void handleExportFullScript()
         }}
-        okText="开始改写"
+        okText="开始导出"
+        confirmLoading={exporting}
         onCancel={() => {
-          if (rewriteSubmitting) return
-          setRewriteModalOpen(false)
-          setRewriteIssue('')
+          if (exporting) return
+          setExportModalOpen(false)
         }}
-        confirmLoading={rewriteSubmitting}
-        destroyOnClose
-        maskClosable={!rewriteSubmitting}
-        keyboard={!rewriteSubmitting}
-        width={520}
+        maskClosable={!exporting}
+        keyboard={!exporting}
+        width={460}
       >
         <Form layout="vertical">
-          <Form.Item label="目标场景">
-            <Input value={activeSceneLabel} disabled />
-          </Form.Item>
-          <Form.Item
-            label="聚焦改写维度"
-            extra="后端会基于该维度的 rubric 锚点和原始场景文本生成改写"
-          >
-            <Select
-              value={rewriteDimension}
-              onChange={(v) => setRewriteDimension(v)}
+          <Form.Item label="选择格式" extra="导出的文件已应用全部改写历史，是当前最新版本">
+            <Radio.Group
+              value={exportFormat}
+              onChange={(e) => setExportFormat(e.target.value as ScriptExportFormat)}
+              optionType="button"
+              buttonStyle="solid"
               options={[
-                { value: 'opening_hook', label: '开场钩子（前 3 集前 3 场抓人）' },
-                { value: 'reward_density', label: '爽点密度（反转 / 打脸 / 逆袭）' },
-                { value: 'motivation', label: '动机自洽（关键决策铺垫）' },
-                { value: 'pacing', label: '节奏控制（中段不塌陷）' },
-                { value: 'risk', label: '审核风险（去广电红线）' },
+                { label: 'DOCX（Word）', value: 'docx' },
+                { label: 'PDF', value: 'pdf' },
+                { label: 'TXT', value: 'txt' },
               ]}
             />
           </Form.Item>
-          <Form.Item
-            label="问题描述（必填）"
-            required
-            extra="尽量具体：例如『女主原谅得太快缺乏铺垫』"
-          >
-            <Input.TextArea
-              value={rewriteIssue}
-              onChange={(e) => setRewriteIssue(e.target.value)}
-              placeholder="例如：钩子太弱，开篇 30 秒看不出爽点 / 男主黑化没有动机铺垫"
-              maxLength={500}
-              rows={3}
-              showCount
-            />
-          </Form.Item>
-          <Alert
-            type="info"
-            showIcon
-            message="改写完成后会在中央 pane 切到 in-place diff（保留原文，可 Keep / Undo 单 hunk）。"
-          />
         </Form>
       </Modal>
       <Modal

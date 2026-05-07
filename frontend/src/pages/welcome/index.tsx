@@ -100,7 +100,7 @@ export default function Welcome() {
         </Title>
         <Paragraph className={styles.heroSub}>
           面向短剧 / 微短剧的内容策划、编剧统筹、内容运营、选品与审核 ——
-          ScriptLens 是带证据的剧本分析 Agent：上传剧本即可拿到 5 维评分、必读场景、改写建议，
+          ScriptLens 是带证据的剧本分析 Agent：上传剧本即可拿到 5 维评分、关键场景、改写建议，
           每一个判断都附带原文场号，可追溯、可改写、可追问。
         </Paragraph>
         <Space size={12} className={styles.heroCta}>

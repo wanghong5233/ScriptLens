@@ -11,6 +11,20 @@
   overflow: hidden;
 }
 
+@keyframes doc-studio-outline-loading {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  50% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
 .doc-studio {
   flex: 1;
   min-height: 0;
@@ -33,16 +47,30 @@
 
   &__sider {
     background: #f8f9fb;
-    padding: 14px 12px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
     border-right: 1px solid #e5e8ef;
     height: 100%;
     min-height: 0;
     position: relative;
     z-index: 2;
     transition: width 0.2s ease;
+
+    // 关键：aside 自己也得是 flex column，让 .ant-layout-sider-children 能吃到 flex:1。
+    // 之前只给 children 加 height:100%，浏览器在某些 layout 下会回退到内容高，
+    // 导致 .doc-studio__tree-wrapper 的 flex:1 拿不到剩余空间，101 集场次撑出 viewport
+    // 但 sider 自身已经 overflow:hidden（aside 默认）→ 无滚动条。
+    display: flex;
+    flex-direction: column;
+
+    > .ant-layout-sider-children {
+      flex: 1 1 auto;
+      min-height: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      padding: 14px 12px 12px;
+      box-sizing: border-box;
+      overflow: hidden;
+    }
 
     &--collapsed {
       min-width: 0 !important;
@@ -55,6 +83,101 @@
     position: relative;
     z-index: 5;
     overflow: hidden;
+  }
+
+  &__script-status-panel {
+    height: 100%;
+    min-height: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 32px;
+    background:
+      radial-gradient(circle at 30% 18%, rgba(224, 122, 140, 0.10), transparent 28%),
+      linear-gradient(180deg, #FFFBF8 0%, #FAF7F4 100%);
+  }
+
+  &__script-status-card {
+    width: min(620px, 100%);
+    padding: 30px 32px;
+    border: 1px solid #F0DAD5;
+    border-radius: 22px;
+    background: rgba(255, 251, 248, 0.92);
+    box-shadow: 0 18px 44px rgba(137, 89, 79, 0.12);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+
+    h2 {
+      margin: 0;
+      font-size: 24px;
+      line-height: 1.3;
+      color: #3F3734;
+      letter-spacing: 0.02em;
+    }
+  }
+
+  &__script-status-panel--failed &__script-status-card {
+    border-color: #F4C7C3;
+    background: #FFF8F7;
+  }
+
+  &__script-status-desc {
+    margin: 0;
+    color: #756763;
+    font-size: 14px;
+    line-height: 1.7;
+  }
+
+  &__script-status-steps {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    gap: 8px;
+    font-size: 12px;
+    color: #B3A09A;
+
+    span {
+      position: relative;
+      padding-top: 12px;
+      text-align: center;
+
+      &::before {
+        content: '';
+        position: absolute;
+        top: 0;
+        left: 50%;
+        width: 7px;
+        height: 7px;
+        transform: translateX(-50%);
+        border-radius: 50%;
+        background: #E7D6D1;
+      }
+
+      &.is-active {
+        color: #C76A7C;
+        font-weight: 600;
+
+        &::before {
+          background: #E07A8C;
+          box-shadow: 0 0 0 4px rgba(224, 122, 140, 0.14);
+        }
+      }
+    }
+  }
+
+  &__script-status-meta {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+
+    span {
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: #F8ECE8;
+      color: #8A645D;
+      font-size: 12px;
+      line-height: 1.4;
+    }
   }
 
   &__resizer {
@@ -92,6 +215,7 @@
     gap: 8px;
     align-items: center;
     min-width: 0; // 允许 flex 子元素收缩
+    flex-shrink: 0; // sider flex 列里固定高，不被场次树挤掉
   }
 
   &__workspace-select {
@@ -195,6 +319,7 @@
     padding: 0 2px;
     border-radius: 6px;
     user-select: none;
+    flex-shrink: 0; // 与 __workspace 同样固定高，留剩余空间给 __tree-wrapper
   }
 
   &__explorer-name {
@@ -249,9 +374,10 @@
   }
 
   &__tree-wrapper {
-    flex: 1;
+    flex: 1 1 0;
     min-height: 0;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
     padding-right: 4px;
 
     .ant-tree {
@@ -287,6 +413,91 @@
     }
   }
 
+  // ScriptLens · 大纲版 tree wrapper
+  // 视觉目标：左栏读起来像 markdown TOC / 章节大纲，而不是 IDE 文件树
+  &__tree-wrapper--outline {
+    .ant-tree {
+      // 节点之间紧凑一点，符合 TOC 习惯
+      .ant-tree-treenode {
+        padding: 1px 0;
+        align-items: center;
+      }
+
+      .ant-tree-node-content-wrapper {
+        line-height: 22px;
+        min-height: 22px;
+        padding: 1px 6px;
+
+        // 莫兰迪粉选中态，跟 colorPrimary (#E07A8C) 对齐，不再用 antd 默认蓝
+        &.ant-tree-node-selected {
+          background: #FBE7EC !important;
+          color: #C76A7C !important;
+        }
+
+        &:hover {
+          background: #F4ECEB !important;
+        }
+      }
+
+      // 折叠箭头颜色调暖
+      .ant-tree-switcher {
+        color: #B3A8A4;
+      }
+    }
+  }
+
+  &__outline-loading {
+    margin: 10px 2px 0;
+    padding: 12px;
+    border: 1px solid #F0DAD5;
+    border-radius: 12px;
+    background: linear-gradient(180deg, #FFFBF8 0%, #FDF2F0 100%);
+    color: #6B6360;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 10px;
+    align-items: start;
+  }
+
+  &__outline-loading-title {
+    font-size: 13px;
+    font-weight: 700;
+    color: #C76A7C;
+    line-height: 1.4;
+  }
+
+  &__outline-loading-desc {
+    margin-top: 2px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #8C7A75;
+  }
+
+  &__outline-loading-bars {
+    grid-column: 1 / -1;
+    display: grid;
+    gap: 6px;
+    margin-top: 2px;
+
+    span {
+      height: 7px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, #FBE7EC 0%, #EEC5CD 45%, #FBE7EC 100%);
+      background-size: 180% 100%;
+      animation: doc-studio-outline-loading 1.4s ease-in-out infinite;
+
+      &:nth-child(2) {
+        width: 78%;
+        animation-delay: 0.12s;
+      }
+
+      &:nth-child(3) {
+        width: 56%;
+        animation-delay: 0.24s;
+      }
+    }
+  }
+
   &__tree-node {
     display: flex;
     align-items: center;
@@ -302,6 +513,49 @@
     gap: 8px;
     min-width: 0;
     flex: 1;
+  }
+
+  // ScriptLens · 大纲样式（剧本目录，非文件树）
+  // 集：章节标题感（更粗、稍大）；场：缩进、细字、项目符号
+  &__tree-node-main--episode {
+    font-weight: 600;
+    color: #4A4A4A;
+    font-size: 13.5px;
+    letter-spacing: 0.2px;
+  }
+
+  &__tree-node-main--scene {
+    font-weight: 400;
+    color: #6B6360;
+    font-size: 13px;
+  }
+
+  &__tree-node-main--full {
+    font-weight: 600;
+    color: #C76A7C;
+    font-size: 13.5px;
+  }
+
+  &__outline-mark {
+    flex-shrink: 0;
+    display: inline-block;
+    width: 8px;
+    height: 8px;
+
+    &--episode {
+      width: 4px;
+      height: 12px;
+      background: linear-gradient(to bottom, #E07A8C, #C76A7C);
+      border-radius: 2px;
+    }
+
+    &--scene {
+      width: 5px;
+      height: 5px;
+      background: #C9A8A0;
+      border-radius: 50%;
+      margin-left: 3px;
+    }
   }
 
   &__tree-node-icon {
@@ -1577,6 +1831,22 @@
     z-index: 3;
   }
 
+  // F1(b)：5 维改写快捷指令栏（仅 ScriptLens 场景），紧贴 chat 输入框上方
+  &__rewrite-quick-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    padding: 0 0 4px 0;
+  }
+
+  &__rewrite-quick-label {
+    font-size: 12px;
+    color: #9C8E89;
+    margin-right: 4px;
+    user-select: none;
+  }
+
   &__chat-review-actions {
     flex-shrink: 0;
     display: flex;
@@ -2299,3 +2569,32 @@
 
 }
 
+/* ============================================================
+   Monaco evidence 行级高亮（任务派发器联动）
+   - 由 pages/doc-studio/agentTask.ts::highlightLineRange 触发
+   - 全局选择器（Monaco 渲染 DOM 不在我们组件作用域内，必须脱出 .doc-studio-page）
+   - 莫兰迪暖黄 + 淡入淡出，3s TTL 后由 JS 清掉 decoration
+   ============================================================ */
+@keyframes scriptlens-evidence-fade {
+  0% {
+    background: rgba(255, 220, 130, 0.55);
+  }
+  60% {
+    background: rgba(255, 220, 130, 0.4);
+  }
+  100% {
+    background: rgba(255, 220, 130, 0.18);
+  }
+}
+
+.scriptlens-evidence-highlight {
+  background: rgba(255, 220, 130, 0.45) !important;
+  box-shadow: inset 3px 0 0 rgba(212, 158, 78, 0.85);
+  animation: scriptlens-evidence-fade 3s ease-out forwards;
+}
+
+.scriptlens-evidence-highlight__gutter {
+  background: rgba(212, 158, 78, 0.7);
+  width: 3px !important;
+  margin-left: 2px;
+}
