@@ -984,14 +984,13 @@ function CharacterGraphSection({
 
       <div className={styles.graphLegend}>
         <span><strong>身份</strong></span>
-        <span><i style={{ background: '#D86F85' }} />主角</span>
-        <span><i style={{ background: '#C46A5A' }} />反派</span>
-        <span><i style={{ background: '#7FA6A1' }} />关键配角</span>
-        <span><i style={{ background: '#B8A48B' }} />配角</span>
+        {(['protagonist', 'antagonist', 'support', 'minor'] as const).map((role) => (
+          <span key={role}><i style={{ background: CHARACTER_ROLE_COLOR[role] }} />{CHARACTER_ROLE_LABEL[role]}</span>
+        ))}
         <span style={{ marginLeft: 8 }}><strong>关系极性</strong></span>
-        <span><i style={{ background: relationColor('positive') }} />正面</span>
-        <span><i style={{ background: relationColor('negative') }} />负面</span>
-        <span><i style={{ background: relationColor('mixed') }} />混合</span>
+        {(['positive', 'negative', 'mixed'] as const).map((polarity) => (
+          <span key={polarity}><i style={{ background: relationColor(polarity) }} />{polarityMeta(polarity).shortLabel}</span>
+        ))}
       </div>
 
       <CharacterGraphFullscreenModal
@@ -1078,38 +1077,83 @@ function CharacterGraphSection({
   )
 }
 
+// 关系极性采用 signed social network 的成熟约定：
+// 绿色实线=正向支持，红色虚线=负向冲突，紫色点线=复杂/暧昧/利益拉扯。
+// mixed 不是“不确定”，而是同时存在合作与冲突证据的 ambivalent tie。
+const RELATION_POLARITY_META: Record<string, {
+  label: string
+  shortLabel: string
+  color: string
+  tagColor: string
+  lineType: 'solid' | 'dashed' | 'dotted'
+  description: string
+}> = {
+  positive: {
+    label: '正向（合作/支持）',
+    shortLabel: '正向',
+    color: '#2F855A',
+    tagColor: 'green',
+    lineType: 'solid',
+    description: '合作、保护、信任、利益一致或稳定支持',
+  },
+  negative: {
+    label: '负向（冲突/伤害）',
+    shortLabel: '负向',
+    color: '#C0392B',
+    tagColor: 'red',
+    lineType: 'dashed',
+    description: '敌对、压制、背叛、威胁、竞争或目标冲突',
+  },
+  mixed: {
+    label: '复杂（爱恨/利益拉扯）',
+    shortLabel: '复杂',
+    color: '#7C5AA6',
+    tagColor: 'purple',
+    lineType: 'dotted',
+    description: '同时存在合作与冲突，如亲密但对立、同盟但互相利用',
+  },
+}
+
+function polarityMeta(polarity?: string) {
+  return RELATION_POLARITY_META[polarity || 'mixed'] || RELATION_POLARITY_META.mixed
+}
+
 function polarityTagColor(polarity?: string): string {
-  return ({
-    positive: 'cyan',
-    negative: 'volcano',
-    mixed: 'default',
-  } as Record<string, string>)[polarity || 'mixed'] || 'default'
+  return polarityMeta(polarity).tagColor
 }
 
 function polarityLabel(polarity?: string): string {
-  return ({
-    positive: '正面',
-    negative: '负面',
-    mixed: '混合',
-  } as Record<string, string>)[polarity || 'mixed'] || '混合'
+  return polarityMeta(polarity).label
+}
+
+// 角色 4 色板：直接套 Tableau 10 / 影视惯例语义色，再降饱和度对齐莫兰迪基调
+// 选色逻辑（参考 D3 schemeTableau10、ColorBrewer Set1、Marvel/DC 漫画色系）：
+//   蓝=主角（Hero blue：超人蓝、海军蓝）
+//   红=反派（Villain red：用户最强烈的敌对色直觉）
+//   金=关键配角（Sidekick gold：Disney 配角高光色）
+//   灰青=配角（背景人物，低饱和不抢戏）
+// 色相 207°/8°/38°/180°，红蓝对位 200°，色盲安全
+const CHARACTER_ROLE_COLOR: Record<string, string> = {
+  protagonist: '#3E78A1',  // hsl(207,45%,44%) — Hero blue，正派直觉
+  antagonist:  '#C0594A',  // hsl(8,50%,52%)   — Villain red，敌对直觉
+  support:     '#D4A04C',  // hsl(38,60%,56%)  — Sidekick gold，金黄高光
+  minor:       '#7E9C9C',  // hsl(180,12%,55%) — 中性灰青，背景人物
+}
+const CHARACTER_ROLE_FALLBACK = '#8EA7B8'
+
+const CHARACTER_ROLE_LABEL: Record<string, string> = {
+  protagonist: '主角',
+  antagonist: '反派',
+  support: '关键配角',
+  minor: '配角',
 }
 
 function characterRoleLabel(role: string) {
-  return ({
-    protagonist: '主角',
-    antagonist: '反派',
-    support: '关键配角',
-    minor: '配角',
-  } as Record<string, string>)[role] || '人物'
+  return CHARACTER_ROLE_LABEL[role] || '人物'
 }
 
 function characterRoleColor(role: string) {
-  return ({
-    protagonist: '#D86F85',
-    antagonist: '#C46A5A',
-    support: '#7FA6A1',
-    minor: '#B8A48B',
-  } as Record<string, string>)[role] || '#8EA7B8'
+  return CHARACTER_ROLE_COLOR[role] || CHARACTER_ROLE_FALLBACK
 }
 
 // ============================================================
@@ -1259,7 +1303,7 @@ function CharacterGraph2DPreview({
         linkLabel={(l) => {
           const link = l as { type?: string; polarity?: string; weight?: number }
           const type = relationLabel(link.type)
-          const pol = ({ positive: '正面', negative: '负面', mixed: '混合' } as Record<string, string>)[link.polarity || 'mixed'] || '混合'
+          const pol = polarityMeta(link.polarity).label
           return `${type} · ${pol} · 共现强度 ${(link.weight || 0).toFixed(2)}`
         }}
         linkHoverPrecision={6}
@@ -1311,15 +1355,10 @@ function CharacterGraphFullscreenModal({
   onNodeClick: (node: CharacterGraphNodeDTO) => void
 }) {
   const [layout, setLayout] = useState<FullscreenLayout>('circular')
-  // antd Modal body 的 height 继承链在弹出过程中并不可靠（容器 height: 100%
-  // 经常解析成 0），不浪费时间排 CSS。直接基于 viewport 计算 ECharts pixel 尺寸：
-  //   modal 宽 92vw，body 高 85vh - 标题栏 ~60px - 安全缓冲
-  // 切换窗口大小时 window.resize 触发重算
+  // antd v5 .ant-modal-content 自带 24px 左右 padding，按 92vw 直接算宽度会让
+  // canvas 比可视区域宽，圆环看上去偏左。改成实测容器 clientWidth，高度走 viewport。
   const chartRef = useRef<ReactECharts | null>(null)
-  const computeSize = useCallback(() => ({
-    w: Math.min(Math.max(640, Math.floor(window.innerWidth * 0.92) - 4), 1800),
-    h: Math.max(420, Math.floor(window.innerHeight * 0.85) - 70),
-  }), [])
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const [size, setSize] = useState<{ w: number; h: number } | null>(null)
 
   const isolated = useMemo(() => listIsolatedCharacters(nodes, edges), [nodes, edges])
@@ -1345,19 +1384,53 @@ function CharacterGraphFullscreenModal({
     },
   }), [nodes, onNodeClick])
 
-  // open 时基于 viewport 直接算 size；关闭后清掉
+  // open 时实测容器宽度 + 视口高度算 size。
+  // 关键：antd Modal 走 React Portal，effect 首次跑时 ref 可能未挂载，所以
+  // 用 rAF 自旋直到测到合法 width 再挂 ResizeObserver 持续跟踪。
   useEffect(() => {
     if (!open) {
       setSize(null)
       return
     }
-    setSize(computeSize())
-    const onResize = () => setSize(computeSize())
-    window.addEventListener('resize', onResize)
-    return () => window.removeEventListener('resize', onResize)
-  }, [open, computeSize])
+    let cancelled = false
+    let rafId = 0
+    let obs: ResizeObserver | null = null
 
-  // 切布局后强制 resize，避免布局算法引擎空跑
+    const apply = () => {
+      const el = containerRef.current
+      if (!el) return false
+      const w = el.clientWidth
+      if (w < 100) return false
+      const h = Math.max(420, Math.floor(window.innerHeight * 0.85) - 70)
+      setSize((prev) => (prev && prev.w === w && prev.h === h ? prev : { w, h }))
+      return true
+    }
+
+    const spin = () => {
+      if (cancelled) return
+      if (apply()) {
+        const el = containerRef.current
+        if (el) {
+          obs = new ResizeObserver(apply)
+          obs.observe(el)
+        }
+      } else {
+        rafId = requestAnimationFrame(spin)
+      }
+    }
+
+    spin()
+    const onResize = () => apply()
+    window.addEventListener('resize', onResize)
+
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(rafId)
+      obs?.disconnect()
+      window.removeEventListener('resize', onResize)
+    }
+  }, [open])
+
   useEffect(() => {
     if (!size) return
     chartRef.current?.getEchartsInstance?.()?.resize()
@@ -1373,30 +1446,29 @@ function CharacterGraphFullscreenModal({
       styles={{ body: { padding: 0, background: '#FFFCF8' } }}
       destroyOnClose
       title={
-        <Space size={12} wrap>
+        <Space size={14} wrap>
           <span style={{ color: '#3F3835' }}>人物关系图</span>
+          <span className={styles.characterGraphLayoutSwitchHint}>布局：</span>
           <Segmented
-            size="small"
+            size="middle"
             value={layout}
             onChange={(v) => setLayout(v as FullscreenLayout)}
+            className={styles.characterGraphLayoutSegmented}
             options={[
-              { label: '环形布局（无重叠）', value: 'circular' },
-              { label: '力导向布局（结构感）', value: 'force' },
+              { label: '环形（无重叠）', value: 'circular' },
+              { label: '力导向（结构感）', value: 'force' },
             ]}
           />
-          <Tag color="default">节点颜色=身份 · 大小=出场频次</Tag>
-          <Tag color="cyan">连线颜色=极性 · 粗细=共现强度 · 标签=关系类型</Tag>
+          <span style={{ color: '#8F8178', fontSize: 12, fontWeight: 'normal' }}>
+            节点大小 = 出场频次 · 连线粗细 = 共现强度
+          </span>
         </Space>
       }
     >
-      <div className={styles.characterGraphEchartsContainer}>
+      <div ref={containerRef} className={styles.characterGraphEchartsContainer}>
+        {graphIds.nodes.length > 0 && <CharacterGraphLegendBar />}
         {graphIds.nodes.length === 0 ? (
-          <div
-            className={styles.characterGraph3DEmpty}
-            style={size ? { width: size.w, height: size.h } : undefined}
-          >
-            没有提取到角色之间的关系
-          </div>
+          <div className={styles.characterGraph3DEmpty}>没有提取到角色之间的关系</div>
         ) : size ? (
           <ReactECharts
             ref={chartRef}
@@ -1405,8 +1477,8 @@ function CharacterGraphFullscreenModal({
             onEvents={onEvents}
             notMerge
             lazyUpdate
-            style={{ width: `${size.w}px`, height: `${size.h}px`, display: 'block' }}
-            opts={{ renderer: 'canvas', width: size.w, height: size.h }}
+            style={{ width: '100%', height: `${Math.max(360, size.h - 48)}px`, display: 'block' }}
+            opts={{ renderer: 'canvas', width: size.w, height: Math.max(360, size.h - 48) }}
           />
         ) : (
           <div className={styles.characterGraph3DEmpty}>正在准备关系图…</div>
@@ -1421,17 +1493,66 @@ function CharacterGraphFullscreenModal({
   )
 }
 
+// 顶部图例 bar：节点角色色块 + 边极性线型说明。HTML 渲染避免挤占 ECharts 画布
+function CharacterGraphLegendBar() {
+  return (
+    <div className={styles.characterGraphLegendBar}>
+      <div className={styles.characterGraphLegendGroup}>
+        <span className={styles.characterGraphLegendGroupLabel}>节点身份</span>
+        {(['protagonist', 'antagonist', 'support', 'minor'] as const).map((role) => (
+          <span key={role} className={styles.characterGraphLegendItem}>
+            <span
+              className={styles.characterGraphLegendDot}
+              style={{ background: CHARACTER_ROLE_COLOR[role] }}
+            />
+            {CHARACTER_ROLE_LABEL[role]}
+          </span>
+        ))}
+      </div>
+      <span className={styles.characterGraphLegendDivider} />
+      <div className={styles.characterGraphLegendGroup}>
+        <span className={styles.characterGraphLegendGroupLabel}>关系极性</span>
+        <span className={styles.characterGraphLegendItem}>
+          <span className={styles.characterGraphLegendLineSolid} style={{ background: polarityMeta('positive').color }} />
+          {polarityMeta('positive').label}
+        </span>
+        <span className={styles.characterGraphLegendItem}>
+          <span className={styles.characterGraphLegendLineDashed} style={{ borderColor: polarityMeta('negative').color }} />
+          {polarityMeta('negative').label}
+        </span>
+        <span className={styles.characterGraphLegendItem}>
+          <span className={styles.characterGraphLegendLineDotted} style={{ borderColor: polarityMeta('mixed').color }} />
+          {polarityMeta('mixed').label}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function buildEChartsGraphOption(
   nodes: CharacterGraphNodeDTO[],
   edges: CharacterGraphEdgeDTO[],
   layout: FullscreenLayout,
 ): Record<string, unknown> {
+  // ECharts categories 颜色来源于共享常量 CHARACTER_ROLE_COLOR，避免与角色卡 Tag 脱钩
+  const ROLE_CATEGORIES = [
+    { name: CHARACTER_ROLE_LABEL.protagonist, itemStyle: { color: CHARACTER_ROLE_COLOR.protagonist } },
+    { name: CHARACTER_ROLE_LABEL.antagonist, itemStyle: { color: CHARACTER_ROLE_COLOR.antagonist } },
+    { name: CHARACTER_ROLE_LABEL.support, itemStyle: { color: CHARACTER_ROLE_COLOR.support } },
+    { name: CHARACTER_ROLE_LABEL.minor, itemStyle: { color: CHARACTER_ROLE_COLOR.minor } },
+  ]
+  const roleToCategory = (role?: string) => {
+    const map: Record<string, number> = { protagonist: 0, antagonist: 1, support: 2, minor: 3 }
+    return map[role || ''] ?? 3
+  }
+
   const ePoints = nodes.map((n) => ({
     id: n.id,
     name: n.name,
+    category: roleToCategory(n.role),
     symbolSize: Math.max(28, Math.min(78, Math.sqrt(n.appearance_count || 1) * 14)),
     value: n.appearance_count || 0,
-    itemStyle: { color: characterRoleColor(n.role), borderColor: '#FFFFFF', borderWidth: 2 },
+    itemStyle: { borderColor: '#FFFFFF', borderWidth: 2 },
     label: {
       show: true,
       position: 'right',
@@ -1439,12 +1560,13 @@ function buildEChartsGraphOption(
       color: '#3F3835',
       fontWeight: 500,
     },
-    // 富文本里给 tooltip 用
     _role: characterRoleLabel(n.role),
     _motivation: n.motivation || '',
     _goal: n.goal || '',
     _obstacle: n.obstacle || '',
   }))
+  // 力导向布局下，永久挂边标签会让 8-10 节点的中心区互相遮挡；改为只在
+  // circular 布局展示边名（圆环外圈空间够），force 布局走 emphasis 悬停弹标签
   const eLinks = edges.map((e) => ({
     source: e.source_id,
     target: e.target_id,
@@ -1452,21 +1574,35 @@ function buildEChartsGraphOption(
     lineStyle: {
       color: relationColor(e.polarity),
       width: Math.max(1.4, (e.weight || 0.2) * 5),
-      type: e.polarity === 'negative' ? 'dashed' : 'solid',
+      type: polarityMeta(e.polarity).lineType,
       opacity: 0.85,
-      curveness: layout === 'circular' ? 0.18 : 0.08,
+      curveness: layout === 'circular' ? 0.18 : 0,
     },
-    label: {
-      show: true,
-      formatter: relationLabel(e.type),
-      fontSize: 12,
-      color: '#5A4F47',
-      backgroundColor: 'rgba(255, 252, 248, 0.92)',
-      padding: [3, 6],
-      borderRadius: 3,
-    },
+    label: layout === 'circular'
+      ? {
+          show: true,
+          formatter: relationLabel(e.type),
+          fontSize: 12,
+          color: '#5A4F47',
+          backgroundColor: 'rgba(255, 252, 248, 0.92)',
+          padding: [3, 6],
+          borderRadius: 3,
+        }
+      : { show: false },
+    emphasis: layout === 'force' ? {
+      label: {
+        show: true,
+        formatter: relationLabel(e.type),
+        fontSize: 12,
+        color: '#5A4F47',
+        backgroundColor: 'rgba(255, 252, 248, 0.95)',
+        padding: [3, 6],
+        borderRadius: 3,
+      },
+    } : undefined,
     _type: relationLabel(e.type),
-    _polarity: ({ positive: '正面', negative: '负面', mixed: '混合' } as Record<string, string>)[e.polarity || 'mixed'] || '混合',
+    _polarity: polarityMeta(e.polarity).label,
+    _polarityDescription: polarityMeta(e.polarity).description,
   }))
 
   return {
@@ -1492,32 +1628,38 @@ function buildEChartsGraphOption(
           return lines.join('<br/>')
         }
         if (params.dataType === 'edge') {
-          const d = params.data as { _type?: string; _polarity?: string; value?: number }
-          return `<strong>${d._type || '关系'}</strong> · ${d._polarity || ''}<br/>共现强度 ${(d.value || 0).toFixed(2)}`
+          const d = params.data as { _type?: string; _polarity?: string; _polarityDescription?: string; value?: number }
+          return `<strong>${d._type || '关系'}</strong> · ${d._polarity || ''}<br/>${d._polarityDescription || ''}<br/>共现强度 ${(d.value || 0).toFixed(2)}`
         }
         return ''
       },
     },
     animationDurationUpdate: 600,
     animationEasingUpdate: 'cubicInOut',
+    // 注意：legend / graphic 不放在 ECharts 内（会压缩画布让环形挤边），
+    // 改在 modal 顶部 HTML bar 显示，画布留给 graph
     series: [
       {
         type: 'graph',
         layout,
+        categories: ROLE_CATEGORIES,
+        // 力导向：ECharts force layout 不通过 center 居中，靠 gravity 把节点拉到画布中点。
+        // gravity 太小 → 节点群偏向某一边；太大 → 全部挤在中心。0.1 是经验甜区
+        force: layout === 'force' ? {
+          initLayout: 'circular',
+          repulsion: 1600,
+          edgeLength: [240, 380],
+          gravity: 0.1,
+          friction: 0.5,
+          layoutAnimation: true,
+        } : undefined,
+        circular: layout === 'circular' ? { rotateLabel: false } : undefined,
+        center: ['50%', '50%'],
         roam: true,
         draggable: layout === 'force',
         focusNodeAdjacency: true,
         edgeSymbol: ['none', 'arrow'],
         edgeSymbolSize: [0, 8],
-        circular: layout === 'circular' ? { rotateLabel: false } : undefined,
-        force: layout === 'force' ? {
-          repulsion: 220,
-          edgeLength: [120, 220],
-          gravity: 0.08,
-          friction: 0.6,
-          // 关键：边强度根据权重，避免高权重把节点全拉到一点
-          layoutAnimation: true,
-        } : undefined,
         emphasis: {
           focus: 'adjacency',
           lineStyle: { width: 4 },
@@ -1532,11 +1674,7 @@ function buildEChartsGraphOption(
 }
 
 function relationColor(polarity?: string) {
-  return ({
-    positive: 'rgba(126, 166, 161, 0.62)',
-    negative: 'rgba(196, 106, 90, 0.62)',
-    mixed: 'rgba(142, 167, 184, 0.58)',
-  } as Record<string, string>)[polarity || 'mixed'] || 'rgba(142, 167, 184, 0.58)'
+  return polarityMeta(polarity).color
 }
 
 function relationLabel(type?: string) {

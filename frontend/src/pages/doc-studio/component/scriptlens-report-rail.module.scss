@@ -225,34 +225,6 @@
       linear-gradient(135deg, #FFFCF8 0%, #FBF6EF 100%);
   }
 
-  .characterGraphEchartsContainer {
-    position: relative;
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-    background: #FFFCF8;
-  }
-
-  .characterGraph3DEmpty {
-    min-height: 320px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    color: #8E847B;
-    font-size: 14px;
-  }
-
-  .characterGraphEchartsIsolated {
-    margin: 0 18px 14px;
-    padding: 6px 12px;
-    background: rgba(255, 247, 238, 0.92);
-    border: 1px dashed #EAD8C2;
-    border-radius: 6px;
-    color: #8F7C66;
-    font-size: 12.5px;
-    line-height: 1.55;
-  }
-
   .isolatedHint {
     margin-top: 6px;
     padding: 6px 10px;
@@ -722,4 +694,145 @@
       background: rgba(224, 122, 140, 0.06) !important;
     }
   }
+}
+
+// 下面三个类用于「展开大图」Modal。antd Modal 通过 React Portal 渲染到 <body> 根，
+// 不在 .rail 子树下，所以必须放在顶层（避免 .rail 选择器把样式锁住失效）。
+.characterGraphEchartsContainer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: 100%;
+  min-height: 70vh;
+  background: #FFFCF8;
+}
+
+.characterGraph3DEmpty {
+  min-height: 320px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #8E847B;
+  font-size: 14px;
+}
+
+.characterGraphEchartsIsolated {
+  margin: 0 18px 14px;
+  padding: 6px 12px;
+  background: rgba(255, 247, 238, 0.92);
+  border: 1px dashed #EAD8C2;
+  border-radius: 6px;
+  color: #8F7C66;
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+
+.characterGraphLayoutSwitchHint {
+  font-size: 12.5px;
+  color: #8F8178;
+  font-weight: normal;
+  letter-spacing: 0.4px;
+}
+
+.characterGraphLayoutSegmented {
+  // antd Modal title 是顶层渲染，这里穿透改 segmented 视觉，让用户一眼看出可点切换
+  border: 1px solid #EAD8C2;
+  background: #FFF8EE;
+  padding: 3px;
+  border-radius: 8px;
+  box-shadow: 0 2px 6px rgba(143, 124, 102, 0.12);
+
+  :global(.ant-segmented-item) {
+    transition: background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    color: #6E5F58;
+    font-weight: 500;
+  }
+
+  :global(.ant-segmented-item:not(.ant-segmented-item-selected):hover) {
+    color: #D86F85;
+    background: rgba(232, 196, 184, 0.22);
+    transform: translateY(-1px);
+  }
+
+  // 选中态色块（thumb 是滑动动画块）
+  :global(.ant-segmented-thumb),
+  :global(.ant-segmented-item-selected) {
+    background: linear-gradient(135deg, #E07A8C 0%, #D86F85 100%) !important;
+    box-shadow: 0 3px 8px rgba(216, 111, 133, 0.32) !important;
+  }
+
+  :global(.ant-segmented-item-selected),
+  :global(.ant-segmented-item-selected .ant-segmented-item-label) {
+    color: #FFFFFF !important;
+  }
+}
+
+.characterGraphLegendBar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 28px;
+  padding: 16px 28px;
+  border-bottom: 1px solid rgba(234, 216, 194, 0.55);
+  background: rgba(255, 247, 238, 0.55);
+  font-size: 16px;
+  color: #3F3835;
+}
+
+.characterGraphLegendGroup {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.characterGraphLegendGroupLabel {
+  font-size: 14px;
+  color: #8F8178;
+  letter-spacing: 0.5px;
+  font-weight: 500;
+}
+
+.characterGraphLegendItem {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 500;
+}
+
+.characterGraphLegendDot {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 2px solid #FFFFFF;
+  box-shadow: 0 0 0 1px rgba(143, 124, 102, 0.18);
+}
+
+.characterGraphLegendLineSolid {
+  display: inline-block;
+  width: 42px;
+  height: 5px;
+  border-radius: 2px;
+}
+
+.characterGraphLegendLineDashed {
+  display: inline-block;
+  width: 42px;
+  height: 0;
+  border-top: 5px dashed transparent;
+}
+
+.characterGraphLegendLineDotted {
+  display: inline-block;
+  width: 42px;
+  height: 0;
+  border-top: 5px dotted transparent;
+}
+
+.characterGraphLegendDivider {
+  width: 1px;
+  height: 22px;
+  background: rgba(143, 124, 102, 0.28);
 }
