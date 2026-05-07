@@ -1,21 +1,29 @@
-"""ScriptLens 专属 pgvector 写入器。
+"""ScriptLens 专属数据库写入器。
 
-针对 schema `scriptlens` 下的 6 张表（见 alembic/versions/01_init_scriptlens.py）。
-与 ScholarMind 的 `pgvector_writer.PgVectorChunkWriter`（写 `rag_chunks` 公共表）
-完全隔离。
+针对 schema `scriptlens` 下的 5 张表（见 alembic/versions/01_init_scriptlens.py
++ 03_drop_script_chunks.py）。与 ScholarMind 的 `pgvector_writer.PgVectorChunkWriter`
+（写 `rag_chunks` 公共表）完全隔离。
 
-事务原则：单次 ingest 用一个事务包裹 scripts+scenes+script_chunks 三表的写入；
+事务原则：单次 ingest 用一个事务包裹 scripts + scenes 两表的写入；
 任何步骤失败即回滚，避免半成品落库。
+
+embedding 拆除历史：v0 曾每场写一份 1024 维向量到 `script_chunks` 表用于
+RAG hybrid 召回，v1 起彻底移除——理由见 `docs/04-script-pipeline.md` §4.4
+（评分/证据/任务派发链路均不查向量；唯一调用方 locate_scenes_tool 用
+BM25 + LLM metadata 二级兜底已足够；长剧场景下 embedding 反而成为
+ingestion 的瓶颈）。
+
+类名 `ScriptPgVectorWriter` 沿用历史名称避免外部 import 大改；
+内部已不再涉及 pgvector。
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import List, Optional
 
 from sqlalchemy import text
 
@@ -30,16 +38,10 @@ class WrittenScene:
     scene_id: str
     scene_no: str
     episode_no: Optional[int]
-    chunk_id: Optional[str]
 
 
 class ScriptPgVectorWriter:
-    """事务化写入 scripts + scenes + script_chunks。
-
-    embedding 维度严格校验为 1024（DashScope text-embedding-v3 默认）。
-    """
-
-    EMBEDDING_DIM = 1024
+    """事务化写入 scripts + scenes。"""
 
     def insert_script_with_scenes(
         self,
@@ -50,9 +52,8 @@ class ScriptPgVectorWriter:
         raw_storage_path: str,
         total_episodes: int,
         scenes: List[ParsedScene],
-        scene_embeddings: List[Optional[List[float]]],
     ) -> tuple[str, List[WrittenScene]]:
-        """一次性写入一份剧本及其所有场景与向量。
+        """一次性写入一份剧本及其所有场景。
 
         Args:
             user_id: 上传者 ID（外键到 public.users）
@@ -60,20 +61,11 @@ class ScriptPgVectorWriter:
             source_format: docx / pdf / txt / md
             raw_storage_path: 原始文件落盘路径（用于后续重新解析）
             total_episodes: 集数
-            scenes: 切分后的场景列表（顺序对应 scene_embeddings）
-            scene_embeddings: 每个 scene 的 embedding；None 表示该 scene 跳过向量写入
+            scenes: 切分后的场景列表
 
         Returns:
             (script_id, [WrittenScene...])
-
-        Raises:
-            ValueError: 当 embedding 维度不匹配
         """
-        if len(scenes) != len(scene_embeddings):
-            raise ValueError(
-                f"scene/embedding count mismatch: {len(scenes)} vs {len(scene_embeddings)}"
-            )
-
         script_id = str(uuid.uuid4())
         total_chars = sum(len(s.text) for s in scenes)
         started_at = time.perf_counter()
@@ -103,89 +95,13 @@ class ScriptPgVectorWriter:
                 },
             )
 
-            written: List[WrittenScene] = []
-            scene_rows: List[dict] = []
-            chunk_rows: List[dict] = []
-
-            for scene, emb in zip(scenes, scene_embeddings):
-                scene_id = str(uuid.uuid4())
-                scene_rows.append({
-                    "id": scene_id,
-                    "script_id": script_id,
-                    "episode_no": scene.episode_no,
-                    "scene_no": scene.scene_no,
-                    "scene_label": scene.scene_label or "",
-                    "characters": scene.characters or [],
-                    "start_line": scene.start_idx,
-                    "end_line": scene.end_idx,
-                    "text": scene.text,
-                })
-
-                chunk_id: Optional[str] = None
-                if emb is not None:
-                    if len(emb) != self.EMBEDDING_DIM:
-                        raise ValueError(
-                            f"embedding dim mismatch: expected {self.EMBEDDING_DIM}, "
-                            f"got {len(emb)} for scene {scene.scene_no}"
-                        )
-                    chunk_id = str(uuid.uuid4())
-                    chunk_rows.append({
-                        "id": chunk_id,
-                        "scene_id": scene_id,
-                        "script_id": script_id,
-                        "text": scene.text,
-                        "embedding": _vector_literal(emb),
-                        "metadata": json.dumps({
-                            "episode_no": scene.episode_no,
-                            "scene_no": scene.scene_no,
-                            "scene_label": scene.scene_label,
-                            "characters": scene.characters,
-                        }, ensure_ascii=False),
-                    })
-
-                written.append(WrittenScene(
-                    scene_id=scene_id,
-                    scene_no=scene.scene_no,
-                    episode_no=scene.episode_no,
-                    chunk_id=chunk_id,
-                ))
-
-            if scene_rows:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scriptlens.scenes (
-                            id, script_id, episode_no, scene_no, scene_label,
-                            characters, start_line, end_line, text
-                        ) VALUES (
-                            :id, :script_id, :episode_no, :scene_no, :scene_label,
-                            :characters, :start_line, :end_line, :text
-                        )
-                        """
-                    ),
-                    scene_rows,
-                )
-
-            if chunk_rows:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scriptlens.script_chunks (
-                            id, scene_id, script_id, text, embedding, metadata
-                        ) VALUES (
-                            :id, :scene_id, :script_id, :text,
-                            CAST(:embedding AS vector), CAST(:metadata AS jsonb)
-                        )
-                        """
-                    ),
-                    chunk_rows,
-                )
+            written, scene_rows = self._build_scene_rows(script_id, scenes)
+            self._insert_scene_rows(conn, scene_rows)
 
         logger.info(
-            "ScriptPgVectorWriter.write script_id=%s scenes=%s chunks=%s elapsed_ms=%s",
+            "ScriptPgVectorWriter.write script_id=%s scenes=%s elapsed_ms=%s",
             script_id,
             len(scene_rows),
-            len(chunk_rows),
             int((time.perf_counter() - started_at) * 1000),
         )
         return script_id, written
@@ -206,8 +122,8 @@ class ScriptPgVectorWriter:
     # ============================================================
     # 两阶段写入（HTTP 入口异步 ingestion 用）：
     #   1. create_pending_script —— 上传立刻 INSERT pending，前端拿到 ID
-    #   2. complete_script_with_scenes —— BackgroundTask 跑完 segment+embed
-    #      后写 scenes+chunks 并 UPDATE status='ready'
+    #   2. complete_script_with_scenes —— BackgroundTask 跑完 segment
+    #      后写 scenes 并 UPDATE status='ready'
     # 单阶段 insert_script_with_scenes 仍保留，dryrun 等离线场景用。
     # ============================================================
 
@@ -262,96 +178,18 @@ class ScriptPgVectorWriter:
         script_id: str,
         total_episodes: int,
         scenes: List[ParsedScene],
-        scene_embeddings: List[Optional[List[float]]],
     ) -> List[WrittenScene]:
-        """阶段二：写 scenes + script_chunks，UPDATE scripts(status='ready') + 填统计字段。
+        """阶段二：写 scenes，UPDATE scripts(status='ready') + 填统计字段。
 
-        单事务包裹三表写入；任何异常 → 回滚 → 由调用方 mark_failed。
+        单事务包裹两表写入；任何异常 → 回滚 → 由调用方 mark_failed。
         """
-        if len(scenes) != len(scene_embeddings):
-            raise ValueError(
-                f"scene/embedding count mismatch: {len(scenes)} vs {len(scene_embeddings)}"
-            )
-
         total_chars = sum(len(s.text) for s in scenes)
         started_at = time.perf_counter()
-        written: List[WrittenScene] = []
-        scene_rows: List[dict] = []
-        chunk_rows: List[dict] = []
 
-        for scene, emb in zip(scenes, scene_embeddings):
-            scene_id = str(uuid.uuid4())
-            scene_rows.append({
-                "id": scene_id,
-                "script_id": script_id,
-                "episode_no": scene.episode_no,
-                "scene_no": scene.scene_no,
-                "scene_label": scene.scene_label or "",
-                "characters": scene.characters or [],
-                "start_line": scene.start_idx,
-                "end_line": scene.end_idx,
-                "text": scene.text,
-            })
-
-            chunk_id: Optional[str] = None
-            if emb is not None:
-                if len(emb) != self.EMBEDDING_DIM:
-                    raise ValueError(
-                        f"embedding dim mismatch: expected {self.EMBEDDING_DIM}, "
-                        f"got {len(emb)} for scene {scene.scene_no}"
-                    )
-                chunk_id = str(uuid.uuid4())
-                chunk_rows.append({
-                    "id": chunk_id,
-                    "scene_id": scene_id,
-                    "script_id": script_id,
-                    "text": scene.text,
-                    "embedding": _vector_literal(emb),
-                    "metadata": json.dumps({
-                        "episode_no": scene.episode_no,
-                        "scene_no": scene.scene_no,
-                        "scene_label": scene.scene_label,
-                        "characters": scene.characters,
-                    }, ensure_ascii=False),
-                })
-
-            written.append(WrittenScene(
-                scene_id=scene_id,
-                scene_no=scene.scene_no,
-                episode_no=scene.episode_no,
-                chunk_id=chunk_id,
-            ))
+        written, scene_rows = self._build_scene_rows(script_id, scenes)
 
         with engine.begin() as conn:
-            if scene_rows:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scriptlens.scenes (
-                            id, script_id, episode_no, scene_no, scene_label,
-                            characters, start_line, end_line, text
-                        ) VALUES (
-                            :id, :script_id, :episode_no, :scene_no, :scene_label,
-                            :characters, :start_line, :end_line, :text
-                        )
-                        """
-                    ),
-                    scene_rows,
-                )
-            if chunk_rows:
-                conn.execute(
-                    text(
-                        """
-                        INSERT INTO scriptlens.script_chunks (
-                            id, scene_id, script_id, text, embedding, metadata
-                        ) VALUES (
-                            :id, :scene_id, :script_id, :text,
-                            CAST(:embedding AS vector), CAST(:metadata AS jsonb)
-                        )
-                        """
-                    ),
-                    chunk_rows,
-                )
+            self._insert_scene_rows(conn, scene_rows)
             conn.execute(
                 text(
                     """
@@ -373,14 +211,59 @@ class ScriptPgVectorWriter:
             )
 
         logger.info(
-            "ScriptPgVectorWriter.complete script_id=%s scenes=%s chunks=%s elapsed_ms=%s",
+            "ScriptPgVectorWriter.complete script_id=%s scenes=%s elapsed_ms=%s",
             script_id,
             len(scene_rows),
-            len(chunk_rows),
             int((time.perf_counter() - started_at) * 1000),
         )
         return written
 
+    # ============================================================
+    # 内部：scene rows 构造 + INSERT
+    # ============================================================
 
-def _vector_literal(vec: Iterable[float]) -> str:
-    return "[" + ",".join(f"{float(v):.6f}" for v in vec) + "]"
+    @staticmethod
+    def _build_scene_rows(
+        script_id: str,
+        scenes: List[ParsedScene],
+    ) -> tuple[List[WrittenScene], List[dict]]:
+        written: List[WrittenScene] = []
+        scene_rows: List[dict] = []
+        for scene in scenes:
+            scene_id = str(uuid.uuid4())
+            scene_rows.append({
+                "id": scene_id,
+                "script_id": script_id,
+                "episode_no": scene.episode_no,
+                "scene_no": scene.scene_no,
+                "scene_label": scene.scene_label or "",
+                "characters": scene.characters or [],
+                "start_line": scene.start_idx,
+                "end_line": scene.end_idx,
+                "text": scene.text,
+            })
+            written.append(WrittenScene(
+                scene_id=scene_id,
+                scene_no=scene.scene_no,
+                episode_no=scene.episode_no,
+            ))
+        return written, scene_rows
+
+    @staticmethod
+    def _insert_scene_rows(conn, scene_rows: List[dict]) -> None:
+        if not scene_rows:
+            return
+        conn.execute(
+            text(
+                """
+                INSERT INTO scriptlens.scenes (
+                    id, script_id, episode_no, scene_no, scene_label,
+                    characters, start_line, end_line, text
+                ) VALUES (
+                    :id, :script_id, :episode_no, :scene_no, :scene_label,
+                    :characters, :start_line, :end_line, :text
+                )
+                """
+            ),
+            scene_rows,
+        )

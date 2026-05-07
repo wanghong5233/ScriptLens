@@ -31,22 +31,28 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from service.script_progress_tracker import tracker as progress_tracker
+from service.script_tools.beat_chain import BeatSheet, extract_beat_sheet
+from service.script_tools.character_graph_chain import CharacterGraph, extract_character_graph
+from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
 from service.script_tools.dimension_scorer import (
     ScoreOutput,
     score_opening_hook,
     score_pacing,
     score_reward_density,
 )
+from service.script_tools.evaluation_chain import build_evaluation_payload
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
 from service.script_tools.motivation_chain import MotivationResult, score_motivation
+from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
 from service.script_tools.risk_screener import RiskResult, screen_risks
-from service.script_tools.scene_repo import extract_quote
+from service.script_tools.scene_repo import extract_quote, get_scene
 from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
@@ -182,6 +188,55 @@ async def score_one_dimension(
 # ============================================================
 
 
+_DIMENSION_LABEL_CN = {
+    "opening_hook": "开场钩子",
+    "reward_density": "爽点密度",
+    "motivation": "动机自洽",
+    "pacing": "节奏控制",
+    "risk": "审核风险",
+}
+
+
+async def _optional_chain(name: str, coro: Awaitable[Any]) -> Any:
+    """报告扩展链可降级为 null；只吞已知业务失败。"""
+    try:
+        return await coro
+    except (ScoreLLMError, ValueError) as exc:
+        logger.warning("%s failed and will be stored as null: %s", name, exc)
+        return None
+
+
+def _select_beat_anchor_scenes(beat_sheet: Optional[BeatSheet], *, top_k: int) -> List[str]:
+    if beat_sheet is None:
+        return []
+    priority = {
+        "opening": 0,
+        "inciting": 1,
+        "midpoint": 2,
+        "climax": 3,
+        "closing": 4,
+        "twist": 5,
+        "reward": 6,
+    }
+    beats = [
+        beat
+        for act in beat_sheet.acts
+        for beat in act.beats
+        if beat.anchor_scene_id
+    ]
+    beats.sort(key=lambda b: priority.get(b.type, 99))
+    out: List[str] = []
+    seen: set[str] = set()
+    for beat in beats:
+        if beat.anchor_scene_id in seen:
+            continue
+        seen.add(beat.anchor_scene_id)
+        out.append(beat.anchor_scene_id)
+        if len(out) >= top_k:
+            break
+    return out
+
+
 async def generate_report(
     *,
     script_id: str,
@@ -191,89 +246,257 @@ async def generate_report(
     """主入口：跑完 5 维评分 + 落库 + 返回完整 report dict。
 
     返回 dict 直接对应 PRD §7 schema（schemas/script.ReportPayload）。
+
+    可观测性：
+      流水线在 6 个关键节点 publish 进度到 progress_tracker，前端通过
+      `GET /api/scripts/{id}/progress` 轮询拿到当前阶段 / detail，渲染
+      6 阶段时间轴。任何一阶段失败时 finalize(error=...) 让前端能看到红点。
     """
     t0 = time.perf_counter()
     caller = caller or LlmCaller()
+    progress_tracker.start(script_id)
 
-    meta = _load_script_meta(script_id, engine=engine)
-    if meta is None:
-        raise ValueError(f"script_id={script_id} 不存在")
+    try:
+        # ---- 1. 加载剧本元数据 ----------------------------------------------
+        progress_tracker.update_stage(script_id, "loading_meta", "running")
+        meta = _load_script_meta(script_id, engine=engine)
+        if meta is None:
+            progress_tracker.update_stage(
+                script_id, "loading_meta", "failed", detail="剧本不存在"
+            )
+            progress_tracker.finalize(script_id, error=f"script_id={script_id} 不存在")
+            raise ValueError(f"script_id={script_id} 不存在")
+        progress_tracker.update_stage(
+            script_id,
+            "loading_meta",
+            "done",
+            detail=f"《{meta.title}》· {meta.total_episodes} 集 / {meta.total_scenes} 场",
+        )
 
-    logger.info("report.start script_id=%s title=%s episodes=%s scenes=%s",
-                meta.script_id, meta.title, meta.total_episodes, meta.total_scenes)
+        logger.info("report.start script_id=%s title=%s episodes=%s scenes=%s",
+                    meta.script_id, meta.title, meta.total_episodes, meta.total_scenes)
 
-    # 1. 抽 reward 事件（reward_density / pacing 共享）
-    reward_events = await extract_reward_events(script_id=script_id, caller=caller)
+        # ---- 2. 抽 reward 事件（reward_density / pacing 共享）---------------
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_rewards",
+            "running",
+            detail="LLM 通读全剧，识别反转 / 打脸 / 逆袭 / 觉醒事件…",
+        )
+        reward_events = await extract_reward_events(script_id=script_id, caller=caller)
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_rewards",
+            "done",
+            detail=f"识别到 {len(reward_events)} 个爽点事件",
+        )
 
-    # 2. 并行 5 维评分
-    open_task = score_opening_hook(script_id=script_id, caller=caller)
-    reward_task = score_reward_density(
-        script_id=script_id,
-        reward_events=reward_events,
-        total_episodes=meta.total_episodes,
-        caller=caller,
-    )
-    motiv_task = score_motivation(script_id=script_id, caller=caller)
-    pacing_task = score_pacing(script_id=script_id, reward_events=reward_events, caller=caller)
-    risk_task = screen_risks(script_id=script_id, caller=caller)
+        # ---- 3. 并行 5 维评分 -----------------------------------------------
+        progress_tracker.update_stage(
+            script_id,
+            "scoring_dimensions",
+            "running",
+            detail="并行评估 5 维：开场钩子 / 爽点密度 / 动机自洽 / 节奏控制 / 审核风险",
+        )
 
-    open_r, reward_r, motiv_r, pacing_r, risk_r = await asyncio.gather(
-        open_task, reward_task, motiv_task, pacing_task, risk_task
-    )
+        completed_dims: List[str] = []
 
-    dim_scores: List[_DimScore] = [
-        _to_dim("opening_hook", open_r),
-        _to_dim("reward_density", reward_r),
-        _to_dim_from_motivation(motiv_r),
-        _to_dim("pacing", pacing_r),
-        _to_dim_from_risk(risk_r),
-    ]
+        def _on_dim_done(dim_key: str) -> None:
+            completed_dims.append(_DIMENSION_LABEL_CN.get(dim_key, dim_key))
+            progress_tracker.update_detail(
+                script_id,
+                f"已完成 {len(completed_dims)}/5 维（{', '.join(completed_dims)}）",
+            )
 
-    # 3. 决策聚合
-    decision = await _aggregate_decision(meta, dim_scores, caller)
-    must_read_scene_ids = _select_must_read(dim_scores, top_k=3)
+        async def _run_dim(dim_key: str, coro):
+            try:
+                return await coro
+            finally:
+                _on_dim_done(dim_key)
 
-    # 4. 拼装 evidence_refs（去重；从所有维度的 evidence_scene_ids 展开）
-    evidence_refs_payload = _build_evidence_refs(dim_scores, engine=engine)
-    scene_id_to_evi_id = {er["scene_id"]: er["id"] for er in evidence_refs_payload}
+        open_r, reward_r, motiv_r, pacing_r, risk_r = await asyncio.gather(
+            _run_dim("opening_hook", score_opening_hook(script_id=script_id, caller=caller)),
+            _run_dim("reward_density", score_reward_density(
+                script_id=script_id,
+                reward_events=reward_events,
+                total_episodes=meta.total_episodes,
+                caller=caller,
+            )),
+            _run_dim("motivation", score_motivation(script_id=script_id, caller=caller)),
+            _run_dim("pacing", score_pacing(
+                script_id=script_id, reward_events=reward_events, caller=caller,
+            )),
+            _run_dim("risk", screen_risks(script_id=script_id, caller=caller)),
+        )
 
-    # 5. scorecard 的 evidence_ref_ids 现在是 evidence_refs.id（不是 scene_id）
-    scorecard_payload = []
-    for ds in dim_scores:
-        evi_ids = [scene_id_to_evi_id[sid] for sid in ds.evidence_scene_ids if sid in scene_id_to_evi_id]
-        scorecard_payload.append({
-            "dimension": ds.dimension,
-            "score": ds.score,
-            "level": ds.level,
-            "reason": ds.reason,
-            "evidence_ref_ids": evi_ids,
-        })
+        dim_scores: List[_DimScore] = [
+            _to_dim("opening_hook", open_r),
+            _to_dim("reward_density", reward_r),
+            _to_dim_from_motivation(motiv_r),
+            _to_dim("pacing", pacing_r),
+            _to_dim_from_risk(risk_r),
+        ]
+        scored_count = sum(1 for d in dim_scores if d.score is not None)
+        progress_tracker.update_stage(
+            script_id,
+            "scoring_dimensions",
+            "done",
+            detail=f"5 维完成：{scored_count} 维有评分 · {5 - scored_count} 维证据不足",
+        )
 
-    # must_read_scene_ids 也映射成 evidence_refs.id（保持 PRD §7 字段一致）
-    must_read_evi_ids = [scene_id_to_evi_id[sid] for sid in must_read_scene_ids if sid in scene_id_to_evi_id]
+        # ---- 4. 决策聚合 + 故事/人物/速览提炼（并行）-------------------------
+        progress_tracker.update_stage(
+            script_id,
+            "aggregating_decision",
+            "running",
+            detail="LLM 综合 5 维评分生成决策卡 + 一句话理由…",
+        )
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_narrative",
+            "running",
+            detail="生成速览卡、三幕节拍、人物关系图和节奏曲线…",
+        )
+        decision_task = _aggregate_decision(meta, dim_scores, caller)
+        coverage_task = _optional_chain(
+            "coverage_chain",
+            extract_coverage_card(script_id=script_id, caller=caller, engine=engine),
+        )
+        beat_task = _optional_chain(
+            "beat_chain",
+            extract_beat_sheet(
+                script_id=script_id, reward_events=reward_events, caller=caller, engine=engine,
+            ),
+        )
+        character_graph_task = _optional_chain(
+            "character_graph_chain",
+            extract_character_graph(script_id=script_id, caller=caller, engine=engine),
+        )
+        decision, coverage_card, beat_sheet, character_graph = await asyncio.gather(
+            decision_task,
+            coverage_task,
+            beat_task,
+            character_graph_task,
+        )
+        pacing_curve_payload = aggregate_pacing_curve(
+            script_id=script_id,
+            reward_events=reward_events,
+            engine=engine,
+        )
+        must_read_scene_ids = _select_beat_anchor_scenes(beat_sheet, top_k=3)
+        progress_tracker.update_stage(
+            script_id,
+            "aggregating_decision",
+            "done",
+            detail=f"决策：{decision.get('label', '?')} · 置信度 {decision.get('confidence', '?')}",
+        )
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_narrative",
+            "done",
+            detail=(
+                f"速览{'已生成' if coverage_card else '降级'} · "
+                f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
+                f"人物 {len(character_graph.nodes) if character_graph else 0} 个"
+            ),
+        )
 
-    report_payload = {
-        "script_id": meta.script_id,
-        "title": meta.title,
-        "decision": decision,
-        "decision_reason": decision.get("one_sentence_reason", ""),
-        "overall_score": _overall_score(dim_scores),
-        "summary": decision.get("summary", ""),
-        "must_read_scene_ids": must_read_evi_ids,
-        "scorecard": scorecard_payload,
-        "evidence_refs": evidence_refs_payload,
-        "risk_flags": _collect_risk_flags(risk_r),
-    }
+        # ---- 5. 拼装 evidence_refs ------------------------------------------
+        progress_tracker.update_stage(
+            script_id,
+            "building_evidence",
+            "running",
+            detail="为每个评分挂载来源场次的原文 quote…",
+        )
+        evidence_refs_payload = _build_evidence_refs(
+            dim_scores,
+            extra_scene_ids=must_read_scene_ids,
+            engine=engine,
+        )
+        await _attach_scene_summaries(evidence_refs_payload, caller=caller, engine=engine)
+        scene_id_to_evi_id = {er["scene_id"]: er["id"] for er in evidence_refs_payload}
 
-    # 6. 写库（事务）
-    _persist_report(meta.script_id, report_payload, evidence_refs_payload, engine=engine)
+        scorecard_payload = []
+        for ds in dim_scores:
+            evi_ids = [scene_id_to_evi_id[sid] for sid in ds.evidence_scene_ids if sid in scene_id_to_evi_id]
+            scorecard_payload.append({
+                "dimension": ds.dimension,
+                "score": ds.score,
+                "level": ds.level,
+                "reason": ds.reason,
+                "evidence_ref_ids": evi_ids,
+            })
+        must_read_evi_ids = [scene_id_to_evi_id[sid] for sid in must_read_scene_ids if sid in scene_id_to_evi_id]
 
-    elapsed_ms = int((time.perf_counter() - t0) * 1000)
-    logger.info(
-        "report.done script_id=%s elapsed_ms=%s overall=%s decision=%s",
-        meta.script_id, elapsed_ms, report_payload["overall_score"], decision.get("label"),
-    )
-    return report_payload
+        # task.md §三 把"主要看点 / 钩子 / 反转 / 爽点"作为头等公民展示给用户：
+        # 这一段把 reward_events + opening_hook 首条 + 已确认的高/中风险 hit 合并成一份 highlights 清单
+        opening_dim_score = next((d for d in dim_scores if d.dimension == "opening_hook"), None)
+        highlights_payload = _build_highlights(
+            reward_events=reward_events,
+            opening_dim=opening_dim_score,
+            risk_r=risk_r,
+            evidence_refs_payload=evidence_refs_payload,
+            engine=engine,
+        )
+
+        report_payload = {
+            "script_id": meta.script_id,
+            "title": meta.title,
+            "decision": decision,
+            "decision_reason": decision.get("one_sentence_reason", ""),
+            "overall_score": _overall_score(dim_scores),
+            "summary": decision.get("summary", ""),
+            "must_read_scene_ids": must_read_evi_ids,
+            "scorecard": scorecard_payload,
+            "evidence_refs": evidence_refs_payload,
+            "highlights": highlights_payload,
+            "coverage_card": coverage_card.to_dict() if coverage_card else None,
+            "beat_sheet": beat_sheet.to_dict() if beat_sheet else None,
+            "character_graph": character_graph.to_dict() if character_graph else None,
+            "pacing_curve": pacing_curve_payload,
+            "evaluation": build_evaluation_payload(
+                scorecard=scorecard_payload,
+                evidence_refs=evidence_refs_payload,
+                risk_flags=_collect_risk_flags(risk_r),
+            ),
+            "risk_flags": _collect_risk_flags(risk_r),
+        }
+        progress_tracker.update_stage(
+            script_id,
+            "building_evidence",
+            "done",
+            detail=(
+                f"已挂载 {len(evidence_refs_payload)} 条证据片段 · "
+                f"提炼 {len(highlights_payload)} 个看点 / 风险节点"
+            ),
+        )
+
+        # ---- 6. 写库（事务）-------------------------------------------------
+        progress_tracker.update_stage(
+            script_id,
+            "persisting",
+            "running",
+            detail="DELETE 旧报告 → INSERT 新报告 + 证据片段（事务）",
+        )
+        _persist_report(meta.script_id, report_payload, evidence_refs_payload, engine=engine)
+        elapsed_ms = int((time.perf_counter() - t0) * 1000)
+        progress_tracker.update_stage(
+            script_id,
+            "persisting",
+            "done",
+            detail=f"报告已落库 · 耗时 {elapsed_ms / 1000:.1f}s",
+        )
+        progress_tracker.finalize(script_id)
+
+        logger.info(
+            "report.done script_id=%s elapsed_ms=%s overall=%s decision=%s",
+            meta.script_id, elapsed_ms, report_payload["overall_score"], decision.get("label"),
+        )
+        return report_payload
+    except Exception as exc:
+        # 把当前阶段标记 failed 并 finalize；前端时间轴上能看到具体哪一步红了
+        progress_tracker.finalize(script_id, error=f"{type(exc).__name__}: {exc}")
+        raise
 
 
 # ============================================================
@@ -367,7 +590,12 @@ _DECISION_PROMPT = """你是中文短剧选品总监。下面是某剧的 5 维�
   "confidence": "high|medium|low",
   "one_sentence_reason": "<≤60 字，对选品 / 编剧 / 审核三类用户都有信息量>",
   "summary": "<3-5 句剧本概览，必须基于 5 维 reason，不准编造未提到的事件>"
-}}"""
+}}
+
+语言要求：
+1. 面向剧本创作者、选品、审核人员，不要出现 reward、scene_no、方差、均值、比值、OOC 等工程词。
+2. 如需提场次，写「第 X 集第 Y 场」，不要写「10-1」。
+3. 结论要解释成创作/审核语言，例如「情绪回报不足」「中段缺少阶段性反转」「角色行为突兀」。"""
 
 
 async def _aggregate_decision(
@@ -493,6 +721,159 @@ def _overall_score(dim_scores: List[_DimScore]) -> Optional[float]:
     return round(sum(valid) / len(valid), 1)
 
 
+# ============================================================
+# highlights：剧本叙事节点清单（task.md §三 头等公民）
+# ============================================================
+
+
+# RewardEvent.event_type → ReportHighlight.type 的映射
+# （前端 enum 与 reward extractor 取值不完全一致，这里做归一化）
+_REWARD_TO_HIGHLIGHT_TYPE: Dict[str, str] = {
+    "face_slap": "face_slap",
+    "reversal": "reversal",
+    "revenge": "revenge",
+    "romantic_progress": "cp_progress",
+    "identity_reveal": "identity_reveal",
+    "humiliate_villain": "villain_fall",
+    "underdog_rise": "underdog_rise",
+    "scheme_exposed": "scheme_exposed",
+}
+
+
+# RewardEvent.event_type → 一句话点题模板（用 evidence 文本截短填进去）
+_REWARD_TYPE_HEADLINE = {
+    "face_slap": "打脸 / 反转",
+    "reversal": "命运反转",
+    "revenge": "复仇 / 报应",
+    "romantic_progress": "CP 进展",
+    "identity_reveal": "身份揭露",
+    "humiliate_villain": "反派败落",
+    "underdog_rise": "逆袭爆发",
+    "scheme_exposed": "阴谋败露",
+}
+
+
+def _trim_oneliner(s: str, max_len: int = 40) -> str:
+    """看点 oneliner 长度限制：UI 行高有限，单行 40 字够用。"""
+    s = (s or "").strip().replace("\n", " ")
+    if len(s) <= max_len:
+        return s
+    return s[: max_len - 1] + "…"
+
+
+def _build_highlights(
+    *,
+    reward_events: List[RewardEvent],
+    opening_dim: Optional[_DimScore],
+    risk_r: RiskResult,
+    evidence_refs_payload: List[Dict],
+    engine: Engine,
+) -> List[Dict]:
+    """合并 reward_events + opening_hook 首条证据 + risk hits 为统一的 highlights 清单。
+
+    设计：
+      - 同一 scene_id 在 highlights 中只出现一次（按优先级：reward > hook > risk）
+      - 缺 scene_label / episode_no / start_line / end_line 时回查 extract_quote
+      - oneliner 来源：
+          reward → REWARD_TYPE_HEADLINE + evidence 截短拼接（"反转 · {evidence片段}"）
+          hook   → "开场强冲突：{evidence片段}"
+          risk   → "{category} · {matched_term}"
+    """
+    # 复用 evidence_refs 已经查好的 scene meta，避免重复查 DB
+    meta_by_scene: Dict[str, Dict] = {}
+    for er in evidence_refs_payload:
+        meta_by_scene[er["scene_id"]] = er
+
+    def _resolve_meta(scene_id: str) -> Optional[Dict]:
+        cached = meta_by_scene.get(scene_id)
+        if cached:
+            return cached
+        q = extract_quote(scene_id=scene_id, engine=engine)
+        if q is None:
+            return None
+        meta_by_scene[scene_id] = q
+        return q
+
+    out: List[Dict] = []
+    used_scenes: set[str] = set()
+
+    # 1) reward_events（按 episode_no/scene_no 已排序）
+    for ev in reward_events:
+        if ev.scene_id in used_scenes:
+            continue
+        hl_type = _REWARD_TO_HIGHLIGHT_TYPE.get(ev.event_type)
+        if hl_type is None:
+            continue
+        meta = _resolve_meta(ev.scene_id)
+        if meta is None:
+            continue
+        headline = _REWARD_TYPE_HEADLINE.get(ev.event_type, "看点")
+        oneliner = _trim_oneliner(f"{headline} · {ev.evidence}")
+        out.append({
+            "id": str(uuid.uuid4()),
+            "type": hl_type,
+            "scene_id": ev.scene_id,
+            "episode_no": ev.episode_no if ev.episode_no is not None else meta.get("episode_no"),
+            "scene_no": ev.scene_no or meta.get("scene_no"),
+            "scene_label": meta.get("scene_label"),
+            "start_line": meta.get("start_line"),
+            "end_line": meta.get("end_line"),
+            "oneliner": oneliner,
+            "evidence": ev.evidence,
+        })
+        used_scenes.add(ev.scene_id)
+
+    # 2) opening_hook 维度的首条证据 → type='hook'
+    if opening_dim and opening_dim.evidence_scene_ids:
+        first_sid = opening_dim.evidence_scene_ids[0]
+        if first_sid not in used_scenes:
+            meta = _resolve_meta(first_sid)
+            if meta is not None:
+                quote = (meta.get("quote") or "").strip()
+                oneliner = _trim_oneliner(f"开场强冲突 · {quote}")
+                out.append({
+                    "id": str(uuid.uuid4()),
+                    "type": "hook",
+                    "scene_id": first_sid,
+                    "episode_no": meta.get("episode_no"),
+                    "scene_no": meta.get("scene_no"),
+                    "scene_label": meta.get("scene_label"),
+                    "start_line": meta.get("start_line"),
+                    "end_line": meta.get("end_line"),
+                    "oneliner": oneliner,
+                    "evidence": quote or None,
+                })
+                used_scenes.add(first_sid)
+
+    # 3) risk hits：confirmed_by_llm 且 level != low_risk 的高 / 中风险
+    for h in risk_r.hits or []:
+        if h.scene_id in used_scenes:
+            continue
+        if not h.confirmed_by_llm:
+            continue
+        if h.level not in ("high_risk", "medium_risk"):
+            continue
+        meta = _resolve_meta(h.scene_id)
+        if meta is None:
+            continue
+        oneliner = _trim_oneliner(f"{h.category} · {h.matched_term}")
+        out.append({
+            "id": str(uuid.uuid4()),
+            "type": "risk",
+            "scene_id": h.scene_id,
+            "episode_no": h.episode_no if h.episode_no is not None else meta.get("episode_no"),
+            "scene_no": h.scene_no or meta.get("scene_no"),
+            "scene_label": meta.get("scene_label"),
+            "start_line": meta.get("start_line"),
+            "end_line": meta.get("end_line"),
+            "oneliner": oneliner,
+            "evidence": h.excerpt,
+        })
+        used_scenes.add(h.scene_id)
+
+    return out
+
+
 def _collect_risk_flags(risk_r: RiskResult) -> List[str]:
     """从 risk hits 收集去重的 category 列表（限制 ≤ 8 个）。"""
     cats: List[str] = []
@@ -548,7 +929,12 @@ def _select_must_read(dim_scores: List[_DimScore], top_k: int = 3) -> List[str]:
 # ============================================================
 
 
-def _build_evidence_refs(dim_scores: List[_DimScore], *, engine: Engine) -> List[Dict]:
+def _build_evidence_refs(
+    dim_scores: List[_DimScore],
+    *,
+    extra_scene_ids: Optional[List[str]] = None,
+    engine: Engine,
+) -> List[Dict]:
     """收集所有维度提到的 scene_id，去重，逐个调 extract_quote 生成 evidence_ref。"""
     seen_scene_ids: List[str] = []
     seen: set[str] = set()
@@ -559,6 +945,11 @@ def _build_evidence_refs(dim_scores: List[_DimScore], *, engine: Engine) -> List
                 seen.add(sid)
                 seen_scene_ids.append(sid)
             scene_to_dimensions.setdefault(sid, []).append(d.dimension)
+    for sid in extra_scene_ids or []:
+        if sid not in seen:
+            seen.add(sid)
+            seen_scene_ids.append(sid)
+        scene_to_dimensions.setdefault(sid, []).append("关键场景")
 
     out: List[Dict] = []
     for sid in seen_scene_ids:
@@ -566,11 +957,12 @@ def _build_evidence_refs(dim_scores: List[_DimScore], *, engine: Engine) -> List
         if q is None:
             continue
         evi_id = str(uuid.uuid4())
-        # reason 字段：记录哪些维度引用了这一场（让前端能反查"这条证据支撑哪些评分"）
+        # reason 字段：记录哪些维度 / 故事节拍引用了这一场
         dims = sorted(set(scene_to_dimensions.get(sid, [])))
         out.append({
             "id": evi_id,
             "scene_id": sid,
+            "episode_no": q.get("episode_no"),
             "scene_no": q.get("scene_no"),
             "scene_label": q.get("scene_label"),
             "start_line": q.get("start_line"),
@@ -580,6 +972,118 @@ def _build_evidence_refs(dim_scores: List[_DimScore], *, engine: Engine) -> List
             "confidence": "medium",
         })
     return out
+
+
+_SCENE_SUMMARY_PROMPT = """你是中文短剧剧本编辑。下面给你若干个完整场景文本。
+任务：为每一场写一句「整场概述」，用于报告里的关键场景卡片。
+
+要求：
+1. 概述的是这一整场发生了什么，不要摘一句台词。
+2. 说明这场的戏剧功能：冲突 / 反转 / 情绪释放 / 风险点 / 人物关系推进。
+3. 每条 35-70 字，面向编剧、选品、审核人员，语气自然，不要工程术语。
+4. 不要出现 scene_no、reward、方差、JSON 以外的解释。
+
+【场景】
+{scenes_block}
+
+输出 JSON：
+{{
+  "summaries": [
+    {{"scene_id": "<scene_id>", "summary": "<整场概述>"}}
+  ]
+}}"""
+
+
+def _fallback_scene_summary(text_: str, max_len: int = 70) -> str:
+    """LLM 摘要失败时的可读兜底：取前几行实质内容，避免只显示短 quote。"""
+    cleaned: List[str] = []
+    for raw in (text_ or "").splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith(("人物", "出场", "场景", "地点", "时间")) and ("：" in s[:4] or ":" in s[:4]):
+            continue
+        cleaned.append(s)
+        if len(" ".join(cleaned)) >= max_len:
+            break
+    summary = " ".join(cleaned).strip()
+    if len(summary) > max_len:
+        summary = summary[: max_len - 1] + "…"
+    return summary
+
+
+async def _attach_scene_summaries(
+    evidence_refs_payload: List[Dict],
+    *,
+    caller: LlmCaller,
+    engine: Engine,
+) -> None:
+    """给 evidence_refs_payload 原地补 `scene_summary`。
+
+    关键场景卡片需要的是「整场发生了什么」，不是 evidence quote。quote 只用于行级高亮；
+    scene_summary 才用于报告阅读。如果 LLM 摘要失败，退化为基于完整 scene.text 的可读截断。
+    """
+    if not evidence_refs_payload:
+        return
+
+    scenes = []
+    for er in evidence_refs_payload[:8]:
+        scene = get_scene(scene_id=er["scene_id"], engine=engine)
+        if scene is None:
+            continue
+        text_ = (scene.text or "").strip()
+        if len(text_) > 1200:
+            text_ = text_[:1200] + "…"
+        scenes.append((er["scene_id"], text_, _fallback_scene_summary(scene.text)))
+
+    fallback_by_id = {sid: fallback for sid, _text, fallback in scenes}
+    for er in evidence_refs_payload:
+        er["scene_summary"] = fallback_by_id.get(er["scene_id"]) or er.get("quote")
+
+    if not scenes:
+        return
+
+    blocks = [
+        f"[scene_id={sid}]\n{text_}"
+        for sid, text_, _fallback in scenes
+    ]
+    prompt = _SCENE_SUMMARY_PROMPT.format(scenes_block="\n\n---\n\n".join(blocks))
+
+    try:
+        resp = await caller.call_json(
+            prompt,
+            tier=ModelTier.MINI,
+            temperature=0.2,
+            max_tokens=1200,
+        )
+    except ScoreLLMError as exc:
+        logger.warning("scene_summary LLM failed, fallback to extractive summaries: %s", exc)
+        return
+
+    parsed = resp.parsed if isinstance(resp.parsed, dict) else {}
+    raw_items = parsed.get("summaries", [])
+    if not isinstance(raw_items, list):
+        return
+
+    summary_by_id: Dict[str, str] = {}
+    allowed = {sid for sid, _text, _fallback in scenes}
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        sid = str(item.get("scene_id") or "").strip()
+        if sid not in allowed:
+            continue
+        summary = str(item.get("summary") or "").strip()
+        if not summary:
+            continue
+        if len(summary) > 90:
+            summary = summary[:89] + "…"
+        summary_by_id[sid] = summary
+
+    for er in evidence_refs_payload:
+        sid = er["scene_id"]
+        if sid in summary_by_id:
+            er["scene_summary"] = summary_by_id[sid]
 
 
 # ============================================================

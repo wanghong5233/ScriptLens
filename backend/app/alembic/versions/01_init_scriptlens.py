@@ -14,8 +14,12 @@ This single migration bootstraps a fresh ScriptLens database:
    scripts / scenes / script_chunks (pgvector) / reports / evidence_refs /
    script_feedback
 
-注意：MVP 不创建 ScholarMind 的 `rag_chunks` 表，因为剧本场景走独立的
-`scriptlens.script_chunks`，与 ScholarMind RAG 隔离。
+注意：MVP 不创建 ScholarMind 的 `rag_chunks` 表，剧本走独立 schema。
+
+⚠️ v1 演进：本 migration 创建的 `script_chunks` 表已在 `03_drop_script_chunks`
+中删除——embedding 路径拆除，BM25 索引保留在 `scenes.text` 上即可。
+新部署会先 create 再 drop（alembic 顺序执行），干净的库不会留下 script_chunks。
+详见 `docs/04-script-pipeline.md` §4.4。
 """
 
 from typing import Sequence, Union

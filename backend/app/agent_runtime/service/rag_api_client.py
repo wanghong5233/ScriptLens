@@ -75,9 +75,9 @@ class RAGAPIClient:
                 "scene_label": s.scene_label,
                 "episode_no": s.episode_no,
                 "text": s.text,
-                "score": s.rrf_score,
-                "embedding_rank": s.embedding_rank,
-                "bm25_rank": s.bm25_rank,
+                "score": s.score,
+                "rank": s.rank,
+                "source": s.source,
             }
             for s in scored
         ]

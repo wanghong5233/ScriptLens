@@ -61,6 +61,63 @@ class ScriptListItem(BaseModel):
     created_at: datetime
 
 
+class ScriptDeleteResponse(BaseModel):
+    """DELETE /api/scripts/{id} 响应。"""
+
+    deleted: bool = True
+    script_id: str
+    title: str
+    storage_deleted: bool
+    deleted_counts: Dict[str, int] = Field(default_factory=dict)
+
+
+# ============================================================
+# 报告生成进度（GET /api/scripts/{id}/progress）
+# ============================================================
+
+
+ReportStageState = Literal["pending", "running", "done", "failed"]
+
+
+class ReportStageInfo(BaseModel):
+    """流水线一个阶段的状态。
+
+    `description` 是给前端 tooltip 用的"这一步在做什么"，与 detail 的区别：
+    - description 静态、面向所有人解释这一步的语义
+    - detail 动态、运行时回写（如"已识别到 14 个爽点事件"）
+    """
+
+    id: str
+    label: str
+    description: str
+    state: ReportStageState
+    detail: Optional[str] = None
+    started_at: Optional[float] = None
+    completed_at: Optional[float] = None
+
+
+class ReportProgressSnapshot(BaseModel):
+    """5 维评分流水线的进度快照。"""
+
+    script_id: str
+    started_at: float
+    updated_at: float
+    final: bool = False
+    error: Optional[str] = None
+    current_index: int = 0
+    stages: List[ReportStageInfo] = Field(default_factory=list)
+
+
+class ReportProgressResponse(BaseModel):
+    """GET /api/scripts/{id}/progress。
+
+    snapshot 为 None 表示当前没有评分任务在跑（也没有 5 分钟内的旧快照）。
+    """
+
+    script_id: str
+    snapshot: Optional[ReportProgressSnapshot] = None
+
+
 # ============================================================
 # 报告（PRD §7 schema —— 与 service.script_report_service 1:1 对齐）
 # ============================================================
@@ -104,17 +161,167 @@ class ReportScorecardItem(BaseModel):
 
 
 class ReportEvidenceRef(BaseModel):
-    """evidence_refs[]：每条都是带原文 quote 的引用，前端高亮使用。"""
+    """evidence_refs[]：每条都是带原文 quote 的引用，前端高亮使用。
+
+    episode_no 单独暴露：前端要把"第 10 集第 3 场"这种人话坐标渲染给非技术用户，
+    没有 episode_no 就只能裸显 scene_no="10-3"，对内容策划/审核完全是黑话。
+    """
 
     id: str
     scene_id: str
+    episode_no: Optional[int] = None
     scene_no: Optional[str] = None
     scene_label: Optional[str] = None
     start_line: Optional[int] = None
     end_line: Optional[int] = None
     quote: str
+    scene_summary: Optional[str] = Field(
+        None,
+        description="整场戏摘要（不是 quote 碎片），用于前端「关键场景」卡片",
+    )
     reason: str
     confidence: ConfidenceLevel = "medium"
+
+
+# 主要看点 / 钩子 / 反转 / 爽点 / 风险点：剧本叙事节点的统一抽象。
+# 与 service.script_tools.reward_extractor.RewardEvent 的 event_type 取值对齐，
+# 再补一个 'hook'（开场钩子，从 opening_hook 维度的 evidence 派生）和 'risk'（风险点）。
+HighlightType = Literal[
+    "hook",
+    "face_slap",
+    "reversal",
+    "revenge",
+    "cp_progress",
+    "identity_reveal",
+    "villain_fall",
+    "underdog_rise",
+    "scheme_exposed",
+    "risk",
+]
+
+Recommendation = Literal["recommend", "consider", "pass"]
+BeatType = Literal["opening", "inciting", "midpoint", "climax", "closing", "twist", "reward"]
+CharacterRole = Literal["protagonist", "antagonist", "support", "minor"]
+CharacterRelationType = Literal[
+    "family",
+    "romance",
+    "rival",
+    "ally",
+    "authority",
+    "deception",
+    "mentor",
+]
+RelationPolarity = Literal["positive", "negative", "mixed"]
+
+
+class ReportHighlight(BaseModel):
+    """主要看点节点（前端按 type 分组渲染清单）。
+
+    给 task.md §三 列的"看点 / 钩子 / 反转 / 爽点"提供结构化数据：
+    每条带 episode_no/scene_no/scene_label/scene_id（人话坐标 + 跳转锚点）+ oneliner（一句话点题）
+    + 可选 evidence（原文片段，给 tooltip 用）。
+    """
+
+    id: str = Field(..., description="客户端用作高亮 key（与 evidence_refs.id 同空间）")
+    type: HighlightType
+    scene_id: str
+    episode_no: Optional[int] = None
+    scene_no: Optional[str] = None
+    scene_label: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    oneliner: str = Field(..., description="≤ 40 字一句话点题")
+    evidence: Optional[str] = Field(None, description="≤ 80 字原文片段，给 tooltip / 折叠态")
+
+
+class CoveragePoint(BaseModel):
+    """Coverage Card 的优劣点。"""
+
+    title: str = Field(..., description="≤ 12 字")
+    detail: str = Field(..., description="≤ 80 字，面向选品/编剧/审核的人话说明")
+    anchor_scene_id: Optional[str] = None
+
+
+class CoverageCard(BaseModel):
+    """30 秒决策层：借鉴 studio coverage 的 logline + recommendation + 优劣点。"""
+
+    logline: str = Field(..., description="≤ 60 字一句话剧情概括")
+    recommendation: Recommendation
+    confidence: ConfidenceLevel = "medium"
+    genre: List[str] = Field(default_factory=list, description="类型标签 1-3 个")
+    core_value: str = Field("", description="≤ 30 字，这份剧本最值得关注的价值")
+    strengths: List[CoveragePoint] = Field(default_factory=list)
+    concerns: List[CoveragePoint] = Field(default_factory=list)
+
+
+class BeatNode(BaseModel):
+    """故事节拍节点，前端点击 anchor_scene_id 跳原文。"""
+
+    type: BeatType
+    summary: str = Field(..., description="≤ 50 字")
+    anchor_scene_id: str
+
+
+class BeatAct(BaseModel):
+    """三幕骨架：开局 / 发展 / 收束。"""
+
+    act: Literal[1, 2, 3]
+    title: str
+    scene_range: List[str] = Field(default_factory=list, min_length=0, max_length=2)
+    beats: List[BeatNode] = Field(default_factory=list)
+
+
+class BeatSheet(BaseModel):
+    acts: List[BeatAct] = Field(default_factory=list)
+
+
+class CharacterGraphNode(BaseModel):
+    id: str
+    name: str
+    role: CharacterRole = "support"
+    motivation: str = ""
+    goal: str = ""
+    obstacle: str = ""
+    first_scene_id: Optional[str] = None
+    appearance_count: int = 0
+
+
+class CharacterGraphEdge(BaseModel):
+    source_id: str
+    target_id: str
+    type: CharacterRelationType = "ally"
+    weight: float = Field(0.0, ge=0.0, le=1.0)
+    polarity: RelationPolarity = "mixed"
+
+
+class CharacterGraph(BaseModel):
+    nodes: List[CharacterGraphNode] = Field(default_factory=list)
+    edges: List[CharacterGraphEdge] = Field(default_factory=list)
+
+
+class PacingCurvePoint(BaseModel):
+    episode_no: int
+    scene_count: int = 0
+    event_count: int = 0
+    hooks: int = 0
+    twists: int = 0
+    reward_events: int = 0
+    sentiment: float = Field(0.0, ge=-1.0, le=1.0)
+
+
+class EvaluationDimension(BaseModel):
+    key: DimensionName
+    label: str
+    score: Optional[int] = Field(None, ge=0, le=10)
+    level: Optional[DimensionLevel] = None
+    reason: str
+    evidence_ref_ids: List[str] = Field(default_factory=list)
+
+
+class EvaluationPayload(BaseModel):
+    dimensions: List[EvaluationDimension] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
+    rewrite_seeds: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ReportPayload(BaseModel):
@@ -137,6 +344,18 @@ class ReportPayload(BaseModel):
     )
     scorecard: List[ReportScorecardItem]
     evidence_refs: List[ReportEvidenceRef] = Field(default_factory=list)
+    highlights: List[ReportHighlight] = Field(
+        default_factory=list,
+        description=(
+            "主要看点 / 钩子 / 反转 / 爽点 / 风险节点清单；"
+            "task.md §三 要求把『主要看点、钩子、反转、爽点』作为头等公民呈现给用户。"
+        ),
+    )
+    coverage_card: Optional[CoverageCard] = None
+    beat_sheet: Optional[BeatSheet] = None
+    character_graph: Optional[CharacterGraph] = None
+    pacing_curve: List[PacingCurvePoint] = Field(default_factory=list)
+    evaluation: Optional[EvaluationPayload] = None
     risk_flags: List[str] = Field(default_factory=list)
     report_id: Optional[str] = None
     generated_at: Optional[str] = None
@@ -274,11 +493,43 @@ class FeedbackListResponse(BaseModel):
 ViewRole = Literal["selection", "writer", "review"]
 
 
+class RewriteSeed(BaseModel):
+    """改写候选（任务派发器入口，详见 docs/03-system-mental-model.md §6）。
+
+    报告**只产候选定位 + 触发**，不预生成 rewritten_excerpt。
+    rewritten_excerpt / diff / rationale 由用户在 chat 触发 propose_rewrite_tool 实时生产。
+    """
+
+    dimension: DimensionName
+    scene_id: str
+    scene_label: Optional[str] = None
+    issue: str = Field(..., description="一句话点明该场该维度的问题；派生自 scorecard.reason 第一句")
+    evidence_ref_id: str = Field(..., description="对应报告里的某条证据，用于在编辑器联动高亮")
+
+
+class RewriteTaskStatus(BaseModel):
+    """单个 (scene_id, dimension) 上的改写任务状态（从 script_operations group by 派生）。
+
+    报告卡片右上角徽章映射（详见 docs/03-system-mental-model.md §8）：
+        - attempts=0                                                   → "未处理"
+        - last_status=accepted                                          → "已采纳改写"
+        - last_status in (proposed, rejected)，attempts>0                → "已尝试 N 次"
+    """
+
+    attempts: int = Field(0, description="该 (scene, dim) 上的改写次数")
+    last_op_id: Optional[str] = Field(None, description="最近一次改写 op，前端可跳 timeline")
+    last_status: Optional[Literal["proposed", "accepted", "rejected"]] = None
+    last_at: Optional[datetime] = None
+
+
 class ViewResponse(BaseModel):
     """GET /api/scripts/{id}/view?role=... 响应。
 
     不重生成评分，仅基于 reports.report_json 按 role 重排 scorecard 优先级
     + 重选 must_read_scene_ids。报告未生成时返回 not_ready 兜底。
+
+    rewrite_seeds / task_status 为派生字段（不进 reports.report_json 持久层），
+    详见 docs/03-system-mental-model.md §6 §8。
     """
 
     script_id: str
@@ -303,6 +554,29 @@ class ViewResponse(BaseModel):
         description=(
             "原报告里的全部证据片段；前端拿 must_read_scene_ids / scorecard.evidence_ref_ids "
             "去 join 这里的 id 拿 quote / scene_label，避免再多调一次 GET /report。"
+        ),
+    )
+    highlights: List[ReportHighlight] = Field(
+        default_factory=list,
+        description="主要看点 / 钩子 / 反转 / 爽点 / 风险节点清单（透传自 ReportPayload.highlights）",
+    )
+    coverage_card: Optional[CoverageCard] = None
+    beat_sheet: Optional[BeatSheet] = None
+    character_graph: Optional[CharacterGraph] = None
+    pacing_curve: List[PacingCurvePoint] = Field(default_factory=list)
+    evaluation: Optional[EvaluationPayload] = None
+    rewrite_seeds: List[RewriteSeed] = Field(
+        default_factory=list,
+        description=(
+            "派生：从 score<7 / *_risk / major 维度的第一条 evidence 派生的改写候选，"
+            "前端在报告里渲染「最值得改的 N 场」卡组，点击后 dispatchTask({kind:'rewrite_seed'})。"
+        ),
+    )
+    task_status: Dict[str, RewriteTaskStatus] = Field(
+        default_factory=dict,
+        description=(
+            "派生：key=`{scene_id}:{dimension}`，value=该维度该场上的改写任务状态。"
+            "前端按此 key lookup 渲染卡片右上角徽章。"
         ),
     )
 

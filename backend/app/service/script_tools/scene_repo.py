@@ -207,44 +207,109 @@ def get_scenes_around(
     return all_scenes[lo:hi]
 
 
+_META_PREFIXES = ("人物", "出场", "角色", "登场", "场景", "时间", "地点", "时空")
+_ACTION_MARKERS = ("▲", "△", "◇", "◆", "*")
+
+
+def _is_meta_line(line: str) -> bool:
+    """场景头/人物清单/位置行——这些是结构性元数据，不该作为 evidence quote。"""
+    s = line.strip()
+    if not s:
+        return True
+    # "人物：xxx"、"出场：xxx"、"地点：xxx"——形如 [关键词][：:]
+    head = s[:4]
+    for prefix in _META_PREFIXES:
+        if s.startswith(prefix) and ("：" in head or ":" in head):
+            return True
+    # 数字场号头："1-2"、"第3集"、"第3集第2场"
+    if any(s.startswith(p) for p in ("第",)):
+        return True
+    if s[:1].isdigit() and ("场" in s[:6] or "集" in s[:4] or s[1:2] in ("-", "－")):
+        return True
+    return False
+
+
 def extract_quote(
     *,
     scene_id: str,
     max_chars: int = 90,
     engine: Engine = default_engine,
 ) -> Optional[dict]:
-    """提取场景里最显著的一段（≤max_chars 字），作为 evidence_refs.quote。
+    """提取场景里最显著的一段，作为 evidence_refs.quote。
 
-    选择策略：
-    1. 优先选第一段对白行（包含「：」或「:」分隔）
-    2. 没有对白 → 选首段动作行（▲△ 开头）
-    3. 都没有 → 截断 text 前 max_chars 字
+    返回的 start_line / end_line 是 **scene.text 内的 1-indexed 物理行号**，
+    与前端 Monaco 编辑器打开的内容（scene.text）严格对应——不要再用
+    scenes.start_line/end_line（那是原始 paragraphs 数组下标，含空行/重组，
+    与 scene.text 行号根本不对齐）。
+
+    选择策略（每条都要求"非 meta 行"——跳过人物清单、场景头、位置）：
+      1. 首条动作行（▲△ 开头）—— rubric 里"事件"通常在动作行
+      2. 首条对白行（含「：」或「:」分隔，且冒号前是短人名）
+      3. 首条非空非 meta 行
+      4. 实在没有 → 截断 scene.text 前 max_chars 字（line=1）
     """
     scene = get_scene(scene_id=scene_id, engine=engine)
     if not scene or not scene.text:
         return None
-    lines = [ln.strip() for ln in scene.text.split("\n") if ln.strip()]
+
+    raw_lines = scene.text.split("\n")  # 不剔空行，保留物理行号
+
     quote: Optional[str] = None
-    for ln in lines:
-        if "：" in ln or ":" in ln:
-            quote = ln
+    quote_line: Optional[int] = None  # 1-indexed
+
+    # pass 1：动作行
+    for idx, raw in enumerate(raw_lines):
+        ln = raw.strip()
+        if not ln or _is_meta_line(ln):
+            continue
+        if ln.startswith(_ACTION_MARKERS):
+            quote, quote_line = ln, idx + 1
             break
+
+    # pass 2：对白行（"角色名：台词"）—— 冒号前应是短人名（≤6 中文字符）
     if quote is None:
-        for ln in lines:
-            if ln.startswith(("▲", "△", "◇", "◆")):
-                quote = ln
+        for idx, raw in enumerate(raw_lines):
+            ln = raw.strip()
+            if not ln or _is_meta_line(ln):
+                continue
+            sep_idx = -1
+            for sep in ("：", ":"):
+                k = ln.find(sep)
+                if k != -1:
+                    sep_idx = k
+                    break
+            if sep_idx <= 0 or sep_idx > 12:
+                continue
+            speaker = ln[:sep_idx].strip()
+            if 1 <= len(speaker) <= 6 and not _is_meta_line(speaker):
+                quote, quote_line = ln, idx + 1
                 break
+
+    # pass 3：任何非 meta 实质行
     if quote is None:
-        quote = scene.text
+        for idx, raw in enumerate(raw_lines):
+            ln = raw.strip()
+            if not ln or _is_meta_line(ln):
+                continue
+            quote, quote_line = ln, idx + 1
+            break
+
+    # pass 4：彻底兜底
+    if quote is None:
+        quote = scene.text.strip()
+        quote_line = 1
+
     if len(quote) > max_chars:
         quote = quote[: max_chars - 1] + "…"
+
     return {
         "quote": quote,
         "scene_id": scene.id,
+        "episode_no": scene.episode_no,
         "scene_no": scene.scene_no,
         "scene_label": scene.scene_label,
-        "start_line": scene.start_line,
-        "end_line": scene.end_line,
+        "start_line": quote_line,
+        "end_line": quote_line,
     }
 
 

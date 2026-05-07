@@ -20,6 +20,16 @@ logger = logging.getLogger(__name__)
 
 _VALID_SCOPES = {"general", "dimension", "rewrite", "scene"}
 
+_SKILL_SLOTS = {
+    "dimension_explanation": "维度解释偏好",
+    "rewrite_preference": "改写偏好",
+    "risk_guardrail": "风险规避偏好",
+}
+
+_RISK_KEYWORDS = ("风险", "审核", "合规", "红线", "暴力", "伦理", "价值观", "敏感")
+_REWRITE_KEYWORDS = ("改写", "重写", "润色", "语气", "风格", "保留", "避免", "不要")
+_DIMENSION_KEYWORDS = ("评分", "维度", "解释", "依据", "证据", "理由")
+
 
 class FeedbackError(Exception):
     """反馈写入失败（参数非法 / 剧本不存在 / 越权）。"""
@@ -123,13 +133,72 @@ def format_feedback_for_prompt(items: List[Dict[str, Any]]) -> str:
     """
     if not items:
         return ""
-    lines = ["【用户既往反馈（最近 N 条，时间倒序）】"]
+    skill_pack = derive_feedback_skills(items)
+    lines: List[str] = []
+    if any(skill_pack.values()):
+        lines.append("【已学习的用户偏好 / Skill 槽】")
+        for slot, label in _SKILL_SLOTS.items():
+            values = skill_pack.get(slot) or []
+            if not values:
+                continue
+            lines.append(f"{label}：")
+            for msg in values:
+                lines.append(f"- {msg}")
+        lines.append("")
+
+    lines.append("【用户既往反馈（最近 N 条，时间倒序）】")
     for it in items:
         scope = it.get("scope") or "general"
         ref = it.get("scope_ref")
         ref_str = f"@{ref}" if ref else ""
-        msg = (it.get("message") or "").strip().replace("\n", " ")
-        if len(msg) > 280:
-            msg = msg[:280] + "..."
+        msg = _sanitize_message(it.get("message"), max_len=280)
+        if not msg:
+            continue
         lines.append(f"- [{scope}{ref_str}] {msg}")
     return "\n".join(lines)
+
+
+def derive_feedback_skills(items: List[Dict[str, Any]]) -> Dict[str, List[str]]:
+    """从用户反馈中抽取轻量 skill 槽。
+
+    这是 task.md §五 5 的最小可工作形态：不训练模型、不做复杂调度，只把
+    高频反馈固化成 Agent 可读的偏好槽，下一轮 chat 自动生效。
+    """
+    slots: Dict[str, List[str]] = {key: [] for key in _SKILL_SLOTS}
+    seen: set[tuple[str, str]] = set()
+    for item in items:
+        msg = _sanitize_message(item.get("message"), max_len=160)
+        if not msg:
+            continue
+        slot = _classify_feedback(item.get("scope"), msg)
+        key = (slot, msg)
+        if key in seen:
+            continue
+        if len(slots[slot]) >= 4:
+            continue
+        seen.add(key)
+        slots[slot].append(msg)
+    return slots
+
+
+def _classify_feedback(scope: object, message: str) -> str:
+    scope_text = str(scope or "")
+    if _contains_any(message, _RISK_KEYWORDS):
+        return "risk_guardrail"
+    if scope_text == "rewrite" or _contains_any(message, _REWRITE_KEYWORDS):
+        return "rewrite_preference"
+    if scope_text == "dimension" or _contains_any(message, _DIMENSION_KEYWORDS):
+        return "dimension_explanation"
+    return "dimension_explanation"
+
+
+def _contains_any(text: str, keywords: tuple[str, ...]) -> bool:
+    return any(k in text for k in keywords)
+
+
+def _sanitize_message(value: object, *, max_len: int) -> str:
+    msg = str(value or "").strip().replace("\n", " ")
+    msg = " ".join(msg.split())
+    if len(msg) > max_len:
+        msg = msg[:max_len] + "..."
+    return msg

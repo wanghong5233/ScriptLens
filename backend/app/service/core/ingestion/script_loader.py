@@ -41,7 +41,16 @@ def _load_docx(path: Path) -> List[str]:
     from docx import Document  # python-docx, lazy import
 
     doc = Document(str(path))
-    return [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+    out: List[str] = []
+    for p in doc.paragraphs:
+        # docx 段落内的软换行 <w:br/> 在 python-docx 里会以 \n 出现在 p.text。
+        # 例如真实剧本里见过 '第82集\n82-1 天一阁门口 日外' 写在同一段，
+        # 此处必须按行拆开，否则集号头会被场号头粘连，导致后续切分丢集。
+        for line in p.text.splitlines():
+            line = line.strip()
+            if line:
+                out.append(line)
+    return out
 
 
 def _load_pdf(path: Path) -> List[str]:

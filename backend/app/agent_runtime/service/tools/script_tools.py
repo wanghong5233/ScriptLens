@@ -10,10 +10,10 @@
 - 工具层只负责"参数从 LLM 来 → 调 service → 包成 ToolResult"
 - 业务逻辑改动只动 service 层，工具不变（reuse-matrix §0.1 子包语义边界）
 
-script_id 来源（按优先级）：
-  1. parameters["script_id"]（LLM 显式指定）
-  2. agent_state.workspace_config["script_id"]（chat 端点创建状态时注入）
-  3. 缺则报错（不向 LLM 开放任意剧本，防越权）
+script_id 来源：
+  - chat / Agent 场景必须使用 agent_state.workspace_config["script_id"]
+  - parameters["script_id"] 仅用于非 Agent 的同步端点；若与当前会话绑定剧本不一致，直接报错
+  - 这保证"顶部选中的当前剧本"是所有工具的唯一作用域，不允许 LLM 参数漂移
 """
 
 from __future__ import annotations
@@ -38,13 +38,21 @@ _DIMENSIONS = ("opening_hook", "reward_density", "motivation", "pacing", "risk")
 
 
 def _resolve_script_id(agent_state: Any, parameters: Dict[str, Any]) -> Optional[str]:
-    """优先 LLM 显式参数，其次 agent_state.workspace_config，缺则 None。"""
-    sid = (parameters or {}).get("script_id")
-    if sid:
-        return str(sid).strip() or None
+    """解析当前剧本作用域。
+
+    Agent 调用时，workspace_config 里的 script_id 来自 router URL，并已校验用户归属。
+    LLM 传入的 script_id 只能与它一致，不能覆盖当前剧本。
+    """
     cfg = getattr(agent_state, "workspace_config", None) or {}
-    sid = cfg.get("script_id")
-    return str(sid).strip() if sid else None
+    bound_sid = str(cfg.get("script_id") or "").strip()
+    param_sid = str((parameters or {}).get("script_id") or "").strip()
+    if bound_sid:
+        if param_sid and param_sid != bound_sid:
+            raise ValueError(
+                "script_id scope mismatch: tool parameter does not match current workspace script"
+            )
+        return bound_sid
+    return param_sid or None
 
 
 def _missing_script_id() -> ToolResult:
@@ -98,7 +106,10 @@ class ScoreDimensionTool(BaseTool):
                 summary="非法 dimension",
             )
 
-        script_id = _resolve_script_id(agent_state, parameters)
+        try:
+            script_id = _resolve_script_id(agent_state, parameters)
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e), summary="剧本作用域不一致")
         if not script_id:
             return _missing_script_id()
 
@@ -144,7 +155,7 @@ class LocateScenesTool(BaseTool):
             description=(
                 "在当前剧本里检索与查询相关的场景。"
                 "示例查询：「前 5 集钩子」「男女主第一次见面」「打脸高潮」「第 12 集冲突」。"
-                "返回 top_k 个最相关的场景，每条含 scene_id / scene_label / episode_no / 文本片段 / RRF 相关性分。"
+                "返回 top_k 个最相关的场景，每条含 scene_id / scene_label / episode_no / 文本片段 / 相关性分（score）/ 来源（source: bm25 或 llm_metadata 兜底）。"
                 "注意：本工具只检索剧本内部场景，不联网；剧本之外的查询请用 web_search_tool。"
             ),
         )
@@ -173,7 +184,10 @@ class LocateScenesTool(BaseTool):
         if not query:
             return ToolResult(success=False, error="query is required", summary="缺 query")
 
-        script_id = _resolve_script_id(agent_state, parameters)
+        try:
+            script_id = _resolve_script_id(agent_state, parameters)
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e), summary="剧本作用域不一致")
         if not script_id:
             return _missing_script_id()
 
@@ -202,14 +216,20 @@ class LocateScenesTool(BaseTool):
                 "scene_label": s.scene_label,
                 "episode_no": s.episode_no,
                 "text_excerpt": (s.text or "")[:200],
-                "rrf_score": round(s.rrf_score, 4),
+                "score": round(s.score, 4),
+                "source": s.source,
             }
             for s in scored
         ]
+        source_summary = ""
+        if scored:
+            unique_sources = {s.source for s in scored}
+            if "llm_metadata" in unique_sources:
+                source_summary = "（BM25 miss，已用 LLM 看 metadata 兜底挑选）"
         return ToolResult(
             success=True,
             data={"query": query, "scenes": scenes, "count": len(scenes)},
-            summary=f"找到 {len(scenes)} 个相关场景",
+            summary=f"找到 {len(scenes)} 个相关场景{source_summary}",
         )
 
 
@@ -248,7 +268,10 @@ class ExtractCharactersTool(BaseTool):
         }
 
     async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
-        script_id = _resolve_script_id(agent_state, parameters)
+        try:
+            script_id = _resolve_script_id(agent_state, parameters)
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e), summary="剧本作用域不一致")
         if not script_id:
             return _missing_script_id()
 
@@ -343,31 +366,47 @@ def _aggregate_characters(*, script_id: str, top_n: int) -> List[Dict[str, Any]]
 # ============================================================
 
 
-_REWRITE_PROMPT = """你是中文短剧资深编剧。下面是某剧的一场戏，用户认为它在 **{target_dimension}** 维度上存在问题。
+_REWRITE_PROMPT = """你是中文短剧资深编剧。请基于「整剧上下文 + 目标场原文」对单场做定向改写。
 
-【目标维度】{target_dimension}
-【用户提出的问题】{issue}
+【整剧概要】
+{script_overview}
 
-【原文场景】（{scene_label}）
+【人物表（出场频次倒序）】
+{characters_block}
+
+【前情场次摘要（按集场顺序，越靠前越早发生）】
+{prev_scenes_block}
+
+【目标场原文】（{scene_label}）
 ---
 {scene_text}
 ---
 
-任务：针对 **{target_dimension}** 这一维度做定向改写。
-约束：
-1. 只改这一场，**不改前后剧情**（不能引入新人物 / 新事件假设）
-2. 改写后字数与原文 ±30% 以内
-3. 维度对应的优化方向：
-   - opening_hook: 把矛盾 / 钩子提前到开场前 1/3，删铺垫
-   - reward_density: 加一个反转 / 打脸 / 逆袭节点
-   - motivation: 给关键决策补一个可追溯的因果（铺垫线 / 触发事件 / 情绪逻辑）
-   - pacing: 删冗余对白 / 删重复信息 / 提密度
-   - risk: 软化敏感表达，但保留戏剧冲突，不删整段
+【后续场次摘要（已经写好的剧情走向，改写时必须与之呼应，不能矛盾）】
+{next_scenes_block}
 
-输出 JSON：
+【目标改写维度】{target_dimension}
+【用户提出的问题】{issue}
+
+任务：针对 **{target_dimension}** 这一维度，对【目标场原文】做定向改写。
+
+硬约束（违反任何一条结果都不可用）：
+1. 改写后只输出「目标场」的新文本——不要顺手改前 / 后场
+2. 必须沿用上面【人物表】里已经存在的人物，可以引用【前情场次】已经发生的事件作为铺垫，但不能凭空捏造一个全新人物 / 全新核心事件
+3. 改写后字数与原文 ±30% 以内
+4. 必须与【后续场次】的剧情走向自洽（例如下场如果该角色出现，本场不能让他死）
+
+维度对应的优化方向（取一即可，不要堆砌）：
+- opening_hook : 把矛盾 / 钩子提前到本场前 1/3，删冗余铺垫
+- reward_density: 加一个反转 / 打脸 / 逆袭节点，回应前情已埋的伏笔
+- motivation   : 给关键决策补一段可追溯的因果（用前情人物关系 / 已发生事件做铺垫）
+- pacing       : 删冗余对白 / 重复信息，节奏前推
+- risk         : 软化敏感表达，但保留戏剧冲突，不删整段
+
+输出严格 JSON（不要 markdown 代码块包裹）：
 {{
   "rewritten_excerpt": "<改写后的整段场景文本>",
-  "rationale": "<≤120 字，解释你具体做了哪几处改动，为什么这样改能在 {target_dimension} 维度提分>"
+  "rationale": "<≤150 字，解释你具体做了哪几处改动、用了哪些前情铺垫、为什么这样改能在 {target_dimension} 维度提分>"
 }}"""
 
 
@@ -379,9 +418,11 @@ class ProposeRewriteTool(BaseTool):
             name="propose_rewrite_tool",
             description=(
                 "对剧本中某一场做定向改写，按指定维度优化（5 维之一）。"
+                "工具内部会自动加载整剧上下文（人物表 + 前后场摘要 + 整剧概要）"
+                "再让 LLM 改写，保证新文本与剧情主线 / 已有人物 / 后续走向自洽。"
                 "返回原文 / 改写版 / unified diff / 改动说明。"
                 "用户问「把第 5 场改紧凑」「这场动机不成立怎么改」时调用本工具。"
-                "注意：改写仅修改单场，不修改前后剧情；不写入文件，仅返回建议供前端审阅。"
+                "改写仅产出单场新文本，不写入文件、不修改前后场，仅返回建议供前端审阅。"
             ),
         )
         self.parameters_schema = {
@@ -421,15 +462,29 @@ class ProposeRewriteTool(BaseTool):
         if not issue:
             return ToolResult(success=False, error="issue is required", summary="缺 issue 描述")
 
-        # 拉场景全文（含权限校验：通过 agent_state.user_id 跟 scripts.user_id 对齐）
         try:
-            scene = _load_scene_for_rewrite(scene_id)
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+        user_id = getattr(agent_state, "user_id", None)
+
+        # 拉场景全文 + 整剧上下文（前后场摘要 + 人物表 + 整剧概要）
+        # 剧本是连贯逻辑，单场改写必须看到前后铺垫与回收，否则 LLM 只会硬改文字。
+        try:
+            ctx = _load_rewrite_context(
+                scene_id,
+                expected_script_id=script_id,
+                user_id=user_id,
+            )
         except Exception as e:
-            logger.error("load_scene_for_rewrite failed: %s", e, exc_info=True)
-            return ToolResult(success=False, error=str(e), summary="读取场景失败")
-        if scene is None:
+            logger.error("load_rewrite_context failed: %s", e, exc_info=True)
+            return ToolResult(success=False, error=str(e), summary="读取场景上下文失败")
+        if ctx is None:
             return ToolResult(success=False, error=f"scene_id {scene_id} not found", summary="场景不存在")
 
+        scene = ctx["scene"]
         scene_text = scene["text"] or ""
         if not scene_text.strip():
             return ToolResult(success=False, error="scene text is empty", summary="场景为空")
@@ -442,6 +497,10 @@ class ProposeRewriteTool(BaseTool):
             scene_text=scene_text,
             target_dimension=target_dim,
             issue=issue,
+            script_overview=ctx["script_overview"],
+            characters_block=ctx["characters_block"],
+            prev_scenes_block=ctx["prev_scenes_block"],
+            next_scenes_block=ctx["next_scenes_block"],
         )
         caller = LlmCaller()
         try:
@@ -489,20 +548,176 @@ class ProposeRewriteTool(BaseTool):
         )
 
 
-def _load_scene_for_rewrite(scene_id: str) -> Optional[Dict[str, Any]]:
-    """读单场全文 + 元数据。"""
+def _load_rewrite_context(
+    scene_id: str,
+    *,
+    expected_script_id: str,
+    user_id: Optional[int] = None,
+) -> Optional[Dict[str, Any]]:
+    """装配单场改写所需的整剧上下文。
+
+    返回结构：
+        {
+          "scene": {id, script_id, episode_no, scene_no, scene_label, text},
+          "script_overview": str,    # 整剧 1-2 句概括（取自 reports，没有则用兜底语）
+          "characters_block": str,   # 出场频次倒序的人物列表，多行
+          "prev_scenes_block": str,  # 前 N 场的"集场标题 + 摘要"，多行
+          "next_scenes_block": str,  # 后 N 场的"集场标题 + 摘要"，多行
+        }
+
+    选取策略（控 token）：
+        - 前后各 _CONTEXT_WINDOW 场（默认 4 = 前 2 后 2）
+        - 每场摘要取前 _SCENE_DIGEST_CHARS 字（默认 180）
+        - 人物表只列前 _CHARACTERS_TOP_N 个（按出场频次）
+        - 整剧概要优先取 reports.report_json.summary / decision.one_sentence_reason
+    """
     from utils.database import engine
 
     with engine.connect() as conn:
-        row = conn.execute(
+        target = conn.execute(
             text(
                 """
-                SELECT id::text AS id, script_id::text AS script_id,
-                       episode_no, scene_no, scene_label, text
-                FROM scriptlens.scenes
-                WHERE id = :sid
+                SELECT sn.id::text AS id, sn.script_id::text AS script_id,
+                       sn.episode_no, sn.scene_no, sn.scene_label, sn.text,
+                       sc.user_id AS owner_id
+                FROM scriptlens.scenes sn
+                JOIN scriptlens.scripts sc ON sc.id = sn.script_id
+                WHERE sn.id = :sid
                 """
             ),
             {"sid": scene_id},
         ).mappings().first()
-    return dict(row) if row else None
+        if target is None:
+            return None
+        target_dict = dict(target)
+        script_id = target_dict["script_id"]
+        if script_id != expected_script_id:
+            raise ValueError("scene_id does not belong to current script")
+        if user_id is not None and int(target_dict["owner_id"]) != int(user_id):
+            raise ValueError("current user cannot access this scene")
+        target_dict.pop("owner_id", None)
+
+        all_scenes = conn.execute(
+            text(
+                """
+                SELECT id::text AS id, episode_no, scene_no, scene_label,
+                       LEFT(text, :digest) AS digest, text
+                FROM scriptlens.scenes
+                WHERE script_id = :sid
+                ORDER BY episode_no NULLS LAST, scene_no, start_line
+                """
+            ),
+            {"sid": script_id, "digest": _SCENE_DIGEST_CHARS},
+        ).mappings().all()
+
+        # 人物表：unnest TEXT[] + 频次倒序，DB 里一次拿到，避免 N+1
+        characters_rows = conn.execute(
+            text(
+                """
+                SELECT character_name, COUNT(*) AS appearances
+                FROM (
+                    SELECT unnest(characters) AS character_name
+                    FROM scriptlens.scenes
+                    WHERE script_id = :sid
+                ) AS t
+                WHERE character_name IS NOT NULL AND character_name <> ''
+                GROUP BY character_name
+                ORDER BY appearances DESC, character_name ASC
+                LIMIT :top_n
+                """
+            ),
+            {"sid": script_id, "top_n": _CHARACTERS_TOP_N},
+        ).mappings().all()
+
+        report_row = conn.execute(
+            text(
+                """
+                SELECT report_json
+                FROM scriptlens.reports
+                WHERE script_id = :sid
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().first()
+
+    scenes_list = [dict(s) for s in all_scenes]
+    target_idx = next(
+        (i for i, s in enumerate(scenes_list) if s["id"] == scene_id),
+        None,
+    )
+    if target_idx is None:
+        # 理论不会到这里——target 已经从 SELECT 查到了
+        return None
+
+    prev_window = scenes_list[max(0, target_idx - _CONTEXT_WINDOW): target_idx]
+    next_window = scenes_list[target_idx + 1: target_idx + 1 + _CONTEXT_WINDOW]
+
+    return {
+        "scene": target_dict,
+        "script_overview": _build_script_overview(report_row),
+        "characters_block": _build_characters_block([dict(r) for r in characters_rows]),
+        "prev_scenes_block": _format_scene_window(prev_window) or "（无前情场次，本场为剧本开端）",
+        "next_scenes_block": _format_scene_window(next_window) or "（无后续场次，本场为剧本结尾）",
+    }
+
+
+_CONTEXT_WINDOW = 2  # 前后各取 N 场摘要
+_SCENE_DIGEST_CHARS = 180  # 每场摘要取前 N 字（中文按 1 字 ≈ 1 token 估）
+_CHARACTERS_TOP_N = 12  # 人物表只列出场频次前 N 名
+
+
+def _build_script_overview(report_row: Optional[Any]) -> str:
+    """优先取 reports.report_json.summary / decision.one_sentence_reason；缺则兜底。"""
+    if report_row is None:
+        return "（暂无整剧分析报告，请基于「前情 / 后续场次摘要」推断主线）"
+    payload = report_row["report_json"]
+    if isinstance(payload, (str, bytes)):
+        import json as _json
+        try:
+            payload = _json.loads(payload)
+        except Exception:
+            payload = {}
+    if not isinstance(payload, dict):
+        return "（剧情概要解析失败，请基于上下文推断）"
+    summary = str(payload.get("summary") or "").strip()
+    decision = payload.get("decision") or {}
+    one_line = ""
+    if isinstance(decision, dict):
+        one_line = str(decision.get("one_sentence_reason") or "").strip()
+    parts = [p for p in (summary, one_line) if p]
+    return "\n".join(parts) if parts else "（暂无整剧概要，请基于上下文推断）"
+
+
+def _build_characters_block(rows: List[Dict[str, Any]]) -> str:
+    """rows: [{character_name, appearances}, ...]，已按出场倒序，限 _CHARACTERS_TOP_N。"""
+    if not rows:
+        return "（剧本未抽取出人物，请从前情 / 后续摘要里识别）"
+    return "\n".join(
+        f"- {r['character_name']}（出场 {r['appearances']} 场）" for r in rows
+    )
+
+
+def _format_scene_window(window: List[Dict[str, Any]]) -> str:
+    if not window:
+        return ""
+    lines = []
+    for s in window:
+        digest = (s.get("digest") or "").strip().replace("\n", " ")
+        lines.append(f"- {_scene_title(s)}：{digest}")
+    return "\n".join(lines)
+
+
+def _scene_title(s: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    ep = s.get("episode_no")
+    if ep is not None:
+        parts.append(f"第{ep}集")
+    sn = s.get("scene_no")
+    if sn is not None:
+        parts.append(f"第{sn}场")
+    label = s.get("scene_label")
+    if label:
+        parts.append(f"《{label}》")
+    return " ".join(parts) if parts else "未命名场"

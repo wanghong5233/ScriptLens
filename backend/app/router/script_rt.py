@@ -4,6 +4,7 @@
 - POST /api/scripts/upload         上传剧本文件，立即返回 script_id（异步两阶段）
 - GET  /api/scripts                列出当前用户全部剧本
 - GET  /api/scripts/{id}           剧本详情（用于轮询 status）
+- DELETE /api/scripts/{id}         删除剧本及所有派生数据
 - GET  /api/scripts/{id}/scenes    全部场景（前端编辑器渲染原文）
 - GET  /api/scripts/{id}/report    分析报告（D2-4 实装；现在 status='ready' 但
                                     reports 表无数据时返回 not_ready）
@@ -51,10 +52,13 @@ from schemas.script import (
     OperationSummary,
     ReportNotReadyResponse,
     ReportPayload,
+    ReportProgressResponse,
+    ReportProgressSnapshot,
     ReportResponse,
     RevertOperationResponse,
     RewriteRequest,
     RewriteResponse,
+    ScriptDeleteResponse,
     SceneItem,
     ScriptChatRequest,
     ScriptDetail,
@@ -72,7 +76,9 @@ from service.script_feedback_service import (
     format_feedback_for_prompt,
     list_recent_feedback,
 )
+from service.script_delete_service import delete_script_cascade
 from service.script_ingestion_service import ScriptIngestionService
+from service.script_progress_tracker import tracker as report_progress_tracker
 from service.script_query_service import (
     ScriptNotFoundError,
     get_report,
@@ -104,7 +110,7 @@ _ALLOWED_SUFFIXES = {".docx", ".pdf", ".txt", ".md"}
     description=(
         "接受 docx/pdf/txt/md。.doc 请先用 Office/WPS 另存为 .docx。"
         "上传立即返回 script_id + status='pending'，"
-        "后台 BackgroundTask 跑解析+切分+embedding+落库；"
+        "后台 BackgroundTask 跑解析+切分+检索索引落库；"
         "前端通过 GET /scripts/{id} 轮询 status。"
     ),
 )
@@ -180,8 +186,9 @@ async def upload_script(
             os.remove(storage_path)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
-    # 3. 注册 BackgroundTask 跑完整链路
-    background_tasks.add_task(_run_ingestion_task, script_id, str(storage_path))
+    # 3. 注册 BackgroundTask 跑完整链路：ingest（切场入库）→ 自动评分（5 维报告）
+    #    用户上传剧本的产品语义就是「分析这个剧本」，不应让用户上传完再手动点一次。
+    background_tasks.add_task(_run_full_pipeline_task, script_id, str(storage_path))
 
     return ScriptUploadResponse(
         id=script_id,
@@ -191,15 +198,31 @@ async def upload_script(
     )
 
 
-def _run_ingestion_task(script_id: str, file_path_str: str) -> None:
-    """BackgroundTask 入口（不抛错给上游，全部错误已写入 scripts.failure_reason）。"""
+async def _run_full_pipeline_task(script_id: str, file_path_str: str) -> None:
+    """BackgroundTask 入口：先跑 ingestion（同步、CPU/IO 重，下放线程池），
+    ingestion 成功后立即接 5 维评分流水线（async / LLM 重）。
+
+    任一步失败都只 log，不向上游 BackgroundTasks 抛——失败原因已写入
+    scripts.failure_reason / 通过 reports 表为空让前端感知。
+    """
+    loop = asyncio.get_running_loop()
     try:
-        ScriptIngestionService().run_ingestion(
-            script_id=script_id,
-            file_path=Path(file_path_str),
+        await loop.run_in_executor(
+            None,
+            lambda: ScriptIngestionService().run_ingestion(
+                script_id=script_id,
+                file_path=Path(file_path_str),
+            ),
         )
     except Exception:
         logger.exception("background ingestion failed script_id=%s", script_id)
+        return  # ingestion 失败时 status='failed'，没必要再跑评分
+
+    try:
+        await generate_report(script_id=script_id)
+        logger.info("auto reanalyze after ingestion done script_id=%s", script_id)
+    except Exception:
+        logger.exception("auto reanalyze after ingestion failed script_id=%s", script_id)
 
 
 # ============================================================
@@ -236,6 +259,32 @@ def get_script(
     return ScriptDetail(**row)
 
 
+@router.delete(
+    "/{script_id}",
+    response_model=ScriptDeleteResponse,
+    summary="删除剧本及其所有派生数据",
+    description=(
+        "级联删除 scenes / chunks / report / evidence_refs / feedback / operations，"
+        "并删除上传的原始文件。timeline 属于 operations，会一起清理。"
+    ),
+)
+def delete_script(
+    script_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ScriptDeleteResponse:
+    try:
+        result = delete_script_cascade(script_id=script_id, user_id=current_user.id)
+    except ScriptNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+    return ScriptDeleteResponse(
+        deleted=True,
+        script_id=result.script_id,
+        title=result.title,
+        storage_deleted=result.storage_deleted,
+        deleted_counts=result.deleted_counts,
+    )
+
+
 @router.get(
     "/{script_id}/scenes",
     response_model=ScriptScenesResponse,
@@ -254,6 +303,63 @@ def get_script_scenes(
         script_id=script_id,
         total=len(rows),
         scenes=[SceneItem(**r) for r in rows],
+    )
+
+
+@router.get(
+    "/{script_id}/export",
+    summary="导出完整剧本（应用所有改写历史后的最新版本）",
+    description=(
+        "F3：拼装最终全文 + 渲染。format ∈ {docx, pdf, txt}。"
+        "对每个 scene，若有最新成功 rewrite 则用 snapshot_after，否则用 scenes.text 原文。"
+    ),
+    responses={
+        200: {
+            "content": {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document": {},
+                "application/pdf": {},
+                "text/plain": {},
+            }
+        }
+    },
+)
+def export_script_full_text(
+    script_id: str,
+    format: str = "docx",  # noqa: A002 — 与 query 参数语义一致
+    current_user: User = Depends(get_current_user),
+):
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    from service.script_export_service import (
+        ExportError,
+        ScriptNotFoundError as ExportScriptNotFoundError,
+        ScriptPermissionError as ExportScriptPermissionError,
+        render_export,
+    )
+
+    try:
+        payload, content_type, filename = render_export(
+            script_id=script_id, user_id=current_user.id, fmt=format.lower()
+        )
+    except ExportScriptNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在")
+    except ExportScriptPermissionError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权导出该剧本")
+    except ExportError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+
+    encoded_name = quote(filename)
+    return Response(
+        content=payload,
+        media_type=content_type,
+        headers={
+            # RFC 5987 兼容写法，让前端能取到中文文件名
+            "Content-Disposition": (
+                f"attachment; filename=\"{filename}\"; filename*=UTF-8''{encoded_name}"
+            ),
+        },
     )
 
 
@@ -291,11 +397,12 @@ def get_script_report(
 
     payload = get_report(script_id=script_id, user_id=current_user.id)
     if payload is None:
-        # status='ready' 但 reports 表空 —— 用户尚未触发 reanalyze（或正在生成中）
+        # status='ready' 但 reports 表空 —— 通常是上传链路里自动触发的评分还在跑、
+        # 或者上一次评分失败/被清空。前端继续轮询本接口；不再要求用户手动 POST /reanalyze。
         return ReportNotReadyResponse(
             script_id=script_id,
             status="ready",
-            failure_reason="报告尚未生成或正在生成中，请调用 POST /api/scripts/{id}/reanalyze 触发或继续轮询",
+            failure_reason="评分报告正在自动生成中，请稍候",
         )
     report_json, generated_at = payload
     return ReportResponse(
@@ -339,6 +446,35 @@ async def _run_report_task(script_id: str) -> None:
         await generate_report(script_id=script_id)
     except Exception:
         logger.exception("background report generation failed script_id=%s", script_id)
+
+
+@router.get(
+    "/{script_id}/progress",
+    response_model=ReportProgressResponse,
+    summary="读取 5 维评分流水线的实时进度",
+    description=(
+        "返回内存里 progress_tracker 的快照（6 阶段时间轴 + 当前 detail）。"
+        "snapshot 为 null 表示当前没有评分任务在跑（也没有 5 分钟内的旧快照）。"
+        "前端在 reports 表为空时轮询此接口可视化进度。"
+    ),
+)
+def get_script_progress(
+    script_id: str,
+    current_user: User = Depends(get_current_user),
+) -> ReportProgressResponse:
+    # 验证用户拥有这个剧本（防止其他用户偷看进度）
+    try:
+        get_script_status(script_id=script_id, user_id=current_user.id)
+    except ScriptNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+
+    snap_dict = report_progress_tracker.to_dict(script_id)
+    if snap_dict is None:
+        return ReportProgressResponse(script_id=script_id, snapshot=None)
+    return ReportProgressResponse(
+        script_id=script_id,
+        snapshot=ReportProgressSnapshot.model_validate(snap_dict),
+    )
 
 
 # ============================================================
@@ -729,6 +865,7 @@ def get_script_operation_snapshot(
 
     try:
         snapshot = script_operation_service.get_operation_snapshot(
+            script_id=script_id,
             operation_id=operation_id,
             user_id=current_user.id,
             file_path=file_path,
@@ -774,6 +911,7 @@ def revert_script_operation(
     # 仅校验 op 归属（让"操作不存在 / 无权"的报错走真实路径）
     try:
         script_operation_service.get_operation_snapshot(
+            script_id=script_id,
             operation_id=operation_id,
             user_id=current_user.id,
             file_path="__validate_owner_only__",
@@ -797,15 +935,8 @@ def revert_script_operation(
 
 # ============================================================
 # View（D2-6d）：按角色重排报告（不重生成评分）
+# 派生逻辑（含 rewrite_seeds / task_status）见 service/script_view_service.py
 # ============================================================
-
-
-# 角色 -> 优先关注的维度（按权重排序）
-_ROLE_DIMENSION_PRIORITY = {
-    "selection": ("opening_hook", "reward_density", "risk", "pacing", "motivation"),
-    "writer": ("motivation", "pacing", "opening_hook", "reward_density", "risk"),
-    "review": ("risk", "motivation", "pacing", "opening_hook", "reward_density"),
-}
 
 
 @router.get(
@@ -813,9 +944,10 @@ _ROLE_DIMENSION_PRIORITY = {
     response_model=ViewResponse,
     summary="按角色重排报告（selection/writer/review）",
     description=(
-        "不重新生成评分。只在已生成的 reports.report_json 基础上："
+        "不重新生成评分。基于已生成的 reports.report_json："
         "1) 按角色优先级重排 scorecard "
-        "2) 把该角色优先关注维度对应的 evidence_ref_ids 推到 must_read_scene_ids 头部。"
+        "2) 把该角色优先关注维度对应的 evidence_ref_ids 推到 must_read_scene_ids 头部 "
+        "3) 派生 rewrite_seeds（最值得改的 N 场）+ task_status（已尝试改写次数 / 状态）。"
         "报告未生成时返回 409。"
     ),
 )
@@ -824,10 +956,12 @@ def get_script_view(
     role: str,
     current_user: User = Depends(get_current_user),
 ) -> ViewResponse:
-    if role not in _ROLE_DIMENSION_PRIORITY:
+    from service import script_view_service  # noqa: PLC0415  局部 import 与同模块其他 service 一致
+
+    if not script_view_service.is_role_supported(role):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"非法 role={role}；可选：{sorted(_ROLE_DIMENSION_PRIORITY.keys())}",
+            detail=f"非法 role={role}；可选：{script_view_service.supported_roles()}",
         )
 
     try:
@@ -844,46 +978,14 @@ def get_script_view(
     if payload is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="报告尚未生成，请先调用 POST /reanalyze",
+            detail="评分报告正在自动生成中，请稍候",
         )
     report_json, _ = payload
     report = ReportPayload.model_validate(report_json)
 
-    priority = _ROLE_DIMENSION_PRIORITY[role]
-
-    # 重排 scorecard：把优先维度排在前面，保持其他原顺序
-    pri_index = {dim: i for i, dim in enumerate(priority)}
-    scorecard_sorted = sorted(
-        report.scorecard,
-        key=lambda item: pri_index.get(item.dimension, 99),
-    )
-
-    # 重选 must_read：把优先维度对应的 evidence_ref_ids 提前
-    role_focus_dims = [d for d in priority[:3]]  # 前 3 维是 role 真正强关注的
-    focused_ref_ids: List[str] = []
-    seen = set()
-    for dim_name in role_focus_dims:
-        for sc in report.scorecard:
-            if sc.dimension == dim_name:
-                for rid in sc.evidence_ref_ids or []:
-                    if rid not in seen:
-                        seen.add(rid)
-                        focused_ref_ids.append(rid)
-    # 兜底：如果重排后不足 3 条，把原始 must_read 补上
-    for rid in (report.must_read_scene_ids or []):
-        if rid not in seen and len(focused_ref_ids) < 3:
-            seen.add(rid)
-            focused_ref_ids.append(rid)
-
-    return ViewResponse(
+    return script_view_service.build_view(
         script_id=script_id,
-        role=role,  # type: ignore[arg-type]
-        decision=report.decision,
-        overall_score=report.overall_score,
-        summary=report.summary or report.decision.summary,
-        scorecard=scorecard_sorted,
-        must_read_scene_ids=focused_ref_ids[:3],
-        risk_flags=report.risk_flags,
-        role_focus=list(role_focus_dims),
-        evidence_refs=report.evidence_refs,
+        user_id=current_user.id,
+        role=role,
+        report=report,
     )

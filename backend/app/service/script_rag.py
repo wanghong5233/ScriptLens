@@ -1,28 +1,26 @@
-"""ScriptLens 简化 RAG（embedding + BM25 → RRF → top-k）。
+"""ScriptLens 检索：BM25（一级）+ 关键词兜底 + LLM metadata 挑选。
 
-来源：reuse-matrix §3 决定砍掉 ScholarMind 的六层 RAG（query variants / HyDE /
-metadata boost / cross-encoder rerank），只保留两路并行召回 + RRF 合并。
+设计依据见 `docs/04-script-pipeline.md` §4：
+- 评分 / 证据 / 任务派发 三条核心链路均不查检索，唯一调用方是 Agent 自由
+  对话里的 `locate_scenes_tool`
+- 短剧用户的真实查询 95%+ 是角色名 / 集场号 / 关键事件 → BM25 + jieba
+  关键词兜底命中率高
+- 抽象语义查询（"令人破防的桥段"）走二级兜底：把 ≤ 2000 场的 metadata 列表
+  喂给 LLM，让 LLM 自己挑——比 embedding 更稳，且无 ingestion 成本
 
-为什么短剧场景不需要那六层：
-- 短剧检索目标是「场景」（1 chunk = 1 scene，~500-2000 字），粒度大，召回率高
-- 用户提问通常带具体词汇（角色名 / 「打脸」 / 「反转」），lexical 命中率本身就高
-- 单部剧 chunks ≤ 2000，TopK=5 召回容错率宽，rerank ROI 低
-
-实施细节：
-- embedding 路径：DashScope text-embedding-v3 (1024 维) + pgvector cosine
-- BM25 路径：PG `to_tsvector('simple', text)` GIN 索引（alembic 已建）
-- RRF：score_d = sum(1 / (k + rank_i)) for each list i; k=60（业界默认）
-
-权限：所有查询强制 user_id 过滤，避免越权读他人剧本场景。
+权限：所有查询强制 `script_id` 过滤；user_id 过滤由 Agent 工具层（拿
+agent_state.user_id）保证，本模块只接收已校验的 script_id。
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Literal, Optional
 
+import jieba
 from sqlalchemy import bindparam, text
 from sqlalchemy.engine import Engine
 
@@ -36,9 +34,12 @@ logger = logging.getLogger(__name__)
 # ============================================================
 
 
+RetrievalSource = Literal["bm25", "keyword", "llm_metadata"]
+
+
 @dataclass
 class ScoredScene:
-    """RAG 检索返回的单条结果。"""
+    """检索返回的单条结果。"""
 
     scene_id: str
     script_id: str
@@ -46,15 +47,9 @@ class ScoredScene:
     scene_no: str
     scene_label: str
     text: str
-    rrf_score: float
-    embedding_rank: Optional[int] = None
-    bm25_rank: Optional[int] = None
-
-
-@dataclass
-class _RawHit:
-    scene_id: str
+    score: float
     rank: int
+    source: RetrievalSource
 
 
 # ============================================================
@@ -67,205 +62,323 @@ async def retrieve_scenes(
     script_id: str,
     query: str,
     top_k: int = 5,
-    use_embedding: bool = True,
-    use_bm25: bool = True,
     candidate_pool: int = 20,
-    rrf_k: int = 60,
     engine: Engine = default_engine,
 ) -> List[ScoredScene]:
-    """两路并行召回（embedding + BM25）→ RRF 合并 → top-k。
+    """三级检索：BM25 → jieba 关键词兜底 → LLM 看全剧 metadata 列表挑。
 
     Args:
         script_id: 限定剧本范围（避免跨剧本污染）
         query: 用户查询（中文短句）
         top_k: 最终返回条数
-        use_embedding: 关闭时退化为纯 BM25（embedding 服务故障兜底）
-        use_bm25: 关闭时退化为纯向量
-        candidate_pool: 每路召回的候选数（默认 20，足够 RRF 重排）
-        rrf_k: RRF 平滑因子（业界默认 60）
+        candidate_pool: BM25 召回的候选数（默认 20，>= top_k）
 
     Returns:
-        按 RRF 分数倒序的 ScoredScene 列表（≤ top_k 条）。空 query / 双路全关
-        / 全部失败 → 返回 []。
+        ScoredScene 列表（≤ top_k 条）。空 query → 返回 []；
+        三层兜底全部失败 → 返回 []（不抛错，caller 自己处理"没找到"）。
     """
     query = (query or "").strip()
     if not query or top_k <= 0:
         return []
-    if not (use_embedding or use_bm25):
-        logger.warning("retrieve_scenes called with both retrievers disabled")
+
+    # 一级：BM25
+    bm25_hits = await asyncio.to_thread(_bm25_query_scenes, script_id, query, candidate_pool, engine)
+    if bm25_hits:
+        out = bm25_hits[:top_k]
+        logger.info(
+            "retrieve_scenes script_id=%s query=%r returned=%d source=bm25",
+            script_id, query[:30], len(out),
+        )
+        return out
+
+    # 二级：PG simple tokenizer 对中文长串不稳定，先用 jieba 切词 + ILIKE 兜底。
+    keyword_hits = await asyncio.to_thread(_keyword_query_scenes, script_id, query, candidate_pool, engine)
+    if keyword_hits:
+        out = keyword_hits[:top_k]
+        logger.info(
+            "retrieve_scenes script_id=%s query=%r returned=%d source=keyword",
+            script_id, query[:30], len(out),
+        )
+        return out
+
+    # 三级：LLM metadata 兜底
+    logger.info(
+        "retrieve_scenes lexical miss script_id=%s query=%r → fallback to llm_metadata",
+        script_id, query[:30],
+    )
+    try:
+        llm_hits = await _llm_pick_scenes(script_id, query, top_k, engine)
+    except Exception as exc:
+        logger.warning("llm_metadata fallback failed: %s", exc)
         return []
 
-    # 并行跑两路（任一失败 → 降级）
-    emb_task = _embedding_recall(script_id, query, candidate_pool, engine) if use_embedding else _empty_async()
-    bm25_task = _bm25_recall(script_id, query, candidate_pool, engine) if use_bm25 else _empty_async()
-    emb_hits, bm25_hits = await asyncio.gather(emb_task, bm25_task, return_exceptions=True)
+    logger.info(
+        "retrieve_scenes script_id=%s query=%r returned=%d source=llm_metadata",
+        script_id, query[:30], len(llm_hits),
+    )
+    return llm_hits
 
-    if isinstance(emb_hits, Exception):
-        logger.warning("embedding recall failed (degrade to BM25): %s", emb_hits)
-        emb_hits = []
-    if isinstance(bm25_hits, Exception):
-        logger.warning("BM25 recall failed (degrade to embedding-only): %s", bm25_hits)
-        bm25_hits = []
 
-    if not emb_hits and not bm25_hits:
+# ============================================================
+# 一级：BM25（PG to_tsvector + ts_rank_cd）
+# ============================================================
+
+
+_TOKEN_RE = re.compile(r"[\w\u4e00-\u9fff]+", re.UNICODE)
+
+
+def _query_terms(query: str, *, max_terms: int = 8) -> List[str]:
+    """把用户短句转成中文关键词；保留原句，避免 jieba 切坏专名。"""
+    terms: List[str] = []
+    seen: set[str] = set()
+    for raw in [query, *jieba.lcut(query, cut_all=False)]:
+        term = "".join(_TOKEN_RE.findall(raw)).strip()
+        if len(term) < 2 or term in seen:
+            continue
+        seen.add(term)
+        terms.append(term)
+        if len(terms) >= max_terms:
+            break
+    return terms
+
+
+def _bm25_query_scenes(
+    script_id: str,
+    query: str,
+    pool: int,
+    engine: Engine,
+) -> List[ScoredScene]:
+    """直接查 `scriptlens.scenes.text`，一次 SQL 拿到 score + 完整字段。
+
+    `plainto_tsquery` 输入先经 jieba 切词，尽量让 PG simple tokenizer 不被中文长串拖垮。
+
+    `idx_scenes_text_fts`（GIN）保证 O(log N) 查询。
+    """
+    fts_query = " ".join(_query_terms(query)) or query
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT s.id::text AS scene_id,
+                       s.script_id::text AS script_id,
+                       s.episode_no,
+                       s.scene_no,
+                       s.scene_label,
+                       s.text,
+                       ts_rank_cd(
+                         to_tsvector('simple', coalesce(s.text, '')),
+                         plainto_tsquery('simple', :q)
+                       ) AS score
+                FROM scriptlens.scenes s
+                WHERE s.script_id = :sid
+                  AND to_tsvector('simple', coalesce(s.text, '')) @@ plainto_tsquery('simple', :q)
+                ORDER BY score DESC
+                LIMIT :n
+                """
+            ),
+            {"sid": script_id, "q": fts_query, "n": pool},
+        ).all()
+    out: List[ScoredScene] = []
+    for i, r in enumerate(rows):
+        out.append(
+            ScoredScene(
+                scene_id=r.scene_id,
+                script_id=r.script_id,
+                episode_no=r.episode_no,
+                scene_no=r.scene_no,
+                scene_label=r.scene_label or "",
+                text=r.text or "",
+                score=float(r.score or 0.0),
+                rank=i + 1,
+                source="bm25",
+            )
+        )
+    return out
+
+
+# ============================================================
+# 二级：jieba 关键词兜底（不改 DB schema）
+# ============================================================
+
+
+def _keyword_query_scenes(
+    script_id: str,
+    query: str,
+    pool: int,
+    engine: Engine,
+) -> List[ScoredScene]:
+    """PG FTS miss 后，用 jieba 关键词 ILIKE 做保守召回。
+
+    这是 Agent 自由检索路径的兜底，不参与评分链路；比直接让 LLM metadata
+    盲选更可靠，尤其是角色名、地点、事件词这类中文短查询。
+    """
+    terms = _query_terms(query)
+    if not terms:
         return []
 
-    # RRF 融合
-    fused = _rrf_fuse(emb_hits, bm25_hits, rrf_k)
-    top_ids = [scene_id for scene_id, _ in fused[:top_k]]
-    if not top_ids:
-        return []
+    where_parts: List[str] = []
+    score_parts: List[str] = []
+    params: dict[str, object] = {"sid": script_id, "n": pool}
+    for i, term in enumerate(terms):
+        key = f"term_{i}"
+        params[key] = f"%{term}%"
+        where_parts.append(f"s.text ILIKE :{key}")
+        score_parts.append(f"CASE WHEN s.text ILIKE :{key} THEN 1 ELSE 0 END")
 
-    # 一次性把 top_k 场景文本拉回来
-    scenes_by_id = _fetch_scenes_by_ids(top_ids, engine=engine)
+    score_expr = " + ".join(score_parts)
+    stmt = text(
+        f"""
+        SELECT s.id::text AS scene_id,
+               s.script_id::text AS script_id,
+               s.episode_no,
+               s.scene_no,
+               s.scene_label,
+               s.text,
+               ({score_expr})::float AS score
+        FROM scriptlens.scenes s
+        WHERE s.script_id = :sid
+          AND ({" OR ".join(where_parts)})
+        ORDER BY score DESC, s.episode_no NULLS LAST, s.scene_no
+        LIMIT :n
+        """
+    )
+    with engine.connect() as conn:
+        rows = conn.execute(stmt, params).all()
 
     out: List[ScoredScene] = []
-    emb_rank_map = {h.scene_id: h.rank for h in emb_hits}
-    bm25_rank_map = {h.scene_id: h.rank for h in bm25_hits}
-    for scene_id, rrf_score in fused[:top_k]:
-        sc = scenes_by_id.get(scene_id)
+    for i, r in enumerate(rows):
+        out.append(
+            ScoredScene(
+                scene_id=r.scene_id,
+                script_id=r.script_id,
+                episode_no=r.episode_no,
+                scene_no=r.scene_no,
+                scene_label=r.scene_label or "",
+                text=r.text or "",
+                score=float(r.score or 0.0),
+                rank=i + 1,
+                source="keyword",
+            )
+        )
+    return out
+
+
+# ============================================================
+# 三级：LLM metadata 兜底
+# ============================================================
+
+
+_LLM_PICK_SYSTEM_PROMPT = (
+    "你是剧本场景定位助手。用户给一个查询，你需要在「全剧场景元数据列表」里挑出最相关的几场。\n"
+    "判定相关性时主要看：场景标题（scene_label，含时空：客厅/夜内/沈宅 等）、出场人物、场号编排。\n"
+    "你看不到正文，所以只挑 metadata 上看起来匹配的；不要自己脑补剧情。\n"
+    "严格输出 JSON：{\"scene_ids\": [\"<scene_id>\", ...], \"reason\": \"<一句话解释你为什么挑这几场>\"}"
+)
+
+
+async def _llm_pick_scenes(
+    script_id: str,
+    query: str,
+    top_k: int,
+    engine: Engine,
+) -> List[ScoredScene]:
+    """BM25 miss 时的兜底：把全剧 scene metadata 喂 LLM，让 LLM 挑 top_k。
+
+    成本估算：2000 场 × 50 字 metadata ≈ 100KB ≈ 30K token；MINI 档 LLM 单次调用
+    成本远低于 1500 次 embedding API call（即便后者只跑一次 ingestion）。
+    """
+    metas = _fetch_all_scene_metadata(script_id, engine=engine)
+    if not metas:
+        return []
+
+    meta_lines = [
+        f"- {m['scene_id']}|{m['scene_no']}|{m['scene_label']}|人物:{','.join(m['characters'][:5])}"
+        for m in metas
+    ]
+    user_prompt = (
+        f"用户查询：{query}\n\n"
+        f"全剧场景元数据列表（共 {len(metas)} 场，每行：scene_id|scene_no|scene_label|人物）：\n"
+        + "\n".join(meta_lines)
+        + f"\n\n请挑出最相关的 {top_k} 场，按相关性排序。"
+    )
+
+    from service.script_tools.llm_caller import LlmCaller, ModelTier
+
+    caller = LlmCaller()
+    resp = await caller.call_json(
+        prompt=user_prompt,
+        tier=ModelTier.MINI,  # 轻任务，省 token
+        system_message=_LLM_PICK_SYSTEM_PROMPT,
+        max_tokens=512,
+    )
+    parsed = resp.parsed if hasattr(resp, "parsed") else None
+    if not isinstance(parsed, dict):
+        logger.warning("llm_metadata returned non-dict: %r", parsed)
+        return []
+    raw_ids = parsed.get("scene_ids") or []
+    if not isinstance(raw_ids, list):
+        return []
+
+    valid_ids: dict[str, int] = {}  # scene_id → rank
+    seen: set = set()
+    for i, sid in enumerate(raw_ids):
+        s = str(sid).strip()
+        if s and s not in seen:
+            seen.add(s)
+            valid_ids[s] = i + 1
+        if len(valid_ids) >= top_k:
+            break
+
+    if not valid_ids:
+        return []
+
+    rows = _fetch_scenes_by_ids(list(valid_ids.keys()), engine=engine)
+    out: List[ScoredScene] = []
+    for sid, rank in valid_ids.items():
+        sc = rows.get(sid)
         if sc is None:
             continue
         out.append(
             ScoredScene(
-                scene_id=scene_id,
+                scene_id=sid,
                 script_id=sc["script_id"],
                 episode_no=sc["episode_no"],
                 scene_no=sc["scene_no"],
                 scene_label=sc["scene_label"] or "",
                 text=sc["text"] or "",
-                rrf_score=rrf_score,
-                embedding_rank=emb_rank_map.get(scene_id),
-                bm25_rank=bm25_rank_map.get(scene_id),
+                # llm_metadata 路径没有真实"分数"，用 1/rank 充当排序信号
+                score=1.0 / rank,
+                rank=rank,
+                source="llm_metadata",
             )
         )
-    logger.info(
-        "retrieve_scenes script_id=%s query=%r returned=%s",
-        script_id,
-        query[:30],
-        len(out),
-    )
     return out
 
 
-# ============================================================
-# embedding 召回（pgvector cosine）
-# ============================================================
-
-
-async def _embedding_recall(
-    script_id: str,
-    query: str,
-    pool: int,
-    engine: Engine,
-) -> List[_RawHit]:
-    """调 generate_embedding（同步函数）→ pgvector cosine top-N。"""
-    vec = await asyncio.to_thread(_embed_query, query)
-    if not vec:
-        return []
-    vec_literal = "[" + ",".join(f"{float(v):.6f}" for v in vec) + "]"
-    return await asyncio.to_thread(_embedding_sql, script_id, vec_literal, pool, engine)
-
-
-def _embed_query(query: str) -> List[float]:
-    from service.core.rag.nlp.model import generate_embedding
-
-    vecs = generate_embedding(query)
-    if not vecs:
-        return []
-    if isinstance(vecs[0], list):
-        return vecs[0]
-    return list(vecs)
-
-
-def _embedding_sql(
-    script_id: str,
-    vec_literal: str,
-    pool: int,
-    engine: Engine,
-) -> List[_RawHit]:
-    """ivfflat cosine 检索；返回 (scene_id, rank)。"""
+def _fetch_all_scene_metadata(script_id: str, *, engine: Engine) -> List[dict]:
+    """拉全剧 scene metadata（不含 text，控制 token）。"""
     with engine.connect() as conn:
         rows = conn.execute(
             text(
                 """
-                SELECT c.scene_id::text AS scene_id
-                FROM scriptlens.script_chunks c
-                WHERE c.script_id = :sid AND c.embedding IS NOT NULL
-                ORDER BY c.embedding <=> CAST(:vec AS vector)
-                LIMIT :n
+                SELECT id::text AS scene_id, episode_no, scene_no, scene_label, characters
+                FROM scriptlens.scenes
+                WHERE script_id = :sid
+                ORDER BY episode_no NULLS LAST, scene_no
                 """
             ),
-            {"sid": script_id, "vec": vec_literal, "n": pool},
-        ).all()
-    return [_RawHit(scene_id=r.scene_id, rank=i + 1) for i, r in enumerate(rows)]
-
-
-# ============================================================
-# BM25 召回（PG to_tsvector + ts_rank_cd）
-# ============================================================
-
-
-async def _bm25_recall(
-    script_id: str,
-    query: str,
-    pool: int,
-    engine: Engine,
-) -> List[_RawHit]:
-    return await asyncio.to_thread(_bm25_sql, script_id, query, pool, engine)
-
-
-def _bm25_sql(script_id: str, query: str, pool: int, engine: Engine) -> List[_RawHit]:
-    """PG `to_tsvector('simple', text)` 全文检索。
-
-    用 `plainto_tsquery('simple', :q)` 做 query 解析（不分词，按空白切；中文文本
-    `'simple'` 配置实际是按字切分，足够短剧关键词命中场景）。
-    """
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT c.scene_id::text AS scene_id,
-                       ts_rank_cd(
-                         to_tsvector('simple', coalesce(c.text, '')),
-                         plainto_tsquery('simple', :q)
-                       ) AS score
-                FROM scriptlens.script_chunks c
-                WHERE c.script_id = :sid
-                  AND to_tsvector('simple', coalesce(c.text, '')) @@ plainto_tsquery('simple', :q)
-                ORDER BY score DESC
-                LIMIT :n
-                """
-            ),
-            {"sid": script_id, "q": query, "n": pool},
-        ).all()
-    return [_RawHit(scene_id=r.scene_id, rank=i + 1) for i, r in enumerate(rows)]
-
-
-# ============================================================
-# RRF 融合
-# ============================================================
-
-
-def _rrf_fuse(
-    emb_hits: List[_RawHit],
-    bm25_hits: List[_RawHit],
-    rrf_k: int,
-) -> List[tuple[str, float]]:
-    """RRF: score(d) = Σ 1 / (rrf_k + rank_i(d))。
-
-    返回按 score 倒序的 (scene_id, score) 列表。
-    """
-    scores: dict[str, float] = {}
-    for hits in (emb_hits, bm25_hits):
-        for h in hits:
-            scores[h.scene_id] = scores.get(h.scene_id, 0.0) + 1.0 / (rrf_k + h.rank)
-    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
-
-
-# ============================================================
-# 批量回填场景文本
-# ============================================================
+            {"sid": script_id},
+        ).mappings().all()
+    return [
+        {
+            "scene_id": r["scene_id"],
+            "episode_no": r["episode_no"],
+            "scene_no": r["scene_no"] or "",
+            "scene_label": r["scene_label"] or "",
+            "characters": list(r["characters"] or []),
+        }
+        for r in rows
+    ]
 
 
 def _fetch_scenes_by_ids(scene_ids: List[str], *, engine: Engine) -> dict:
@@ -282,7 +395,3 @@ def _fetch_scenes_by_ids(scene_ids: List[str], *, engine: Engine) -> dict:
     with engine.connect() as conn:
         rows = conn.execute(stmt, {"ids": scene_ids}).mappings().all()
     return {r["id"]: dict(r) for r in rows}
-
-
-async def _empty_async() -> List[_RawHit]:
-    return []

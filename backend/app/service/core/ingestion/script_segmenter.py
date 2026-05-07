@@ -4,16 +4,24 @@
 输出：metadata 块 + 场景列表，每个场景含 episode_no / scene_no / scene_label /
 characters / text。
 
-设计依据见 eval/_probe_segmenter_out.txt 真实剧本观察：
-- 集号：`第一集` | `01、` | `第1集`
-- 场号：`1-1` | `1-2A` | 同行附带场景头 `1-1 房间 沈溪 傅立辉`
-- 场景头：`场景：xxx，日，内` | `1-1 元家别墅门口日内`（连写）
+切分原则（产品级，零丢失）：
+1. 按剧本天然层级 集 → 场 切，不按字数。
+2. 集号头之间的所有非空段落必属于该集；场号 marker 之间的内容必属于该场。
+3. 每集内部的切场策略按优先级：
+   a) 数字场号（`1-1`、`1-2A`）— 最权威
+   b) 裸场景头（`客厅 日内`、`车内，夜` 等含日/夜/内/外的短行）— 行业常见简写
+   c) 整集作为单场 — 兜底，绝不再做字数二次切
+4. 集号头缺失但有数字场号 → 按场号 ep_part 回填集号。
+5. 完全无任何标记 → 整篇作为单场（保留全部内容）。
+
+设计依据来自 eval/_probe_segmenter_out.txt 多本真实剧本：
+- 集号：`第一集` | `第一集：` | `第1集` | `01、` | `第10回` | `第10话`
+- 场号：`1-1` | `1-2A` | `1-1 房间 沈溪 傅立辉`
+- 裸场景头：`纯黑环境 夜内` | `二层客厅 日内` | `车内，夜`
+- 场景头：`场景：xxx，日，内`
 - 人物行：`人物：A，B，C`
 - 动作行：`▲` `△` 开头
 - 对话行：`人物名：台词`
-
-兜底（fallback）：完全没识别到场号 → 按集号切（粒度变粗）；连集号也没有 →
-按固定段落窗口切（每 ~30 段一块），并在 warnings 中记录。
 """
 
 from __future__ import annotations
@@ -32,9 +40,14 @@ logger = logging.getLogger(__name__)
 
 # 集号识别（全段匹配）：
 #   第一集 / 第二集 / 第十集 / 第100集
+#   第一集： / 第一集. / 第一集，   ← 末尾允许中英标点（真实剧本常见）
 #   01、 / 1、
-#   第1集 / 第10集
-_EP_CHN_PAT = re.compile(r"^\s*第\s*([零一二三四五六七八九十百千两\d]+)\s*集\s*[A-Za-z]?\s*$")
+#   第1集 / 第10集 / 第10回 / 第10话
+# 末尾可选标点集合：: ：、，,。．. ;；空白；同时容忍单个英文字母后缀（如「第1集A」）。
+_EP_TAIL_PUNCT = r"[\s:：、，,。．.;；]*"
+_EP_CHN_PAT = re.compile(
+    rf"^\s*第\s*([零一二三四五六七八九十百千两\d]+)\s*[集回话]\s*[A-Za-z]?\s*{_EP_TAIL_PUNCT}$"
+)
 _EP_NUM_PAT = re.compile(r"^\s*(\d{1,4})\s*[、,，.．]\s*$")
 
 # 场号识别：1-1 / 1-2A / 1-1 后跟场景头
@@ -62,6 +75,19 @@ _DIALOGUE_PAT = re.compile(r"^\s*([\u4e00-\u9fa5A-Za-z0-9\s]{1,8})\s*[:：]\s*(.
 
 # 动作/旁白行
 _ACTION_PREFIX = ("▲", "△", "◇", "◆")
+
+# 裸场景头识别：典型样式如「纯黑环境 夜内」「二层客厅 日内」「车内，夜」「公司大堂 日」
+# 形态：短行（≤ 30 字符）+ 含 内/外/日/夜/早/晚/晨 等时空关键词 + 不含冒号
+# 关键词组合（按区分度排序）：
+#   优先匹配「日内/夜内/日外/夜外/内景/外景/内/外」等连写
+#   其次匹配以单字「日|夜|外|内|早|晚|晨」结尾且前面有空白/逗号分隔
+_BARE_HEADING_KEYWORDS = re.compile(
+    r"(日内|夜内|日外|夜外|晨内|晨外|"
+    r"内景|外景|内\s*/\s*外|外\s*/\s*内|"
+    r"清晨|傍晚|黎明|凌晨|早晨|上午|中午|下午|晚上|深夜|半夜|"
+    r"[，,\s](日|夜|外|内|早|晚|晨|暮)$)"
+)
+_BARE_HEADING_MAX_LEN = 30
 
 # Metadata 段头识别（前言/大纲/人物小传）
 _METADATA_HEADERS = ("剧本大纲", "人物小传", "大纲", "人设", "故事梗概", "简介",
@@ -124,7 +150,9 @@ class SegmentResult:
     total_scenes: int
     total_chars: int
     parsing_warnings: List[str] = field(default_factory=list)
-    fallback_strategy: Optional[str] = None  # None | "episode_only" | "fixed_window"
+    # None | "episode_only" | "bare_heading" | "single_scene"
+    # 不再有 "fixed_window"——产品级方案不按字数切。
+    fallback_strategy: Optional[str] = None
 
 
 # ============================================================
@@ -141,7 +169,7 @@ def segment_script(paragraphs: List[str], *, max_metadata_lookahead: int = 200) 
             进入正片识别
 
     Returns:
-        SegmentResult。当未识别到任何场号/集号时，使用 fixed_window 兜底切分。
+        SegmentResult。零丢失：每个非空段落（除 metadata）都进入某个 scene 的 text。
     """
     if not paragraphs:
         return SegmentResult(
@@ -155,16 +183,15 @@ def segment_script(paragraphs: List[str], *, max_metadata_lookahead: int = 200) 
 
     warnings: List[str] = []
 
-    # 1. 拆分 metadata 块（前言/大纲/人物小传）和正片
     metadata_block, body_start = _extract_metadata_block(paragraphs, max_metadata_lookahead)
 
-    # 2. 主循环：扫描正片，识别集号/场号
     scenes, total_eps, fallback = _scan_body(paragraphs, body_start, warnings)
 
     if not scenes:
-        warnings.append("未识别到任何场号或集号，使用固定段落窗口兜底切分")
-        scenes = _fallback_fixed_window(paragraphs, body_start)
-        fallback = "fixed_window"
+        # 完全没识别到任何结构信息：整篇正文作为单场，零丢失。
+        warnings.append("未识别到任何集号/场号/裸场景头，整篇作为单场承载")
+        scenes = _fallback_single_scene(paragraphs, body_start)
+        fallback = "single_scene"
         total_eps = 0
 
     total_chars = sum(len(s.text) for s in scenes)
@@ -187,34 +214,26 @@ def segment_script(paragraphs: List[str], *, max_metadata_lookahead: int = 200) 
 def _extract_metadata_block(paragraphs: List[str], lookahead: int) -> tuple[str, int]:
     """识别开头的 metadata 块（大纲/人物小传），返回 (metadata_text, body_start_idx)。
 
-    判定：
-      - 开头若干段中，遇到第一个集号或场号标记前的所有内容视为 metadata
-      - 但 metadata 至少要包含一个已知 header（剧本大纲/人物小传等）才认定，
-        否则直接 body_start = 0
+    产品级语义：第一个集号头/数字场号 marker 之前的所有非空段落都是 metadata。
+    简介、人物设定、人物小传段经常是长段落，不应被 `len(line) < 30` 类硬阈值漏判；
+    `_METADATA_HEADERS` 仅作 hint，不再作为强制条件——marker 位置本身就是
+    足够强的边界信号。
+
+    若整篇没有任何 marker，返回空 metadata（body_start = 0），交由 fallback
+    `_fallback_single_scene` 整篇承载，确保零丢失。
     """
     scan_until = min(len(paragraphs), lookahead)
     body_start = -1
-    has_metadata_header = False
 
     for i in range(scan_until):
         line = paragraphs[i].strip()
         if not line:
             continue
-        # 一旦遇到集号或合法场号（排除大纲范围 "11-20："），正片开始
         if _is_episode_marker(line) or _is_valid_scene_marker(line) is not None:
             body_start = i
             break
-        # 检测 metadata header
-        for header in _METADATA_HEADERS:
-            if header in line and len(line) < 30:
-                has_metadata_header = True
-                break
 
-    if body_start < 0:
-        # 整段扫完都没找到正片，全部视为 metadata
-        return "\n".join(paragraphs), len(paragraphs)
-
-    if not has_metadata_header or body_start == 0:
+    if body_start <= 0:
         return "", 0
 
     metadata_text = "\n".join(p for p in paragraphs[:body_start] if p.strip())
@@ -251,26 +270,125 @@ def _scan_body(
     start_idx: int,
     warnings: List[str],
 ) -> tuple[List[ParsedScene], int, Optional[str]]:
-    """从 start_idx 起扫描正片。
+    """两层扫描：先按集号头切集，再在每集内独立切场。
 
-    优先按场号切；若整篇仅有集号没有场号，回退为「每集一个 scene」。
+    Returns:
+        (scenes, total_episodes, fallback_strategy)
+        fallback_strategy: None | "episode_only" | "bare_heading"
     """
-    # 先快速扫一遍：是否存在合法场号？
+    # Pass 1: 收集集号头索引（按出现顺序）
+    ep_marker_idxs: list[tuple[int, int]] = []  # [(idx, ep_no)]
+    for i in range(start_idx, len(paragraphs)):
+        line = paragraphs[i].strip()
+        if not line:
+            continue
+        if _is_episode_marker(line):
+            ep_no = _parse_episode_marker(line)
+            if ep_no is not None:
+                ep_marker_idxs.append((i, ep_no))
+
     has_scene_no = any(
         _is_valid_scene_marker(p.strip()) is not None for p in paragraphs[start_idx:]
     )
-    has_episode = any(_is_episode_marker(p.strip()) for p in paragraphs[start_idx:])
 
+    # Pass 1.5: 集号头缺失但场号 ep_part 已出现 → 在该 ep_part 第一次出现位置补虚拟集号头
+    # 真实剧本里偶有作者忘写「第N集」、直接以「N-1」开场的情况（如闪婚剧本第 47 集）
+    if ep_marker_idxs and has_scene_no:
+        seen_eps = {ep for _, ep in ep_marker_idxs}
+        virtual_inserts: list[tuple[int, int]] = []
+        observed_in_pass = set(seen_eps)
+        for i in range(start_idx, len(paragraphs)):
+            line = paragraphs[i].strip()
+            if not line:
+                continue
+            m = _is_valid_scene_marker(line)
+            if m is None:
+                continue
+            ep_part = m[0]
+            if ep_part not in observed_in_pass:
+                virtual_inserts.append((i, ep_part))
+                observed_in_pass.add(ep_part)
+        if virtual_inserts:
+            ep_marker_idxs = sorted(ep_marker_idxs + virtual_inserts, key=lambda x: x[0])
+            warnings.append(
+                f"{len(virtual_inserts)} 个集号头缺失，已按场号 ep_part 自动补全"
+            )
+
+    if not ep_marker_idxs:
+        # 无集号头：唯一可信的层级是数字场号（自带 ep_part）。
+        if has_scene_no:
+            scenes, total_eps = _scan_by_scene_no(paragraphs, start_idx)
+            if total_eps >= 2:
+                warnings.append(
+                    f"未识别到「第N集」标记，集数 {total_eps} 来自场号 ep_part 回填"
+                )
+            return scenes, total_eps, None
+        # 完全无集号、无数字场号 → 上层走 single_scene 兜底
+        return [], 0, None
+
+    # 有集号头：按集切片，每集内独立选切场策略
+    scenes: List[ParsedScene] = []
+    fallback_used: set[str] = set()
+
+    # 每集的范围 [body_start, body_end)
+    for k, (ep_idx, ep_no) in enumerate(ep_marker_idxs):
+        header_line = paragraphs[ep_idx].strip() if 0 <= ep_idx < len(paragraphs) else ""
+        is_real_header = _is_episode_marker(header_line)
+        # 虚拟集号头：ep_idx 指向该集第一个数字场号 marker（如 `47-1 书房…`），
+        # 该行本身就是首场的起点，不能跳过、不能 prepend（会重复）。
+        body_begin = ep_idx + 1 if is_real_header else ep_idx
+        body_end = ep_marker_idxs[k + 1][0] if k + 1 < len(ep_marker_idxs) else len(paragraphs)
+        ep_scenes, strategy = _segment_one_episode(paragraphs, body_begin, body_end, ep_no)
+        # 真实集号头（如「第一集」「第一集：」）原文 prepend 到该集第一场，零丢失
+        if is_real_header and header_line and ep_scenes:
+            first = ep_scenes[0]
+            ep_scenes[0] = ParsedScene(
+                episode_no=first.episode_no,
+                scene_no=first.scene_no,
+                scene_label=first.scene_label,
+                characters=first.characters,
+                text=header_line + "\n" + first.text if first.text else header_line,
+                start_idx=ep_idx,
+                end_idx=first.end_idx,
+            )
+        elif is_real_header and header_line and not ep_scenes:
+            # 集号头之后完全没内容，仍保留一场承载头本身
+            ep_scenes = [ParsedScene(
+                episode_no=ep_no,
+                scene_no=f"{ep_no}-1",
+                scene_label="",
+                characters=[],
+                text=header_line,
+                start_idx=ep_idx,
+                end_idx=ep_idx,
+            )]
+        scenes.extend(ep_scenes)
+        if strategy != "scene_no":
+            fallback_used.add(strategy)
+
+    # total_episodes 取 distinct episode_no 数量，避免虚拟集号头与真实集号头重复计数
+    total_eps = len({s.episode_no for s in scenes if s.episode_no is not None})
+
+    # 一致性 / 兜底告警
     if has_scene_no:
-        scenes, total_eps = _scan_by_scene_no(paragraphs, start_idx)
-        return scenes, total_eps, None
+        scene_no_eps = {s.episode_no for s in scenes if s.scene_no and "-" in s.scene_no
+                        and not s.scene_no.startswith("ep")}
+        if scene_no_eps and abs(len(scene_no_eps) - total_eps) >= 2:
+            warnings.append(
+                f"集号头识别数={total_eps} 与含数字场号的集数={len(scene_no_eps)} 不一致，"
+                f"请检查剧本集号格式"
+            )
+    if "bare_heading" in fallback_used:
+        warnings.append("部分集没有数字场号，已按裸场景头（含日/夜/内/外）切分")
+    if "episode_whole" in fallback_used:
+        warnings.append("部分集既无数字场号也无裸场景头，已整集作为单场承载")
 
-    if has_episode:
-        warnings.append("仅识别到集号、未识别到场号，每集作为一个 scene")
-        scenes, total_eps = _scan_by_episode_only(paragraphs, start_idx)
-        return scenes, total_eps, "episode_only"
-
-    return [], 0, None
+    fallback = None
+    if fallback_used == {"episode_whole"}:
+        fallback = "episode_only"
+    elif "bare_heading" in fallback_used:
+        fallback = "bare_heading"
+    return scenes, total_eps, fallback
 
 
 def _is_valid_scene_marker(line: str) -> Optional[tuple[int, int, str, str]]:
@@ -304,198 +422,252 @@ def _is_valid_scene_marker(line: str) -> Optional[tuple[int, int, str, str]]:
 
 
 def _scan_by_scene_no(paragraphs: List[str], start_idx: int) -> tuple[List[ParsedScene], int]:
-    scenes: List[ParsedScene] = []
-    current_episode: Optional[int] = None
-    episodes_seen: set[int] = set()
+    """无集号头但有数字场号时使用。零丢失：marker 之间所有非空段落都进 text。
 
-    cur_scene_no: Optional[str] = None
-    cur_scene_episode: Optional[int] = None
-    cur_scene_label_parts: List[str] = []
-    cur_characters: List[str] = []
-    cur_text_parts: List[str] = []
-    cur_scene_start_idx: int = start_idx
-
-    def flush(end_idx: int) -> None:
-        if cur_scene_no is None:
-            return
-        text = "\n".join(p for p in cur_text_parts if p)
-        scene_label = " ".join(p.strip() for p in cur_scene_label_parts if p.strip()).strip("、,，:： ")
-        scenes.append(ParsedScene(
-            episode_no=cur_scene_episode,
-            scene_no=cur_scene_no,
-            scene_label=scene_label,
-            characters=list(cur_characters),
-            text=text,
-            start_idx=cur_scene_start_idx,
-            end_idx=end_idx,
-        ))
-
-    last_idx = start_idx
+    场号自带 ep_part，权威性高于集号头：集号头可能因为格式异常被漏识别，
+    只要场号 ep 切换（如 1-x → 2-1）就以场号 ep_part 为准回填集号。
+    """
+    markers: list[tuple] = []
     for i in range(start_idx, len(paragraphs)):
-        last_idx = i
         line = paragraphs[i].strip()
         if not line:
             continue
+        m = _is_valid_scene_marker(line)
+        if m is not None:
+            markers.append((i,) + m)
 
-        ep = _parse_episode_marker(line)
-        if ep is not None:
-            current_episode = ep
-            episodes_seen.add(ep)
+    if not markers:
+        return [], 0
+
+    scenes: List[ParsedScene] = []
+    episodes_seen: set[int] = set()
+    body_end = len(paragraphs)
+
+    for k, marker in enumerate(markers):
+        m_idx, ep_part, scene_part, suffix, tail = marker
+        next_idx = markers[k + 1][0] if k + 1 < len(markers) else body_end
+        episodes_seen.add(ep_part)
+        scene_lines = [paragraphs[i] for i in range(m_idx, next_idx) if paragraphs[i].strip()]
+        label, characters, text_parts = _parse_scene_inner([tail] if tail else [], scene_lines)
+        scenes.append(ParsedScene(
+            episode_no=ep_part,
+            scene_no=f"{ep_part}-{scene_part}{suffix}",
+            scene_label=label,
+            characters=characters,
+            text="\n".join(text_parts),
+            start_idx=m_idx,
+            end_idx=next_idx - 1,
+        ))
+    return scenes, len(episodes_seen)
+
+
+def _segment_one_episode(
+    paragraphs: List[str],
+    body_begin: int,
+    body_end: int,
+    ep_no: int,
+) -> tuple[List[ParsedScene], str]:
+    """切一集：数字场号 → 裸场景头 → 整集为一场。返回 (scenes, strategy)。"""
+    scene_no_markers: list[tuple] = []
+    for i in range(body_begin, body_end):
+        line = paragraphs[i].strip()
+        if not line:
             continue
+        m = _is_valid_scene_marker(line)
+        if m is not None:
+            scene_no_markers.append((i,) + m)
 
-        marker = _is_valid_scene_marker(line)
-        if marker is not None:
-            ep_part, scene_part, suffix, tail = marker
-            if current_episode is None:
-                current_episode = ep_part
-                episodes_seen.add(ep_part)
-            flush(end_idx=i - 1)
-            cur_scene_no = f"{ep_part}-{scene_part}{suffix}"
-            cur_scene_episode = current_episode
-            cur_scene_start_idx = i
-            cur_scene_label_parts = [tail] if tail else []
-            cur_characters = []
-            cur_text_parts = []
+    if scene_no_markers:
+        return _split_episode_by_scene_no(
+            paragraphs, body_begin, body_end, ep_no, scene_no_markers
+        ), "scene_no"
+
+    bare_markers: list[tuple[int, str]] = []
+    for i in range(body_begin, body_end):
+        line = paragraphs[i].strip()
+        if not line:
             continue
+        if _is_bare_scene_heading(line):
+            bare_markers.append((i, line))
 
-        if cur_scene_no is None:
+    if bare_markers:
+        return _split_episode_by_bare(
+            paragraphs, body_begin, body_end, ep_no, bare_markers
+        ), "bare_heading"
+
+    # 整集作为一场（绝不按字数切）
+    whole = _whole_episode_as_one(paragraphs, body_begin, body_end, ep_no)
+    return whole, "episode_whole"
+
+
+def _split_episode_by_scene_no(
+    paragraphs: List[str],
+    body_begin: int,
+    body_end: int,
+    ep_no: int,
+    markers: list[tuple],
+) -> List[ParsedScene]:
+    scenes: List[ParsedScene] = []
+    first_idx = markers[0][0]
+    # 集号头与首个 marker 之间的段落（如「出场人员: ...」）合并到第一场前
+    prefix_lines = [paragraphs[i] for i in range(body_begin, first_idx) if paragraphs[i].strip()]
+
+    for k, marker in enumerate(markers):
+        m_idx, ep_part, scene_part, suffix, tail = marker
+        next_idx = markers[k + 1][0] if k + 1 < len(markers) else body_end
+        scene_lines = [paragraphs[i] for i in range(m_idx, next_idx) if paragraphs[i].strip()]
+        label, characters, text_parts = _parse_scene_inner([tail] if tail else [], scene_lines)
+        if k == 0 and prefix_lines:
+            text_parts = prefix_lines + text_parts
+        scenes.append(ParsedScene(
+            episode_no=ep_no,
+            scene_no=f"{ep_part}-{scene_part}{suffix}",
+            scene_label=label,
+            characters=characters,
+            text="\n".join(text_parts),
+            start_idx=body_begin if (k == 0 and prefix_lines) else m_idx,
+            end_idx=next_idx - 1,
+        ))
+    return scenes
+
+
+def _split_episode_by_bare(
+    paragraphs: List[str],
+    body_begin: int,
+    body_end: int,
+    ep_no: int,
+    markers: list[tuple[int, str]],
+) -> List[ParsedScene]:
+    scenes: List[ParsedScene] = []
+    first_idx = markers[0][0]
+    prefix_lines = [paragraphs[i] for i in range(body_begin, first_idx) if paragraphs[i].strip()]
+
+    for k, (m_idx, heading_text) in enumerate(markers):
+        next_idx = markers[k + 1][0] if k + 1 < len(markers) else body_end
+        scene_lines = [paragraphs[i] for i in range(m_idx, next_idx) if paragraphs[i].strip()]
+        label, characters, text_parts = _parse_scene_inner([heading_text], scene_lines)
+        if k == 0 and prefix_lines:
+            text_parts = prefix_lines + text_parts
+        scenes.append(ParsedScene(
+            episode_no=ep_no,
+            scene_no=f"{ep_no}-{k + 1}",
+            scene_label=label,
+            characters=characters,
+            text="\n".join(text_parts),
+            start_idx=body_begin if (k == 0 and prefix_lines) else m_idx,
+            end_idx=next_idx - 1,
+        ))
+    return scenes
+
+
+def _whole_episode_as_one(
+    paragraphs: List[str],
+    body_begin: int,
+    body_end: int,
+    ep_no: int,
+) -> List[ParsedScene]:
+    body_lines = [paragraphs[i] for i in range(body_begin, body_end) if paragraphs[i].strip()]
+    if not body_lines:
+        return []
+    label, characters, text_parts = _parse_scene_inner([], body_lines)
+    return [ParsedScene(
+        episode_no=ep_no,
+        scene_no=f"{ep_no}-1",
+        scene_label=label,
+        characters=characters,
+        text="\n".join(text_parts),
+        start_idx=body_begin,
+        end_idx=body_end - 1,
+    )]
+
+
+def _parse_scene_inner(
+    label_seed: List[str],
+    body_lines: List[str],
+) -> tuple[str, List[str], List[str]]:
+    """从场内段落抽 label/characters；text_parts 镜像 body_lines（零丢失）。
+
+    label/characters 仅为辅助索引，不会从 text 中删除原文。
+    marker 行（集号/数字场号/裸场景头）不参与 label/characters 抽取，
+    但其原文仍保留在 text_parts。
+    """
+    label_parts = list(label_seed)
+    characters: List[str] = []
+    text_parts: List[str] = list(body_lines)
+
+    for line in body_lines:
+        if _is_episode_marker(line):
             continue
-
+        if _is_valid_scene_marker(line) is not None:
+            continue
+        if _is_bare_scene_heading(line):
+            continue
         m = _SCENE_LABEL_LINE_PAT.match(line)
         if m:
-            cur_scene_label_parts.append(m.group(1).strip())
+            label_parts.append(m.group(1).strip())
             continue
         m = _CHARACTERS_LINE_PAT.match(line)
         if m:
-            cur_characters.extend(_split_characters(m.group(1)))
+            for c in _split_characters(m.group(1)):
+                if c not in characters:
+                    characters.append(c)
             continue
         m = _LOCATION_LINE_PAT.match(line)
         if m:
-            cur_scene_label_parts.append(m.group(1).strip())
+            label_parts.append(m.group(1).strip())
             continue
         m = _TIME_LINE_PAT.match(line)
         if m:
-            cur_scene_label_parts.append(m.group(1).strip())
+            label_parts.append(m.group(1).strip())
             continue
-
-        cur_text_parts.append(line)
-        if not _starts_with_action_marker(line):
-            dm = _DIALOGUE_PAT.match(line)
-            if dm:
-                speaker = dm.group(1).strip()
-                if 1 <= len(speaker) <= 6 and speaker not in cur_characters:
-                    if not _looks_like_meta_keyword(speaker):
-                        cur_characters.append(speaker)
-
-    if cur_scene_no is not None:
-        flush(end_idx=last_idx)
-
-    return scenes, len(episodes_seen)
-
-
-def _scan_by_episode_only(
-    paragraphs: List[str],
-    start_idx: int,
-    *,
-    max_chars_per_scene: int = 1500,
-) -> tuple[List[ParsedScene], int]:
-    """单集没有场号时，每集作为切分单元；超长集再按字数二次切窗口。"""
-    scenes: List[ParsedScene] = []
-    current_episode: Optional[int] = None
-    cur_text_parts: List[str] = []
-    cur_para_indices: List[int] = []
-    cur_characters: List[str] = []
-    episodes_seen: set[int] = set()
-
-    def flush(end_idx: int) -> None:
-        if current_episode is None or not cur_text_parts:
-            return
-        # 二次切：按字数窗口
-        sub_idx = 0
-        buf_text: List[str] = []
-        buf_paras: List[int] = []
-        buf_chars = 0
-        for line, para_i in zip(cur_text_parts, cur_para_indices):
-            if buf_chars + len(line) > max_chars_per_scene and buf_text:
-                sub_idx += 1
-                scenes.append(ParsedScene(
-                    episode_no=current_episode,
-                    scene_no=f"{current_episode}-{sub_idx}",
-                    scene_label="",
-                    characters=list(cur_characters),
-                    text="\n".join(buf_text),
-                    start_idx=buf_paras[0],
-                    end_idx=buf_paras[-1],
-                ))
-                buf_text = []
-                buf_paras = []
-                buf_chars = 0
-            buf_text.append(line)
-            buf_paras.append(para_i)
-            buf_chars += len(line)
-        if buf_text:
-            sub_idx += 1
-            scenes.append(ParsedScene(
-                episode_no=current_episode,
-                scene_no=f"{current_episode}-{sub_idx}",
-                scene_label="",
-                characters=list(cur_characters),
-                text="\n".join(buf_text),
-                start_idx=buf_paras[0],
-                end_idx=buf_paras[-1],
-            ))
-
-    for i in range(start_idx, len(paragraphs)):
-        line = paragraphs[i].strip()
-        if not line:
+        if _starts_with_action_marker(line):
             continue
-        ep = _parse_episode_marker(line)
-        if ep is not None:
-            flush(i - 1)
-            current_episode = ep
-            episodes_seen.add(ep)
-            cur_text_parts = []
-            cur_para_indices = []
-            cur_characters = []
-            continue
-        if current_episode is None:
-            continue
-        cur_text_parts.append(line)
-        cur_para_indices.append(i)
-        if not _starts_with_action_marker(line):
-            dm = _DIALOGUE_PAT.match(line)
-            if dm:
-                speaker = dm.group(1).strip()
-                if 1 <= len(speaker) <= 6 and speaker not in cur_characters:
-                    if not _looks_like_meta_keyword(speaker):
-                        cur_characters.append(speaker)
+        dm = _DIALOGUE_PAT.match(line)
+        if dm:
+            speaker = dm.group(1).strip()
+            if 1 <= len(speaker) <= 6 and speaker not in characters:
+                if not _looks_like_meta_keyword(speaker):
+                    characters.append(speaker)
 
-    flush(len(paragraphs) - 1)
-    return scenes, len(episodes_seen)
+    label = " ".join(p.strip() for p in label_parts if p.strip()).strip("、,，:： ")
+    return label, characters, text_parts
 
 
-def _fallback_fixed_window(paragraphs: List[str], start_idx: int, window: int = 30) -> List[ParsedScene]:
-    scenes: List[ParsedScene] = []
-    body = [(i, p) for i, p in enumerate(paragraphs) if i >= start_idx and p.strip()]
-    if not body:
-        return scenes
-    chunk_idx = 0
-    for begin in range(0, len(body), window):
-        sub = body[begin:begin + window]
-        if not sub:
-            break
-        chunk_idx += 1
-        text = "\n".join(p for _, p in sub)
-        scenes.append(ParsedScene(
-            episode_no=None,
-            scene_no=f"f-{chunk_idx}",
-            scene_label="",
-            characters=[],
-            text=text,
-            start_idx=sub[0][0],
-            end_idx=sub[-1][0],
-        ))
-    return scenes
+def _is_bare_scene_heading(line: str) -> bool:
+    """裸场景头：含 日/夜/内/外/早/晚/晨 等时空关键词的短行。
+
+    用于覆盖剧本作者省略 `X-Y` 编号、直接以「客厅 日内」「车内，夜」开场的情况。
+    """
+    line = line.strip()
+    if not line or len(line) > _BARE_HEADING_MAX_LEN:
+        return False
+    if _starts_with_action_marker(line):
+        return False
+    if _is_episode_marker(line):
+        return False
+    if _is_valid_scene_marker(line) is not None:
+        return False
+    # 标注/对话行带冒号；裸场景头不应有冒号
+    if "：" in line or ":" in line:
+        return False
+    return bool(_BARE_HEADING_KEYWORDS.search(line))
+
+
+def _fallback_single_scene(paragraphs: List[str], start_idx: int) -> List[ParsedScene]:
+    """完全无任何结构信息：整篇正文作为单场，零丢失。"""
+    body_lines = [paragraphs[i] for i in range(start_idx, len(paragraphs)) if paragraphs[i].strip()]
+    if not body_lines:
+        return []
+    label, characters, text_parts = _parse_scene_inner([], body_lines)
+    return [ParsedScene(
+        episode_no=None,
+        scene_no="1-1",
+        scene_label=label,
+        characters=characters,
+        text="\n".join(text_parts),
+        start_idx=start_idx,
+        end_idx=len(paragraphs) - 1,
+    )]
 
 
 # ============================================================

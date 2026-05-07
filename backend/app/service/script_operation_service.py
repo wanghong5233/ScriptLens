@@ -66,6 +66,14 @@ def record_rewrite_op(
             raise OperationError("剧本不存在")
         if int(owner) != int(user_id):
             raise OperationError("无权对该剧本写入 op 记录")
+        scene_owner = conn.execute(
+            text("SELECT script_id::text FROM scriptlens.scenes WHERE id = :scene_id"),
+            {"scene_id": scene_id},
+        ).scalar()
+        if scene_owner is None:
+            raise OperationError("场景不存在")
+        if str(scene_owner) != str(script_id):
+            raise OperationError("场景不属于当前剧本，拒绝写入 timeline")
 
         conn.execute(
             text(
@@ -185,8 +193,79 @@ def list_operations(
     return rows
 
 
+def get_rewrite_task_status_map(
+    *,
+    script_id: str,
+    user_id: int,
+    engine: Engine = default_engine,
+) -> Dict[str, Dict[str, Any]]:
+    """从 script_operations 派生 (scene_id, dimension) 上的改写任务状态。
+
+    返回 dict[`{scene_id}:{dimension}`] -> {
+        attempts, last_op_id, last_status, last_at
+    }
+
+    用于 ScriptViewResponse.task_status，前端在报告卡片右上角渲染状态徽章
+    （详见 docs/03-system-mental-model.md §8）。
+
+    last_status 当前只有 `accepted | rejected` 两态：
+        - 现阶段 record_rewrite_op 仅在 router /rewrite 成功落库后调用一次（success=True）；
+        - 失败 case 走 success=False；
+        - 未来 chat 里的 propose_rewrite_tool 落 op 后会扩出 `proposed` 态（diff 已产但用户没接受）。
+    """
+    if not script_id:
+        return {}
+    with engine.connect() as conn:
+        owner = conn.execute(
+            text("SELECT user_id FROM scriptlens.scripts WHERE id = :sid"),
+            {"sid": script_id},
+        ).scalar()
+        if owner is None:
+            raise OperationError("剧本不存在")
+        if int(owner) != int(user_id):
+            raise OperationError("无权查看该剧本的任务状态")
+
+        rows = conn.execute(
+            text(
+                """
+                SELECT
+                    modified_files->>0 AS scene_id,
+                    target_dimension AS dimension,
+                    COUNT(*)::int AS attempts,
+                    MAX(created_at) AS last_at,
+                    (array_agg(id::text ORDER BY created_at DESC))[1] AS last_op_id,
+                    (array_agg(success ORDER BY created_at DESC))[1] AS last_success
+                FROM scriptlens.script_operations
+                WHERE script_id = :sid
+                  AND intent_type = 'rewrite'
+                  AND target_dimension IS NOT NULL
+                  AND jsonb_typeof(modified_files) = 'array'
+                  AND jsonb_array_length(modified_files) > 0
+                GROUP BY modified_files->>0, target_dimension
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().all()
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        scene_id = r.get("scene_id")
+        dimension = r.get("dimension")
+        if not scene_id or not dimension:
+            continue
+        last_at = r.get("last_at")
+        out[f"{scene_id}:{dimension}"] = {
+            "attempts": int(r.get("attempts") or 0),
+            "last_op_id": r.get("last_op_id"),
+            "last_status": "accepted" if r.get("last_success") else "rejected",
+            "last_at": last_at.isoformat() if last_at is not None and not isinstance(last_at, str) else last_at,
+        }
+    return out
+
+
 def get_operation_snapshot(
     *,
+    script_id: str,
     operation_id: str,
     user_id: int,
     file_path: str,
@@ -203,8 +282,8 @@ def get_operation_snapshot(
     """
     if version not in ("before", "after"):
         raise OperationError(f"非法 version={version}；只支持 before / after")
-    if not operation_id or not file_path:
-        raise OperationError("operation_id / file_path 必填")
+    if not script_id or not operation_id or not file_path:
+        raise OperationError("script_id / operation_id / file_path 必填")
 
     with engine.connect() as conn:
         row = conn.execute(
@@ -212,6 +291,7 @@ def get_operation_snapshot(
                 """
                 SELECT
                     op.user_id AS owner_id,
+                    op.script_id::text AS script_id,
                     op.snapshot_before,
                     op.snapshot_after
                 FROM scriptlens.script_operations op
@@ -225,6 +305,8 @@ def get_operation_snapshot(
         raise OperationError("操作记录不存在")
     if int(row["owner_id"]) != int(user_id):
         raise OperationError("无权查看该操作的快照")
+    if str(row["script_id"]) != str(script_id):
+        raise OperationError("操作记录不属于当前剧本")
 
     snapshot = row["snapshot_before"] if version == "before" else row["snapshot_after"]
     if not isinstance(snapshot, dict):
