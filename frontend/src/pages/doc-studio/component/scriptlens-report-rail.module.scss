@@ -70,22 +70,17 @@
     flex-shrink: 0;
   }
 
-  // ==================== 顶部：决策卡（醒目层） ====================
-  .headlineCard {
-    background: linear-gradient(135deg, #FBF7F3 0%, #F8F1EB 100%);
-    border: 1px solid #ECE0D6;
-    border-radius: 10px;
-    padding: 12px 14px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
+  // ==================== 顶部 hero alert 已删除 ====================
+  // decision badge / overall_score / one_sentence_reason 三度重复信息已下沉到
+  // 「速览 § 30 秒判断」卡。详见 docs/09-action-lens.md §1。
+  // 以下三个 class（headlineRow / decisionTag / oneLineReason）保留，给速览 §
+  // CoverageCardSection 复用，不要再加 .headlineCard 容器。
 
   .headlineRow {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    gap: 12px;
+    flex-wrap: wrap;
+    gap: 8px 12px;
   }
 
   .decisionTag {
@@ -96,9 +91,11 @@
     border-radius: 6px;
   }
 
-  .overallNull {
-    color: #B0A39E;
-    font-size: 13px;
+  .overallScoreTag {
+    font-size: 12.5px;
+    padding: 2px 10px;
+    margin: 0;
+    border-radius: 6px;
   }
 
   .oneLineReason {
@@ -115,7 +112,6 @@
   .highlightsSection,
   .scorecardSection,
   .mustReadSection,
-  .seedsSection,
   .riskSection,
   .actionSegment {
     padding: 12px 0 4px;
@@ -124,6 +120,24 @@
 
   // ==================== 行动 segment：3 张 Persona Action Card ====================
   // 详见 docs/09-action-lens.md §4
+  .actionPersonaSwitch {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 8px 10px;
+    background: #FFFCF8;
+    border: 1px solid #F1ECE7;
+    border-radius: 10px;
+    margin-bottom: 4px;
+  }
+
+  .actionPersonaHint {
+    font-size: 11.5px;
+    color: #9C8E89;
+    line-height: 1.45;
+    padding: 0 2px;
+  }
+
   .actionCard {
     background: #FFFCF8;
     border: 1px solid #ECE0D6;
@@ -752,19 +766,94 @@
     overflow: hidden;
   }
 
-  // ==================== 改写候选卡 ====================
-  .seedCard {
+  // ==================== 编剧卡 hero + 段级列表 ====================
+  // 详见 docs/10-rewrite-agent.md §4
+  // hero = 全剧改写计划 primary 入口（治本，业内 Plan-then-Execute 范式）
+  // 段级列表 = rewrite_seeds 完整渲染（治标，不限 3 条）
+  // 旧 RewriteSeedCard 已被 WriterSeedRow 取代，相关 .seedCard / .seedHeader /
+  // .seedActions 一同移除；.seedDimTag / .seedScene / .seedIssue 保留给新 row 复用。
+
+  .writerHero {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 12px 12px 10px;
+    background: linear-gradient(135deg, #FFF6E6 0%, #FFE8D6 100%);
+    border: 1px solid #F2D9B8;
+    border-radius: 10px;
+    margin-top: 4px;
+  }
+
+  .writerHeroHeader {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .writerHeroTitle {
+    font-size: 13.5px;
+    color: #2F2A26;
+    line-height: 1.4;
+  }
+
+  .writerHeroDims {
+    font-size: 11.5px;
+    color: #7A6A5C;
+    line-height: 1.45;
+  }
+
+  .writerHeroBtn {
+    height: 34px;
+    font-weight: 500;
+  }
+
+  .writerHeroHint {
+    font-size: 11px;
+    color: #9C8E89;
+    line-height: 1.45;
+  }
+
+  .writerSeedList {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 6px;
+    padding-top: 8px;
+    border-top: 1px dashed #F1ECE7;
+  }
+
+  .writerSeedListLabel {
+    font-size: 11.5px;
+    color: #9C8E89;
+    line-height: 1.5;
+  }
+
+  .writerSeedListEmpty {
+    margin-top: 6px;
+    padding: 10px 12px;
+    background: #F8F4F0;
+    border: 1px dashed #ECE0D6;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #6E5F58;
+    line-height: 1.5;
+  }
+
+  .writerSeedRow {
     background: #FFF7EE;
     border: 1px solid #F2E7D7;
     border-radius: 8px;
-    padding: 10px 12px;
+    padding: 8px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
   }
 
-  .seedHeader {
+  .writerSeedRowHeader {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    margin-bottom: 6px;
+    gap: 8px;
   }
 
   .seedDimTag {
@@ -777,16 +866,9 @@
   }
 
   .seedIssue {
-    font-size: 13px;
+    font-size: 12.5px;
     color: #3F3835;
-    line-height: 1.6;
-    margin-bottom: 8px;
-  }
-
-  .seedActions {
-    display: flex;
-    gap: 6px;
-    flex-wrap: wrap;
+    line-height: 1.55;
   }
 
   .badgeIdle {

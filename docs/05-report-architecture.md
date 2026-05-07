@@ -45,7 +45,7 @@
 | 角色动机是否成立 | 人物 | `character_graph.nodes[].motivation` + `evaluation.dimensions[motivation]` |
 | 问题和风险 | 评估 | `risk_flags` |
 | 数据等级评估 (§五 3) | 评估 | `evaluation.dimensions[]` (5 维) |
-| 改写建议 (§五 4) | 评估 | `rewrite_seeds[]` |
+| 改写建议 (§五 4) | 行动 · 编剧 | `rewrite_seeds[]` (评估 segment 不再承载，详见 docs/10-rewrite-agent.md §1) |
 
 **任何结论必须能回到原文锚点（task.md §三 2「保留原文依据」）**：所有可点元素携带 `evidence_ref_id` 或 `scene_id`。
 
@@ -168,16 +168,17 @@ ReportPayload (v3) {
 - `evaluation.dimensions` 长度恒为 5；`score=None` 的维度也保留（PRD §6 「证据不足不伪造默认分」）
 - 任一 chain 失败 → 对应顶层字段为 `null`，**不返默认值**（fail aloud，core-principles）
 
-## 6. 前端 4 segment
+## 6. 前端 5 segment
 
 | segment | 数据 | 心智 | 主要交互 |
 |---|---|---|---|
-| **速览** | `coverage_card` + `character_graph` 缩略（top 5 by `appearance_count`）+ `pacing_curve` 缩略 | 30 秒决策 | 看 logline / 推荐 / 核心价值 / 优劣 |
+| **速览** | `coverage_card` + decision badge + `overall_score` + `decision.one_sentence_reason`（顶部 hero 删除后下沉）+ `character_graph` 缩略 + `pacing_curve` 缩略 | 30 秒决策 | 看 logline / 推荐 / 综合分 / 优劣 |
 | **故事** | `beat_sheet` + `pacing_curve` 完整（事件 + 情感弧） | 5 分钟读懂故事 | 点节拍 → 编辑器跳锚点场 + 持久高亮 |
 | **人物** | `character_graph` 完整（force-directed） | 5 分钟读懂人物 | 点节点 → 编辑器跳首场；点边 → 看共现场列表 |
-| **评估** | `evaluation` + `evidence_refs` | 验证 + 行动 | 点证据跳原文；点改写候选派 Agent |
+| **评估** | `evaluation` + `evidence_refs` + `compliance` + `risk_flags` | 诊断验证 | 点证据跳原文（改写候选已迁移到行动） |
+| **行动** | derived from 上述 + `rewrite_seeds` | 决策与执行 | 切 persona（编剧 / 选品 / 审核）；编剧卡内段级 / 全剧两档改写 dispatch（详见 [`10-rewrite-agent.md`](10-rewrite-agent.md)） |
 
-视角切换由 segment「行动」的三张 Persona Action Card 实装，`scorecard` 与 `must_read_scene_ids` 不按角色重排（详见 [`09-action-lens.md`](09-action-lens.md)）。
+视角切换由「行动」segment 的 Persona Action Card 实装，`scorecard` 与 `must_read_scene_ids` 不按角色重排（详见 [`09-action-lens.md`](09-action-lens.md)）。顶部独立 hero alert 已删除——`decision badge` / `overall_score` / `one_sentence_reason` 三度重复信息归位到「速览 § 30 秒判断」卡。
 
 ## 7. 可逆性
 

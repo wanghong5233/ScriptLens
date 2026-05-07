@@ -60,8 +60,27 @@ PRD 写明了「契约层」（5 维评分依据、`ReportPayload` schema、API 
 ```ts
 type AgentTask =
   | { kind: 'evidence_lookup';  evidence_ref_id; scene_id; scene_label; start_line?; end_line? }
-  | { kind: 'rewrite_seed';     dimension; scene_id; scene_label; issue; evidence_ref_id }
+  | RewriteSeedTask
   | { kind: 'dim_inquiry';      dimension; current_score }
+
+// rewrite_seed 是动作族里唯一字段较多的 kind，详见 docs/10-rewrite-agent.md §4
+interface RewriteSeedTask {
+  kind: 'rewrite_seed'
+  dimension: 'story' | 'character' | 'concept' | 'emotion' | 'pacing'
+  scene_id: string
+  scene_label?: string | null
+  issue: string
+  evidence_ref_id: string
+  // 完整 brief：Agent 改写时必须吃到原文 + 元数据，缺失时 prompt 静默降级
+  score?: number | null
+  dim_reason?: string | null
+  quote?: string | null
+  episode_no?: number | null
+  scene_no?: string | null
+  genre?: string[] | null
+  overall_score?: number | null
+  decision_label?: string | null
+}
 ```
 
 `dispatchTask(task)` 干三件**原子操作**：
@@ -137,7 +156,7 @@ type RewriteTaskStatus = {
 | 选项 | 结论 | 理由 |
 |---|---|---|
 | 报告作为独立路由 `/scripts/:id/report` 主入口 | ❌ 降级为「全屏阅读 / 分享 / 打印」备用 | 离开了原文 + 编辑器，证据不可点 = 不可溯源，违反 §3 数据流 |
-| 报告作为 doc-studio 右栏 tab ② 主入口 | ✅ 默认入口 | 与原文同屏，dispatchTask 能直接联动编辑器；右栏宽度可容纳决策卡 + 5 维卡 + 必读 3 场 + 改写候选 |
+| 报告作为 doc-studio 右栏 tab ② 主入口 | ✅ 默认入口 | 与原文同屏，dispatchTask 能直接联动编辑器；右栏宽度可容纳决策卡 + 5 维卡 + 必读 3 场。改写候选已迁移到「行动 · 编剧」segment（详见 docs/10-rewrite-agent.md §1） |
 | 删除独立路由 | ❌ 保留 | 全屏沉浸阅读、外部分享链接仍有用；独立页里的可点元素跳回 doc-studio 带 `?task=base64(...)` 通道 |
 
 ## 10. 不做的（YAGNI 边界）

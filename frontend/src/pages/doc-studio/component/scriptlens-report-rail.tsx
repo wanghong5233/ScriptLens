@@ -15,7 +15,6 @@
  */
 
 import {
-  EditOutlined,
   ExpandOutlined,
   ReloadOutlined,
   SearchOutlined,
@@ -465,13 +464,6 @@ function ReadyRail({
   onDispatchTask,
 }: ReadyRailProps) {
   const [reportMode, setReportMode] = useState<ReportMode>('overview')
-  const decisionInfo = DECISION_LABEL[view.decision.label] || {
-    text: view.decision.label,
-    color: 'default',
-  }
-  const overall = view.overall_score
-  const overallColor =
-    overall == null ? '#bfbfbf' : overall >= 7 ? '#52c41a' : overall >= 5 ? '#faad14' : '#ff4d4f'
 
   const evidenceMap = useMemo(() => {
     const m = new Map<string, EvidenceRefDTO>()
@@ -503,7 +495,8 @@ function ReadyRail({
 
   return (
     <div className={styles.rail}>
-      {/* === 顶部 30 秒判断层：标题 + 决策 + 一句话理由 + 重跑按钮 === */}
+      {/* 标题行：决策 / 综合分 / 一句话理由已下沉到「速览」segment 的 30 秒判断卡，
+          顶部不再有重复 hero。详见 docs/09-action-lens.md §1。 */}
       <div className={styles.titleRow}>
         <div className={styles.titleText} title={scriptTitle}>
           《{scriptTitle}》
@@ -519,32 +512,6 @@ function ReadyRail({
             重新诊断
           </Button>
         </Tooltip>
-      </div>
-
-      <div className={styles.headlineCard}>
-        <div className={styles.headlineRow}>
-          <Tag color={decisionInfo.color} className={styles.decisionTag}>
-            {decisionInfo.text}
-          </Tag>
-          {overall == null ? (
-            <Text className={styles.overallNull}>综合评分 · 证据不足</Text>
-          ) : (
-            <Progress
-              type="circle"
-              percent={Math.round((overall / 10) * 100)}
-              size={56}
-              strokeColor={overallColor}
-              format={() => (
-                <span style={{ color: overallColor, fontSize: 16, fontWeight: 600 }}>
-                  {overall.toFixed(1)}
-                </span>
-              )}
-            />
-          )}
-        </div>
-        <Paragraph className={styles.oneLineReason}>
-          {humanizeReportText(view.decision.one_sentence_reason)}
-        </Paragraph>
       </div>
 
       <div className={styles.reportModeSwitch}>
@@ -567,7 +534,14 @@ function ReadyRail({
           </div>
 
           {view.coverage_card ? (
-            <CoverageCardSection coverage={view.coverage_card} evidenceBySceneId={evidenceBySceneId} activeEvidenceId={activeEvidenceId} onTraceEvidence={onTraceEvidence} />
+            <CoverageCardSection
+              coverage={view.coverage_card}
+              decisionReason={view.decision.one_sentence_reason || null}
+              overallScore={view.overall_score ?? null}
+              evidenceBySceneId={evidenceBySceneId}
+              activeEvidenceId={activeEvidenceId}
+              onTraceEvidence={onTraceEvidence}
+            />
           ) : null}
 
           {summaryText ? (
@@ -677,27 +651,8 @@ function ReadyRail({
               </div>
             </section>
           ) : null}
-          {view.rewrite_seeds.length > 0 ? (
-            <section className={styles.seedsSection}>
-              <SectionHeader
-                title="最值得改写"
-                hint="低分 / 高风险候选，由 Agent 实时跑改写"
-              />
-              <Space direction="vertical" size={8} style={{ width: '100%', marginTop: 8 }}>
-                {view.rewrite_seeds.map((seed) => (
-                  <RewriteSeedCard
-                    key={`${seed.scene_id}:${seed.dimension}`}
-                    seed={seed}
-                    evidenceMap={evidenceMap}
-                    taskStatus={view.task_status}
-                    activeEvidenceId={activeEvidenceId}
-                    onTraceEvidence={onTraceEvidence}
-                    onDispatchTask={onDispatchTask}
-                  />
-                ))}
-              </Space>
-            </section>
-          ) : null}
+          {/* 改写候选段已迁移到「行动 · 编剧」卡。详见 docs/09-action-lens.md §4.2 + docs/10-rewrite-agent.md。
+              评估 segment 只承载诊断信息（五力卡 / 合规卡 / 风险卡），改写动作归位行动。 */}
 
           {view.risk_flags?.length ? (
             <section className={styles.riskSection}>
@@ -744,10 +699,23 @@ function ReadyRail({
 // 数据 100% derive 自 ViewResponse；视角切换由这里实装，不重排报告。
 // ============================================================
 
-const DECISION_VERDICT: Record<string, string> = {
-  recommend_continue: '建议立项 · 抓人',
-  cautious_continue: '审慎推进',
-  not_recommended: '不建议立项',
+// 行动 segment 内置局部视角切换（详见 docs/09-action-lens.md §1）：
+// 默认 'writer'——剧本创作者是 ScriptLens 最高频深度用户，选品 / 审核是判断短决策。
+type PersonaKey = 'selection' | 'writer' | 'review'
+
+const PERSONA_OPTIONS: Array<{ label: string; value: PersonaKey; hint: string }> = [
+  { label: '编剧', value: 'writer', hint: '改哪段：派改写 / 追问最低分维度' },
+  { label: '选品', value: 'selection', hint: '签不签：题材 / 综合分 / 合规风险' },
+  { label: '审核', value: 'review', hint: '过不过：合规等级 / 红线证据' },
+]
+
+// 合规双轴：等级（badge，描述风险）+ 动作（verdict，描述处置）。业内对照：
+// 内容安全审核后台（抖音 / 快手内容安全 / B 站审核）均采"风险等级 tag + 处置建议"二轴。
+const COMPLIANCE_LEVEL_LABEL: Record<string, string> = {
+  clean: '安全',
+  low_risk: '低风险',
+  medium_risk: '中风险',
+  high_risk: '高风险',
 }
 
 const COMPLIANCE_VERDICT: Record<string, string> = {
@@ -777,17 +745,30 @@ interface ActionSegmentProps extends ActionCardCommonProps {
 }
 
 function ActionSegment(props: ActionSegmentProps) {
+  const [persona, setPersona] = useState<PersonaKey>('writer')
+  const personaMeta = PERSONA_OPTIONS.find((p) => p.value === persona)
+
   return (
     <div className={styles.actionSegment}>
       <SectionHeader
-        title="行动 · 三角色同屏"
-        hint="基于报告 derived，三张卡同时呈现：每张卡 = 一句话结论 + 优先证据 + Next Action"
+        title="行动 · 视角切换"
+        hint="默认编剧视角；切换可见选品 / 审核视角；每个视角的结论 / 证据 / Next Action 完全不同"
       />
-      <Space direction="vertical" size={12} style={{ width: '100%', marginTop: 12 }}>
-        <SelectionActionCard {...props} />
-        <WriterActionCard {...props} />
-        <ReviewActionCard {...props} />
-      </Space>
+      <div className={styles.actionPersonaSwitch}>
+        <Segmented
+          size="small"
+          value={persona}
+          options={PERSONA_OPTIONS.map((p) => ({ label: p.label, value: p.value }))}
+          onChange={(next) => setPersona(next as PersonaKey)}
+          block
+        />
+        {personaMeta ? <div className={styles.actionPersonaHint}>{personaMeta.hint}</div> : null}
+      </div>
+      <div style={{ marginTop: 12 }}>
+        {persona === 'writer' ? <WriterActionCard {...props} /> : null}
+        {persona === 'selection' ? <SelectionActionCard {...props} /> : null}
+        {persona === 'review' ? <ReviewActionCard {...props} /> : null}
+      </div>
     </div>
   )
 }
@@ -821,7 +802,9 @@ function ActionCardShell({
   title: string
   badge: string
   badgeColor: string
-  verdict: string
+  // verdict 仅在有数据派生依据时传入（如编剧卡的 rewrite 段数计数 / 审核卡的 compliance.level 状态映射）。
+  // 选品卡不传——签不签的理由完全来自 LLM 输出的 reason，不允许前端拼模板话术。
+  verdict?: string
   reason?: string | null
   evidence: ActionEvidenceItem[]
   hint?: React.ReactNode
@@ -835,7 +818,7 @@ function ActionCardShell({
         <Text strong className={styles.actionCardTitle}>{title}</Text>
         <Tag color={badgeColor} className={styles.actionCardBadge}>{badge}</Tag>
       </div>
-      <div className={styles.actionCardVerdict}>{verdict}</div>
+      {verdict ? <div className={styles.actionCardVerdict}>{verdict}</div> : null}
       {reason ? (
         <Paragraph className={styles.actionCardReason}>{humanizeReportText(reason)}</Paragraph>
       ) : null}
@@ -910,7 +893,6 @@ function SelectionActionCard({
   onTraceEvidence,
   onDispatchTask,
 }: ActionSegmentProps) {
-  const verdict = DECISION_VERDICT[view.decision.label] || view.decision.label
   const decisionInfo = DECISION_LABEL[view.decision.label] || { text: view.decision.label, color: 'default' }
 
   // 优先证据：按 concept → emotion → story 取每维 evidence_ref_ids[0]
@@ -956,7 +938,6 @@ function SelectionActionCard({
       title="选品 · 签不签"
       badge={decisionInfo.text}
       badgeColor={decisionInfo.color}
-      verdict={verdict}
       reason={view.decision.one_sentence_reason}
       evidence={evidence}
       hint={hint}
@@ -977,6 +958,17 @@ function SelectionActionCard({
   )
 }
 
+/**
+ * 编剧卡：双层结构（hero 全剧入口 + 段级精修列表）。
+ *
+ * 设计动因（详见 docs/10-rewrite-agent.md §1-2）：
+ * - 短剧痛点为结构性（钩子密度 / 反转齐 / 节奏方差），段级精修治标，全剧 plan 治本
+ * - 业内对照：Cursor Composer / Copilot Workspace / 抖音文心剧本助手 全采 Plan-then-Execute
+ * - hero 入口 primary 治本，段级列表保留治标路径，两块同屏不切 tab
+ *
+ * Step 1（本版）：hero 按钮 stub，提示 Step 2 上线全剧 plan-execute；
+ * 段级 rewrite_seed dispatch 时填完整 brief（题材 / 综合分 / 决策 / 维度评分 / 原文 quote）。
+ */
 function WriterActionCard({
   view,
   evidenceMap,
@@ -985,101 +977,215 @@ function WriterActionCard({
   onDispatchTask,
   onSwitchMode,
 }: ActionSegmentProps) {
-  const seedCount = view.rewrite_seeds?.length || 0
-  const verdict =
-    seedCount >= 2
-      ? `${seedCount} 段建议重写`
-      : seedCount === 1
-        ? '1 段建议优化'
-        : '整体可保留 · 无紧急改写点'
+  const seeds = view.rewrite_seeds || []
+  const seedCount = seeds.length
 
-  const badge = seedCount >= 2 ? '高优' : seedCount === 1 ? '中优' : '低优'
-  const badgeColor = seedCount >= 2 ? 'red' : seedCount === 1 ? 'orange' : 'green'
+  const badge = seedCount >= 5 ? `${seedCount} 段需重写` : seedCount >= 1 ? `${seedCount} 段建议优化` : '整体可保留'
+  const badgeColor = seedCount >= 5 ? 'red' : seedCount >= 1 ? 'orange' : 'green'
 
-  // 优先证据：直接用 rewrite_seeds 派生
-  const evidence = useMemo<ActionEvidenceItem[]>(() => {
-    const out: ActionEvidenceItem[] = []
-    for (const seed of (view.rewrite_seeds || []).slice(0, 3)) {
-      const ref = evidenceMap.get(seed.evidence_ref_id)
-      if (!ref) continue
-      const sc = view.scorecard.find((s) => s.dimension === seed.dimension)
-      out.push({
-        dimension: seed.dimension,
-        score: sc?.score ?? null,
-        ref,
-        caption: seed.issue,
-      })
-    }
-    return out
-  }, [view.rewrite_seeds, view.scorecard, evidenceMap])
-
-  // OOC 警示：从 character 维度 reason 抽，无则降级
-  const characterReason = view.evaluation?.dimensions?.find((d) => d.key === 'character')?.reason
-  const hint = (
-    <Space size={4} wrap>
-      <Tag>{`改写候选 ${seedCount}`}</Tag>
-      {characterReason ? (
-        <Text type="secondary" className={styles.actionCardHintText}>
-          {humanizeReportText(_firstSentence(characterReason, 60))}
-        </Text>
-      ) : (
-        <Text type="secondary" className={styles.actionCardHintText}>主角动机弧光稳定</Text>
-      )}
-    </Space>
-  )
-
-  const firstSeed = view.rewrite_seeds?.[0]
-  const lowest = useMemo(() => {
+  // 五力短板 = 最低 2 维（< 6 才算短板，否则不显示）
+  const weakDims = useMemo(() => {
     return [...view.scorecard]
-      .filter((s) => s.score != null)
-      .sort((a, b) => (a.score ?? 99) - (b.score ?? 99))[0]
+      .filter((s) => s.score != null && s.score < 6)
+      .sort((a, b) => (a.score ?? 99) - (b.score ?? 99))
+      .slice(0, 3)
   }, [view.scorecard])
 
-  const actions: ActionItem[] = []
-  if (firstSeed) {
-    actions.push({
-      label: `派改第一段 · ${formatSceneLocator(null, null, firstSeed.scene_label) || '低分段'}`,
-      type: 'primary',
-      onClick: () =>
-        onDispatchTask({
-          kind: 'rewrite_seed',
-          dimension: firstSeed.dimension,
-          scene_id: firstSeed.scene_id,
-          scene_label: firstSeed.scene_label ?? null,
-          issue: firstSeed.issue,
-          evidence_ref_id: firstSeed.evidence_ref_id,
-        }),
+  const lowest = weakDims[0]
+
+  // 全剧基调（拼 rewrite_seed brief 用）
+  const decisionLabel = DECISION_LABEL[view.decision.label]?.text ?? view.decision.label
+  const genre = view.coverage_card?.genre ?? null
+  const overallScore = view.overall_score ?? null
+
+  // 派发段级改写：填完整 brief（业内共识，详见 docs/10 §3）
+  const dispatchSeed = useCallback(
+    (seed: RewriteSeedDTO) => {
+      const ref = evidenceMap.get(seed.evidence_ref_id)
+      const sc = view.scorecard.find((s) => s.dimension === seed.dimension)
+      onDispatchTask({
+        kind: 'rewrite_seed',
+        dimension: seed.dimension,
+        scene_id: seed.scene_id,
+        scene_label: seed.scene_label ?? null,
+        issue: humanizeReportText(seed.issue),
+        evidence_ref_id: seed.evidence_ref_id,
+        score: sc?.score ?? null,
+        dim_reason: sc?.reason ? humanizeReportText(_firstSentence(sc.reason, 200)) : null,
+        quote: ref?.quote ?? null,
+        episode_no: ref?.episode_no ?? null,
+        scene_no: ref?.scene_no ?? null,
+        genre,
+        overall_score: overallScore,
+        decision_label: decisionLabel,
+      })
+    },
+    [evidenceMap, view.scorecard, onDispatchTask, genre, overallScore, decisionLabel],
+  )
+
+  // 全剧改写计划：Step 2 路线，详见 docs/10 §5；本版按钮先 stub 提示
+  const handleFulltextPlan = useCallback(() => {
+    message.info({
+      content: '全剧改写计划 · Plan-then-Execute 版本即将上线（详见 docs/10-rewrite-agent.md §5）',
+      duration: 4,
     })
-  }
-  if (lowest) {
-    actions.push({
-      label: `追问 · ${DIMENSION_LABELS[lowest.dimension] || lowest.dimension} 怎么改`,
-      onClick: () =>
-        onDispatchTask({
-          kind: 'dim_inquiry',
-          dimension: lowest.dimension as DimensionKey,
-          current_score: lowest.score ?? null,
-        }),
-    })
-  }
-  actions.push({
-    label: '看完整节奏曲线',
-    onClick: () => onSwitchMode('story'),
-  })
+  }, [])
 
   return (
-    <ActionCardShell
-      title="编剧 · 改哪段"
-      badge={badge}
-      badgeColor={badgeColor}
-      verdict={verdict}
-      reason={null}
-      evidence={evidence}
-      hint={hint}
-      actions={actions}
-      activeEvidenceId={activeEvidenceId}
-      onTraceEvidence={onTraceEvidence}
-    />
+    <div className={styles.actionCard}>
+      <div className={styles.actionCardHeader}>
+        <Text strong className={styles.actionCardTitle}>编剧 · 改哪段</Text>
+        <Tag color={badgeColor} className={styles.actionCardBadge}>{badge}</Tag>
+      </div>
+
+      {/* Hero · 全剧改写计划入口（治本） */}
+      <div className={styles.writerHero}>
+        <div className={styles.writerHeroHeader}>
+          <Text strong className={styles.writerHeroTitle}>全剧改写计划</Text>
+          {weakDims.length > 0 ? (
+            <Text type="secondary" className={styles.writerHeroDims}>
+              五力短板 ·{' '}
+              {weakDims.map((d, i) => (
+                <span key={d.dimension}>
+                  {i > 0 ? ' / ' : ''}
+                  {DIMENSION_LABELS[d.dimension] || d.dimension} {d.score}
+                </span>
+              ))}
+            </Text>
+          ) : null}
+        </div>
+        <Button
+          type="primary"
+          icon={<ThunderboltOutlined />}
+          onClick={handleFulltextPlan}
+          className={styles.writerHeroBtn}
+          block
+        >
+          让 Agent 出改写计划
+        </Button>
+        <Text type="secondary" className={styles.writerHeroHint}>
+          Plan-then-Execute · 基于五力评分逐步改造（业内对照：Cursor Composer / 抖音文心剧本助手）
+        </Text>
+      </div>
+
+      {/* 段级精修列表（治标，不限 3 条） */}
+      {seedCount > 0 ? (
+        <div className={styles.writerSeedList}>
+          <Text type="secondary" className={styles.writerSeedListLabel}>
+            或者，按段精修（共 {seedCount} 段）
+          </Text>
+          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+            {seeds.map((seed) => (
+              <WriterSeedRow
+                key={`${seed.scene_id}:${seed.dimension}`}
+                seed={seed}
+                evidenceMap={evidenceMap}
+                taskStatus={view.task_status}
+                activeEvidenceId={activeEvidenceId}
+                onTraceEvidence={onTraceEvidence}
+                onDispatchSeed={dispatchSeed}
+              />
+            ))}
+          </Space>
+        </div>
+      ) : (
+        <div className={styles.writerSeedListEmpty}>
+          <Text type="secondary">无段级改写候选 · 整体已较稳，可直接出全剧风格优化计划</Text>
+        </div>
+      )}
+
+      {/* 底部次级动作 */}
+      <Space wrap size={6} className={styles.actionCardActions}>
+        {lowest ? (
+          <Button
+            size="small"
+            icon={<SearchOutlined />}
+            onClick={() =>
+              onDispatchTask({
+                kind: 'dim_inquiry',
+                dimension: lowest.dimension as DimensionKey,
+                current_score: lowest.score ?? null,
+              })
+            }
+          >
+            追问 · {DIMENSION_LABELS[lowest.dimension] || lowest.dimension} 怎么改
+          </Button>
+        ) : null}
+        <Button size="small" onClick={() => onSwitchMode('story')}>
+          看完整节奏曲线
+        </Button>
+      </Space>
+    </div>
+  )
+}
+
+/**
+ * 编剧卡内的段级精修行：dim tag + score + 集场坐标 + issue + 行内按钮。
+ * 把原 RewriteSeedCard 的样式收紧，改用紧凑两栏布局适应卡内嵌套。
+ */
+function WriterSeedRow({
+  seed,
+  evidenceMap,
+  taskStatus,
+  activeEvidenceId,
+  onTraceEvidence,
+  onDispatchSeed,
+}: {
+  seed: RewriteSeedDTO
+  evidenceMap: Map<string, EvidenceRefDTO>
+  taskStatus: Record<string, RewriteTaskStatusDTO>
+  activeEvidenceId: string | null
+  onTraceEvidence: Props['onTraceEvidence']
+  onDispatchSeed: (seed: RewriteSeedDTO) => void
+}) {
+  const dimLabel = DIMENSION_LABELS[seed.dimension] || seed.dimension
+  const evi = evidenceMap.get(seed.evidence_ref_id)
+  const status = taskStatus[`${seed.scene_id}:${seed.dimension}`]
+  const badge = renderTaskBadge(status)
+  const locator = evi
+    ? formatSceneLocator(evi.episode_no, evi.scene_no, evi.scene_label)
+    : seed.scene_label || seed.scene_id.slice(0, 8)
+
+  return (
+    <div className={styles.writerSeedRow}>
+      <div className={styles.writerSeedRowHeader}>
+        <Space size={6} wrap>
+          <Tag color="gold" className={styles.seedDimTag}>{dimLabel}</Tag>
+          <Text className={styles.seedScene}>{locator}</Text>
+        </Space>
+        {badge}
+      </div>
+      <div className={styles.seedIssue}>{humanizeReportText(seed.issue || '（暂无 issue）')}</div>
+      <Space size={6} wrap>
+        <Button
+          size="small"
+          icon={<ThunderboltOutlined />}
+          type="primary"
+          ghost
+          onClick={() => onDispatchSeed(seed)}
+        >
+          Agent 改这段
+        </Button>
+        {evi ? (
+          <Button
+            size="small"
+            icon={<SearchOutlined />}
+            onClick={() =>
+              onTraceEvidence({
+                evidenceRefId: evi.id,
+                sceneId: evi.scene_id,
+                startLine: evi.start_line ?? null,
+                endLine: evi.end_line ?? null,
+              })
+            }
+            type={activeEvidenceId === evi.id ? 'primary' : 'default'}
+            ghost={activeEvidenceId === evi.id}
+          >
+            先看原文
+          </Button>
+        ) : null}
+      </Space>
+    </div>
   )
 }
 
@@ -1094,7 +1200,7 @@ function ReviewActionCard({
   const compliance = view.compliance
   const level = compliance?.level ?? null
   const verdict = level ? COMPLIANCE_VERDICT[level] : '合规审核未运行'
-  const badge = level ? COMPLIANCE_VERDICT[level] : '未评估'
+  const badge = level ? COMPLIANCE_LEVEL_LABEL[level] : '未评估'
   const badgeColor = level ? COMPLIANCE_VERDICT_COLOR[level] : 'default'
 
   // 优先证据：compliance.evidence_ref_ids[:3]
@@ -1194,16 +1300,23 @@ function SectionHeader({
 
 function CoverageCardSection({
   coverage,
+  decisionReason,
+  overallScore,
   evidenceBySceneId,
   activeEvidenceId,
   onTraceEvidence,
 }: {
   coverage: NonNullable<ScriptViewResponseDTO['coverage_card']>
+  // 顶部 hero 卡删除后下沉到这里：让 default segment（速览）依然能看到决策一句话和综合分。
+  decisionReason: string | null
+  overallScore: number | null
   evidenceBySceneId: Map<string, EvidenceRefDTO>
   activeEvidenceId: string | null
   onTraceEvidence: Props['onTraceEvidence']
 }) {
   const info = DECISION_LABEL[coverage.recommendation] || { text: coverage.recommendation, color: 'default' }
+  const overallColor =
+    overallScore == null ? '#bfbfbf' : overallScore >= 7 ? '#52c41a' : overallScore >= 5 ? '#faad14' : '#ff4d4f'
   const renderPoint = (point: { title: string; detail: string; anchor_scene_id?: string | null }, tone: 'good' | 'risk') => {
     const evi = point.anchor_scene_id ? evidenceBySceneId.get(point.anchor_scene_id) : undefined
     const active = !!(evi && activeEvidenceId === evi.id)
@@ -1233,8 +1346,16 @@ function CoverageCardSection({
       <div className={styles.headlineRow}>
         <Tag color={info.color} className={styles.decisionTag}>{info.text}</Tag>
         {coverage.genre?.slice(0, 3).map((g) => <Tag key={g}>{g}</Tag>)}
+        {overallScore != null ? (
+          <Tag color="blue" className={styles.overallScoreTag}>
+            综合 <span style={{ color: overallColor, fontWeight: 600 }}>{overallScore.toFixed(1)}</span> / 10
+          </Tag>
+        ) : null}
       </div>
       <Paragraph className={styles.summaryText}>{humanizeReportText(coverage.logline)}</Paragraph>
+      {decisionReason ? (
+        <Paragraph className={styles.oneLineReason}>{humanizeReportText(decisionReason)}</Paragraph>
+      ) : null}
       {coverage.core_value ? (
         <Paragraph className={styles.oneLineReason}>核心价值：{humanizeReportText(coverage.core_value)}</Paragraph>
       ) : null}
@@ -2495,81 +2616,8 @@ function HighlightRow({
   )
 }
 
-// === 改写候选卡片 ===
-function RewriteSeedCard({
-  seed,
-  evidenceMap,
-  taskStatus,
-  activeEvidenceId,
-  onTraceEvidence,
-  onDispatchTask,
-}: {
-  seed: RewriteSeedDTO
-  evidenceMap: Map<string, EvidenceRefDTO>
-  taskStatus: Record<string, RewriteTaskStatusDTO>
-  activeEvidenceId: string | null
-  onTraceEvidence: Props['onTraceEvidence']
-  onDispatchTask: (task: AgentTask) => void
-}) {
-  const dimLabel = DIMENSION_LABELS[seed.dimension] || seed.dimension
-  const evi = evidenceMap.get(seed.evidence_ref_id)
-  const status = taskStatus[`${seed.scene_id}:${seed.dimension}`]
-  const badge = renderTaskBadge(status)
-  const locator = evi
-    ? formatSceneLocator(evi.episode_no, evi.scene_no, evi.scene_label)
-    : seed.scene_label || seed.scene_id.slice(0, 8)
-
-  return (
-    <div className={styles.seedCard}>
-      <div className={styles.seedHeader}>
-        <Space size={6}>
-          <Tag color="gold" className={styles.seedDimTag}>{dimLabel}</Tag>
-          <Text className={styles.seedScene}>{locator}</Text>
-        </Space>
-        {badge}
-      </div>
-      <div className={styles.seedIssue}>{humanizeReportText(seed.issue || '（暂无 issue）')}</div>
-      <div className={styles.seedActions}>
-        <Button
-          size="small"
-          icon={<EditOutlined />}
-          type="primary"
-          ghost
-          onClick={() =>
-            onDispatchTask({
-              kind: 'rewrite_seed',
-              dimension: seed.dimension,
-              scene_id: seed.scene_id,
-              scene_label: seed.scene_label,
-              issue: humanizeReportText(seed.issue),
-              evidence_ref_id: seed.evidence_ref_id,
-            })
-          }
-        >
-          让 Agent 改写
-        </Button>
-        {evi ? (
-          <Button
-            size="small"
-            icon={<SearchOutlined />}
-            onClick={() =>
-              onTraceEvidence({
-                evidenceRefId: evi.id,
-                sceneId: evi.scene_id,
-                startLine: evi.start_line ?? null,
-                endLine: evi.end_line ?? null,
-              })
-            }
-            type={activeEvidenceId === evi.id ? 'primary' : 'default'}
-            ghost={activeEvidenceId === evi.id}
-          >
-            先看原文
-          </Button>
-        ) : null}
-      </div>
-    </div>
-  )
-}
+// 旧的 RewriteSeedCard 在 v2 行动 lens 改造中被 WriterSeedRow 取代——
+// 段级改写是「行动 · 编剧」职责，不再放在评估 segment。详见 docs/10-rewrite-agent.md §1。
 
 function renderTaskBadge(status: RewriteTaskStatusDTO | undefined) {
   if (!status || status.attempts <= 0) {
