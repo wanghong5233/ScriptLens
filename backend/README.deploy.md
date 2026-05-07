@@ -68,11 +68,8 @@ docker ps --filter name=scriptlens_
 # 2. 6 张表自动建好（alembic 在 start.sh 里跑）
 docker exec scriptlens_db_dev psql -U postgres -d scriptlens_dev \
   -c "SELECT tablename FROM pg_tables WHERE schemaname='scriptlens' ORDER BY tablename"
-# 期望输出：evidence_refs / reports / scenes / script_chunks / script_feedback / scripts
-
-# 3. pgvector 扩展已装
-docker exec scriptlens_db_dev psql -U postgres -d scriptlens_dev \
-  -c "SELECT extname, extversion FROM pg_extension WHERE extname='vector'"
+# 期望输出：evidence_refs / reports / scenes / script_feedback / script_operations / scripts
+# 注：v1 起 script_chunks 已删除（embedding 路径拆除，详见 docs/04-script-pipeline.md §4.4）
 
 # 4. 健康端点
 curl http://localhost:8005/health
@@ -182,7 +179,7 @@ curl -s https://api-scriptlens.wh5233.me/health       # 公网（CF tunnel 配�
 - 不动 ScholarMind `docker-compose.prod.yml` 任何字节
 - 不在 ScholarMind compose project 之外启动 `scriptlens_api`（prod 模式）
 - 不在 dev compose 中暴露 prod 密钥（`.env.dev` 与 `.env.scriptlens` 分离）
-- 不在 `rag_chunks` 公共表写剧本数据；剧本只走 `scriptlens.script_chunks`
+- 不在 `rag_chunks` 公共表写剧本数据；剧本只走 `scriptlens.scenes`（v1 起不再写 `script_chunks`）
 - 不删除 ScholarMind 的 PG / Redis volume（会同时摧毁 ScriptLens prod 数据）
 
 ---

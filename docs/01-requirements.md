@@ -1,5 +1,13 @@
 # ScriptLens 产品需求
 
+> **最高准则是 [`source/task.md`](source/task.md)**，PRD 是 task.md 的工程化落地，可随开发演进修订。
+> - 报告内部结构（4 segment / 故事/人物/评估）契约见 [`05-report-architecture.md`](05-report-architecture.md)
+> - 存储层当前实现与 SQLite + FTS5 演进方向见 [`06-storage-architecture.md`](06-storage-architecture.md)
+> - 解析质量评估方法见 [`07-evaluation.md`](07-evaluation.md)
+> - UI 与 Agent 协作落地心智见 [`03-system-mental-model.md`](03-system-mental-model.md)
+>
+> 当 PRD 与 05 / 06 / 03 冲突时：**新结构以专题文档为准，PRD 同步修订**；当 PRD 与 task.md 冲突时：**task.md 为准**。
+
 ## 1. 一句话定位
 
 ScriptLens 是面向**短剧选品 / 编剧统筹 / 平台审核**的爆款短剧分析 Agent。用户在 30 秒到 10 分钟时间预算内，对一份陌生长剧本形成「是否值得继续投入」的可验证判断，每个判断都能回到原文场景。
@@ -53,7 +61,9 @@ ScriptLens 是面向**短剧选品 / 编剧统筹 / 平台审核**的爆款短�
 
 Q1–Q4 是 MVP 必做，Q5 是加分项。
 
-## 6. 5 个评分维度
+## 6. 5 维数据评估卡（task.md §五 3 加分项实装）
+
+5 维评分是 task.md §五 3「等级判断或量化分析」的具体实装，**作为深度层「评估」segment 的内容**，不抢 30 秒决策位（[`05-report-architecture.md §6`](05-report-architecture.md#6-前端-4-segment)）。
 
 | 维度 | 0-10 评分依据 | 失败模式 |
 |---|---|---|
@@ -70,6 +80,8 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 **工业判据 / 档位锚点 / prompt 模板 / 失败模式细则见 [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md)。** 该文档基于抖音 / 快手 / 广电 / 短剧反转工业指标做了第一性原理推导，是 D2-4 评分 Agent 实装的 prompt 来源。
 
 ## 7. Agent 输出契约
+
+> **本节是 5 维评分契约的稳定基线**。`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` 等扩展字段（v3）在 [`05-report-architecture.md §4`](05-report-architecture.md#4-数据契约) 定义，不在本表，保持 PRD 稳定。
 
 ```jsonc
 {
@@ -121,6 +133,10 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 
 视角切换不重新生成报告，只是基于上述 schema 重排 `scorecard` / `must_read_scene_ids` 优先级。
 
+**v3 扩展字段**（`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` / `evaluation`）契约见 [`05-report-architecture.md §5`](05-report-architecture.md#5-数据契约)；本节是 v1 基线契约，过渡期内 `scorecard` 与 `evaluation.dimensions` 同源。
+
+**报告 UI 分层与 4 segment 组织（速览 / 故事 / 人物 / 评分）见 [`05-report-architecture.md §5`](05-report-architecture.md#5-前端-4-segment)；本节 §7 是底层契约，不锁定 UI 形态。**
+
 ## 8. 必须支持的交互
 
 | 交互 | 协议 |
@@ -156,7 +172,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 | **P1** | 低评级改写 | §7 的 `rewrite_suggestions` 工具 |
 | **P1** | 联网检索能力 | task §六「真正可工作的 Agent」的关键支撑。Agent 工具栈含 `web_search_tool`（Tavily / Serper），覆盖剧本之外的查询：选品看市场 / 编剧查爆款 / 审核查法规 / 改写借参考。调用边界与 query 模式见 [`00-reuse-matrix.md §5.1`](00-reuse-matrix.md#51-web_search_tool-短剧场景调用边界) |
 | **P2** | 评估方法 | 3-5 份真实剧本人工标注 + 自动指标（证据召回率、维度分一致性）；详见 [`02-script-evaluation-rubric.md §5`](02-script-evaluation-rubric.md) |
-| **P3** | 可进化 skill 机制（轻量实现） | 用户在报告 / 维度 / 改写 / 场景上提交反馈 → 写 `script_feedback` 表（按 scope 标记）→ 下次 chat 自动把该剧本最近 N 条反馈注入 system prompt，使 Agent 能感知用户偏好与历史修正。**不做完整 RL 训练 / reward model / skill 调度库** |
+| **P3** | 可进化 skill 机制（轻量实现） | 用户在报告 / 维度 / 改写 / 场景上提交反馈 → 写 `script_feedback` 表（按 scope 标记）→ 下次 chat 自动抽取为 3 个轻量 skill 槽（维度解释偏好 / 改写偏好 / 风险规避偏好）并注入 prompt，使 Agent 能感知用户偏好与历史修正。**不做完整 RL 训练 / reward model / skill 调度库** |
 
 ## 11. 非目标
 
