@@ -1,25 +1,25 @@
-"""ScriptLens 5 维评分报告生成服务（顶层流水线）。
+"""ScriptLens 阅文五力评分报告生成服务（顶层流水线，docs/08-evaluation-framework.md）。
 
 链路：
   scripts 表读元数据
-    → 并行跑 5 维评分
-        ├─ opening_hook   (dimension_scorer.score_opening_hook)
-        ├─ reward_density (dimension_scorer.score_reward_density 用 reward_events)
-        ├─ motivation     (motivation_chain.score_motivation)
-        ├─ pacing         (dimension_scorer.score_pacing 用 reward_events)
-        └─ risk           (risk_screener.screen_risks)
+    → 阶段 A：并行跑基础信号（reward_events / coverage_card / beat_sheet /
+              character_graph / motivation_decisions）
+    → 阶段 B：基于阶段 A 信号并行跑五力评分 + 合规审核
+        ├─ story      (dimension_scorer.score_story 用 beat_sheet + reward_events)
+        ├─ character  (dimension_scorer.score_character 用 motivation + character_graph)
+        ├─ concept    (dimension_scorer.score_concept 用 coverage_card + 头部场景扫描)
+        ├─ emotion    (dimension_scorer.score_emotion 用 reward_events)
+        ├─ pacing     (dimension_scorer.score_pacing 用 scenes + reward_events)
+        └─ compliance (risk_screener.screen_risks，独立字段不进 scorecard)
     → 决策聚合（label / confidence / one_sentence_reason / must_read_scenes）
-    → 拼装 PRD §7 schema
+    → 拼装 ReportPayload（scorecard 五力 + compliance 独立 + must_read 来自 beat_sheet）
     → 落 reports / evidence_refs 表（事务）
 
-为什么不走 ReAct：
-  5 维评分是固定流水线，每步输入输出明确，没有"工具试错"诉求。
-  ReAct 用在 D2-6 多轮 chat / 改写场景。
-
 不变式：
-  1. 任一维度评分异常向上抛错（mark_failed 由调用方处理）
-  2. 写库走单事务：先写 reports，再写 evidence_refs；任一失败回滚
-  3. 重新生成报告时（reanalyze）：先 DELETE 旧 reports + evidence_refs（CASCADE），再写新的
+  1. compliance 不参与 overall_score；high_risk 时 decision label 强制 not_recommended
+  2. 任一维度规则评分需要的上游信号缺失 → 该维 score=None / level=None / reason 写明缺什么
+  3. 写库走单事务：先写 reports，再写 evidence_refs；任一失败回滚
+  4. 重新生成报告时（reanalyze）：先 DELETE 旧 reports + evidence_refs（CASCADE），再写新的
 """
 
 from __future__ import annotations
@@ -42,13 +42,15 @@ from service.script_tools.character_graph_chain import CharacterGraph, extract_c
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
 from service.script_tools.dimension_scorer import (
     ScoreOutput,
-    score_opening_hook,
+    score_character,
+    score_concept,
+    score_emotion,
     score_pacing,
-    score_reward_density,
+    score_story,
 )
 from service.script_tools.evaluation_chain import build_evaluation_payload
-from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
-from service.script_tools.motivation_chain import MotivationResult, score_motivation
+from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
+from service.script_tools.motivation_chain import score_motivation
 from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
 from service.script_tools.risk_screener import RiskResult, screen_risks
@@ -58,7 +60,8 @@ from utils.database import engine as default_engine
 logger = logging.getLogger(__name__)
 
 
-_DIMENSIONS_FIVE = ("opening_hook", "reward_density", "motivation", "pacing", "risk")
+# 阅文五力（docs/08-evaluation-framework.md §3）；compliance 独立不在此元组
+_DIMENSIONS_FIVE = ("story", "character", "concept", "emotion", "pacing")
 
 
 @dataclass
@@ -121,20 +124,20 @@ async def score_one_dimension(
 ) -> Dict:
     """跑单一维度评分（不入库），返回 dict。
 
-    用于 ReAct `score_dimension_tool`：用户在 chat 里说"复核一下 motivation"或者
-    "把 risk 重新打一遍"时，工具调本入口而不是整份 `generate_report`。
+    用于 ReAct `score_dimension_tool`：用户在 chat 里说"复核一下故事力"或者
+    "把合规审核重新跑一遍"时，工具调本入口而不是整份 `generate_report`。
 
     Args:
-        dimension: opening_hook | reward_density | motivation | pacing | risk
+        dimension: story | character | concept | emotion | pacing | compliance
 
     Returns:
         ```
         {
             "dimension": "...",
             "score": 0-10,
-            "level": "high|medium|low|high_risk|...",
+            "level": "high|medium|low|high_risk|medium_risk|low_risk|clean",
             "reason": "...",
-            "evidence_scene_ids": ["uuid", ...],   # 用 scene_id 而非 evidence_refs.id
+            "evidence_scene_ids": ["uuid", ...],
         }
         ```
 
@@ -142,38 +145,59 @@ async def score_one_dimension(
         ValueError: 未知 dimension / script_id 不存在
         ScoreLLMError: LLM 多次失败
     """
-    if dimension not in _DIMENSIONS_FIVE:
-        raise ValueError(
-            f"unknown dimension: {dimension!r}; must be one of {_DIMENSIONS_FIVE}"
-        )
+    valid = (*_DIMENSIONS_FIVE, "compliance")
+    if dimension not in valid:
+        raise ValueError(f"unknown dimension: {dimension!r}; must be one of {valid}")
     caller = caller or LlmCaller()
     meta = _load_script_meta(script_id, engine=engine)
     if meta is None:
         raise ValueError(f"script_id={script_id} 不存在")
 
-    if dimension == "opening_hook":
-        out = await score_opening_hook(script_id=script_id, caller=caller)
-        ds = _to_dim("opening_hook", out)
-    elif dimension == "reward_density":
-        rev = await extract_reward_events(script_id=script_id, caller=caller)
-        out = await score_reward_density(
-            script_id=script_id,
-            reward_events=rev,
-            total_episodes=meta.total_episodes,
-            caller=caller,
-        )
-        ds = _to_dim("reward_density", out)
-    elif dimension == "pacing":
-        rev = await extract_reward_events(script_id=script_id, caller=caller)
-        out = await score_pacing(script_id=script_id, reward_events=rev, caller=caller)
-        ds = _to_dim("pacing", out)
-    elif dimension == "motivation":
-        r = await score_motivation(script_id=script_id, caller=caller)
-        ds = _to_dim_from_motivation(r)
-    else:  # risk
+    if dimension == "compliance":
         r = await screen_risks(script_id=script_id, caller=caller)
         ds = _to_dim_from_risk(r)
+        return {
+            "dimension": "compliance",
+            "score": ds.score,
+            "level": ds.level,
+            "reason": ds.reason,
+            "evidence_scene_ids": ds.evidence_scene_ids,
+        }
 
+    # 五力评分需要先跑上游基础信号，按 dimension 按需触发
+    reward_events = await extract_reward_events(script_id=script_id, caller=caller)
+
+    if dimension == "story":
+        beat_sheet = await extract_beat_sheet(
+            script_id=script_id, reward_events=reward_events, caller=caller, engine=engine,
+        )
+        out = score_story(
+            beat_sheet=beat_sheet,
+            reward_events=reward_events,
+            total_episodes=meta.total_episodes,
+        )
+    elif dimension == "character":
+        motiv, cgraph = await asyncio.gather(
+            score_motivation(script_id=script_id, caller=caller),
+            extract_character_graph(script_id=script_id, caller=caller, engine=engine),
+        )
+        out = score_character(motivation_result=motiv, character_graph=cgraph)
+    elif dimension == "concept":
+        coverage = await extract_coverage_card(
+            script_id=script_id, caller=caller, engine=engine,
+        )
+        out = score_concept(coverage_card=coverage, script_id=script_id, engine=engine)
+    elif dimension == "emotion":
+        out = score_emotion(
+            reward_events=reward_events,
+            total_episodes=meta.total_episodes,
+        )
+    else:  # pacing
+        out = score_pacing(
+            script_id=script_id, reward_events=reward_events, engine=engine,
+        )
+
+    ds = _to_dim(dimension, out)
     return {
         "dimension": ds.dimension,
         "score": ds.score,
@@ -188,21 +212,14 @@ async def score_one_dimension(
 # ============================================================
 
 
-_DIMENSION_LABEL_CN = {
-    "opening_hook": "开场钩子",
-    "reward_density": "爽点密度",
-    "motivation": "动机自洽",
-    "pacing": "节奏控制",
-    "risk": "审核风险",
-}
-
-
 async def _optional_chain(name: str, coro: Awaitable[Any]) -> Any:
     """报告扩展链可降级为 null；只吞已知业务失败。"""
     try:
         return await coro
     except (ScoreLLMError, ValueError) as exc:
-        logger.warning("%s failed and will be stored as null: %s", name, exc)
+        # 用 exception 而不是 warning：LLM 截断 / JSON 解析失败这类问题
+        # 非常依赖 traceback 才能定位（之前是静默 warning，用户看不到根因）
+        logger.exception("%s failed and will be stored as null: %s", name, exc)
         return None
 
 
@@ -276,7 +293,7 @@ async def generate_report(
         logger.info("report.start script_id=%s title=%s episodes=%s scenes=%s",
                     meta.script_id, meta.title, meta.total_episodes, meta.total_scenes)
 
-        # ---- 2. 抽 reward 事件（reward_density / pacing 共享）---------------
+        # ---- 2. 抽 reward 事件（emotion / pacing / story 共享）---------------
         progress_tracker.update_stage(
             script_id,
             "extracting_rewards",
@@ -291,73 +308,13 @@ async def generate_report(
             detail=f"识别到 {len(reward_events)} 个爽点事件",
         )
 
-        # ---- 3. 并行 5 维评分 -----------------------------------------------
-        progress_tracker.update_stage(
-            script_id,
-            "scoring_dimensions",
-            "running",
-            detail="并行评估 5 维：开场钩子 / 爽点密度 / 动机自洽 / 节奏控制 / 审核风险",
-        )
-
-        completed_dims: List[str] = []
-
-        def _on_dim_done(dim_key: str) -> None:
-            completed_dims.append(_DIMENSION_LABEL_CN.get(dim_key, dim_key))
-            progress_tracker.update_detail(
-                script_id,
-                f"已完成 {len(completed_dims)}/5 维（{', '.join(completed_dims)}）",
-            )
-
-        async def _run_dim(dim_key: str, coro):
-            try:
-                return await coro
-            finally:
-                _on_dim_done(dim_key)
-
-        open_r, reward_r, motiv_r, pacing_r, risk_r = await asyncio.gather(
-            _run_dim("opening_hook", score_opening_hook(script_id=script_id, caller=caller)),
-            _run_dim("reward_density", score_reward_density(
-                script_id=script_id,
-                reward_events=reward_events,
-                total_episodes=meta.total_episodes,
-                caller=caller,
-            )),
-            _run_dim("motivation", score_motivation(script_id=script_id, caller=caller)),
-            _run_dim("pacing", score_pacing(
-                script_id=script_id, reward_events=reward_events, caller=caller,
-            )),
-            _run_dim("risk", screen_risks(script_id=script_id, caller=caller)),
-        )
-
-        dim_scores: List[_DimScore] = [
-            _to_dim("opening_hook", open_r),
-            _to_dim("reward_density", reward_r),
-            _to_dim_from_motivation(motiv_r),
-            _to_dim("pacing", pacing_r),
-            _to_dim_from_risk(risk_r),
-        ]
-        scored_count = sum(1 for d in dim_scores if d.score is not None)
-        progress_tracker.update_stage(
-            script_id,
-            "scoring_dimensions",
-            "done",
-            detail=f"5 维完成：{scored_count} 维有评分 · {5 - scored_count} 维证据不足",
-        )
-
-        # ---- 4. 决策聚合 + 故事/人物/速览提炼（并行）-------------------------
-        progress_tracker.update_stage(
-            script_id,
-            "aggregating_decision",
-            "running",
-            detail="LLM 综合 5 维评分生成决策卡 + 一句话理由…",
-        )
+        # ---- 3. 阶段 A：并行抽基础信号（速览 / 节拍 / 人物图 / 动机决策 / 合规）----
         progress_tracker.update_stage(
             script_id,
             "extracting_narrative",
             "running",
-            detail="生成速览卡、三幕节拍、人物关系图和节奏曲线…",
+            detail="生成速览卡、三幕节拍、人物关系图、动机决策、合规审核…",
         )
-        decision_task = _aggregate_decision(meta, dim_scores, caller)
         coverage_task = _optional_chain(
             "coverage_chain",
             extract_coverage_card(script_id=script_id, caller=caller, engine=engine),
@@ -372,11 +329,85 @@ async def generate_report(
             "character_graph_chain",
             extract_character_graph(script_id=script_id, caller=caller, engine=engine),
         )
-        decision, coverage_card, beat_sheet, character_graph = await asyncio.gather(
-            decision_task,
-            coverage_task,
-            beat_task,
-            character_graph_task,
+        motivation_task = _optional_chain(
+            "motivation_chain",
+            score_motivation(script_id=script_id, caller=caller),
+        )
+        risk_task = screen_risks(script_id=script_id, caller=caller)
+        coverage_card, beat_sheet, character_graph, motivation_result, risk_r = (
+            await asyncio.gather(
+                coverage_task,
+                beat_task,
+                character_graph_task,
+                motivation_task,
+                risk_task,
+            )
+        )
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_narrative",
+            "done",
+            detail=(
+                f"速览{'已生成' if coverage_card else '降级'} · "
+                f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
+                f"人物 {len(character_graph.nodes) if character_graph else 0} 个 · "
+                f"决策回扫 {len(getattr(motivation_result, 'judged_decisions', None) or [])} 处 · "
+                f"合规 {risk_r.level}"
+            ),
+        )
+
+        # ---- 4. 阶段 B：基于阶段 A 信号并行跑五力评分 ----------------------
+        progress_tracker.update_stage(
+            script_id,
+            "scoring_dimensions",
+            "running",
+            detail="阅文五力并行评估：故事力 / 人物力 / 题材力 / 情感力 / 叙事力",
+        )
+
+        story_r = score_story(
+            beat_sheet=beat_sheet,
+            reward_events=reward_events,
+            total_episodes=meta.total_episodes,
+        )
+        character_r = score_character(
+            motivation_result=motivation_result,
+            character_graph=character_graph,
+        )
+        concept_r = score_concept(
+            coverage_card=coverage_card, script_id=script_id, engine=engine,
+        )
+        emotion_r = score_emotion(
+            reward_events=reward_events, total_episodes=meta.total_episodes,
+        )
+        pacing_r = score_pacing(
+            script_id=script_id, reward_events=reward_events, engine=engine,
+        )
+
+        dim_scores: List[_DimScore] = [
+            _to_dim("story", story_r),
+            _to_dim("character", character_r),
+            _to_dim("concept", concept_r),
+            _to_dim("emotion", emotion_r),
+            _to_dim("pacing", pacing_r),
+        ]
+        scored_count = sum(1 for d in dim_scores if d.score is not None)
+        progress_tracker.update_stage(
+            script_id,
+            "scoring_dimensions",
+            "done",
+            detail=f"五力完成：{scored_count} 维有评分 · {5 - scored_count} 维证据不足",
+        )
+
+        # ---- 5. 决策聚合 + 节奏曲线 ---------------------------------------
+        progress_tracker.update_stage(
+            script_id,
+            "aggregating_decision",
+            "running",
+            detail="LLM 综合五力评分生成决策卡 + 一句话理由…",
+        )
+        compliance_dim = _to_dim_from_risk(risk_r)
+        decision = await _aggregate_decision(
+            meta, dim_scores, compliance_dim=compliance_dim, caller=caller,
         )
         pacing_curve_payload = aggregate_pacing_curve(
             script_id=script_id,
@@ -390,16 +421,6 @@ async def generate_report(
             "done",
             detail=f"决策：{decision.get('label', '?')} · 置信度 {decision.get('confidence', '?')}",
         )
-        progress_tracker.update_stage(
-            script_id,
-            "extracting_narrative",
-            "done",
-            detail=(
-                f"速览{'已生成' if coverage_card else '降级'} · "
-                f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
-                f"人物 {len(character_graph.nodes) if character_graph else 0} 个"
-            ),
-        )
 
         # ---- 5. 拼装 evidence_refs ------------------------------------------
         progress_tracker.update_stage(
@@ -409,7 +430,7 @@ async def generate_report(
             detail="为每个评分挂载来源场次的原文 quote…",
         )
         evidence_refs_payload = _build_evidence_refs(
-            dim_scores,
+            dim_scores + [compliance_dim],
             extra_scene_ids=must_read_scene_ids,
             engine=engine,
         )
@@ -426,14 +447,25 @@ async def generate_report(
                 "reason": ds.reason,
                 "evidence_ref_ids": evi_ids,
             })
+        compliance_payload = {
+            "dimension": compliance_dim.dimension,
+            "score": compliance_dim.score,
+            "level": compliance_dim.level,
+            "reason": compliance_dim.reason,
+            "evidence_ref_ids": [
+                scene_id_to_evi_id[sid]
+                for sid in compliance_dim.evidence_scene_ids
+                if sid in scene_id_to_evi_id
+            ],
+        }
         must_read_evi_ids = [scene_id_to_evi_id[sid] for sid in must_read_scene_ids if sid in scene_id_to_evi_id]
 
         # task.md §三 把"主要看点 / 钩子 / 反转 / 爽点"作为头等公民展示给用户：
-        # 这一段把 reward_events + opening_hook 首条 + 已确认的高/中风险 hit 合并成一份 highlights 清单
-        opening_dim_score = next((d for d in dim_scores if d.dimension == "opening_hook"), None)
+        # 这一段把 reward_events + 节拍开场锚点 + 已确认的高/中风险 hit 合并成一份 highlights 清单
+        opening_anchor_id = _opening_anchor_scene_id(beat_sheet)
         highlights_payload = _build_highlights(
             reward_events=reward_events,
-            opening_dim=opening_dim_score,
+            opening_anchor_scene_id=opening_anchor_id,
             risk_r=risk_r,
             evidence_refs_payload=evidence_refs_payload,
             engine=engine,
@@ -448,6 +480,7 @@ async def generate_report(
             "summary": decision.get("summary", ""),
             "must_read_scene_ids": must_read_evi_ids,
             "scorecard": scorecard_payload,
+            "compliance": compliance_payload,
             "evidence_refs": evidence_refs_payload,
             "highlights": highlights_payload,
             "coverage_card": coverage_card.to_dict() if coverage_card else None,
@@ -544,19 +577,10 @@ def _to_dim(dimension: str, output: ScoreOutput) -> _DimScore:
     )
 
 
-def _to_dim_from_motivation(r: MotivationResult) -> _DimScore:
-    return _DimScore(
-        dimension="motivation",
-        score=r.score,
-        level=r.level,
-        reason=r.reason,
-        evidence_scene_ids=list(r.evidence_ref_ids),
-    )
-
-
 def _to_dim_from_risk(r: RiskResult) -> _DimScore:
+    """合规审核独立成 _DimScore 形状，便于复用 evidence 反查；落库到 ReportPayload.compliance。"""
     return _DimScore(
-        dimension="risk",
+        dimension="compliance",
         score=r.score,
         level=r.level,  # high_risk | medium_risk | low_risk | clean
         reason=r.reason,
@@ -569,43 +593,44 @@ def _to_dim_from_risk(r: RiskResult) -> _DimScore:
 # ============================================================
 
 
-_DECISION_PROMPT = """你是中文短剧选品总监。下面是某剧的 5 维评分。
-任务：基于这 5 维的分 / level / reason，给出**整体判断**：
+_DECISION_PROMPT = """你是中文短剧选品总监。下面是某剧的阅文五力评分 + 合规审核结果。
+任务：基于五力 + 合规给出**整体判断**：
 
 | 标签 | 触发条件 |
 |---|---|
-| recommend_continue | 5 维平均 ≥7.5 且 risk 不为 high_risk |
-| cautious_continue | 5 维平均 5-7.5 / 个别维度低分但 risk 可控 |
-| not_recommended | 5 维平均 <5 / risk=high_risk / 多维同时低分 |
+| recommend_continue | 五力平均 ≥7.5 且 合规不为 high_risk |
+| cautious_continue | 五力平均 5-7.5 / 个别维度低分但合规可控 |
+| not_recommended | 五力平均 <5 / 合规=high_risk / 多维同时低分 |
 
-【5 维评分】
+【五力评分】
 {scores_block}
 
-【整体均分】{overall_score}
-【风险等级】{risk_level}
+【整体均分（五力等权）】{overall_score}
+【合规等级】{risk_level}
 
 输出 JSON：
 {{
   "label": "recommend_continue|cautious_continue|not_recommended",
   "confidence": "high|medium|low",
   "one_sentence_reason": "<≤60 字，对选品 / 编剧 / 审核三类用户都有信息量>",
-  "summary": "<3-5 句剧本概览，必须基于 5 维 reason，不准编造未提到的事件>"
+  "summary": "<3-5 句剧本概览，必须基于五力 reason，不准编造未提到的事件>"
 }}
 
 语言要求：
 1. 面向剧本创作者、选品、审核人员，不要出现 reward、scene_no、方差、均值、比值、OOC 等工程词。
 2. 如需提场次，写「第 X 集第 Y 场」，不要写「10-1」。
-3. 结论要解释成创作/审核语言，例如「情绪回报不足」「中段缺少阶段性反转」「角色行为突兀」。"""
+3. 结论要解释成创作/审核语言，例如「情感回报不足」「中段缺少阶段性反转」「角色行为突兀」。"""
 
 
 async def _aggregate_decision(
     meta: _ScriptMeta,
     dim_scores: List[_DimScore],
+    *,
+    compliance_dim: _DimScore,
     caller: LlmCaller,
 ) -> Dict:
-    overall = _overall_score(dim_scores)  # Optional[float]
-    risk_dim = next((d for d in dim_scores if d.dimension == "risk"), None)
-    risk_level = (risk_dim.level if risk_dim and risk_dim.level else "clean")
+    overall = _overall_score(dim_scores)
+    risk_level = compliance_dim.level if compliance_dim.level else "clean"
 
     # _overall_score 应当只返回 float 或 None；任何其他类型都是上游 bug，
     # 这里 fail aloud 把它打成可定位的错误而不是 f-string 抛 ValueError
@@ -643,7 +668,8 @@ async def _aggregate_decision(
     parsed: Dict = {}
     try:
         resp = await caller.call_json(
-            prompt, tier=ModelTier.PRIMARY, temperature=0.2, max_tokens=512
+            prompt, tier=ModelTier.PRIMARY, temperature=0.2,
+            max_tokens=TokenBudget.DECISION_AGGREGATE,
         )
         if isinstance(resp.parsed, dict):
             parsed = resp.parsed
@@ -761,22 +787,33 @@ def _trim_oneliner(s: str, max_len: int = 40) -> str:
     return s[: max_len - 1] + "…"
 
 
+def _opening_anchor_scene_id(beat_sheet: Optional[BeatSheet]) -> Optional[str]:
+    """从 beat_sheet 找开场节拍的 anchor_scene_id，给 highlights 'hook' 用。"""
+    if beat_sheet is None:
+        return None
+    for act in beat_sheet.acts:
+        for beat in act.beats:
+            if beat.type == "opening" and beat.anchor_scene_id:
+                return beat.anchor_scene_id
+    return None
+
+
 def _build_highlights(
     *,
     reward_events: List[RewardEvent],
-    opening_dim: Optional[_DimScore],
+    opening_anchor_scene_id: Optional[str],
     risk_r: RiskResult,
     evidence_refs_payload: List[Dict],
     engine: Engine,
 ) -> List[Dict]:
-    """合并 reward_events + opening_hook 首条证据 + risk hits 为统一的 highlights 清单。
+    """合并 reward_events + 开场节拍 + risk hits 为统一的 highlights 清单。
 
     设计：
       - 同一 scene_id 在 highlights 中只出现一次（按优先级：reward > hook > risk）
       - 缺 scene_label / episode_no / start_line / end_line 时回查 extract_quote
       - oneliner 来源：
           reward → REWARD_TYPE_HEADLINE + evidence 截短拼接（"反转 · {evidence片段}"）
-          hook   → "开场强冲突：{evidence片段}"
+          hook   → "开场抓人 · {evidence片段}"（来自 beat_sheet opening 节拍）
           risk   → "{category} · {matched_term}"
     """
     # 复用 evidence_refs 已经查好的 scene meta，避免重复查 DB
@@ -823,27 +860,25 @@ def _build_highlights(
         })
         used_scenes.add(ev.scene_id)
 
-    # 2) opening_hook 维度的首条证据 → type='hook'
-    if opening_dim and opening_dim.evidence_scene_ids:
-        first_sid = opening_dim.evidence_scene_ids[0]
-        if first_sid not in used_scenes:
-            meta = _resolve_meta(first_sid)
-            if meta is not None:
-                quote = (meta.get("quote") or "").strip()
-                oneliner = _trim_oneliner(f"开场强冲突 · {quote}")
-                out.append({
-                    "id": str(uuid.uuid4()),
-                    "type": "hook",
-                    "scene_id": first_sid,
-                    "episode_no": meta.get("episode_no"),
-                    "scene_no": meta.get("scene_no"),
-                    "scene_label": meta.get("scene_label"),
-                    "start_line": meta.get("start_line"),
-                    "end_line": meta.get("end_line"),
-                    "oneliner": oneliner,
-                    "evidence": quote or None,
-                })
-                used_scenes.add(first_sid)
+    # 2) 开场节拍 anchor_scene_id → type='hook'
+    if opening_anchor_scene_id and opening_anchor_scene_id not in used_scenes:
+        meta = _resolve_meta(opening_anchor_scene_id)
+        if meta is not None:
+            quote = (meta.get("quote") or "").strip()
+            oneliner = _trim_oneliner(f"开场抓人 · {quote}")
+            out.append({
+                "id": str(uuid.uuid4()),
+                "type": "hook",
+                "scene_id": opening_anchor_scene_id,
+                "episode_no": meta.get("episode_no"),
+                "scene_no": meta.get("scene_no"),
+                "scene_label": meta.get("scene_label"),
+                "start_line": meta.get("start_line"),
+                "end_line": meta.get("end_line"),
+                "oneliner": oneliner,
+                "evidence": quote or None,
+            })
+            used_scenes.add(opening_anchor_scene_id)
 
     # 3) risk hits：confirmed_by_llm 且 level != low_risk 的高 / 中风险
     for h in risk_r.hits or []:
@@ -1054,7 +1089,7 @@ async def _attach_scene_summaries(
             prompt,
             tier=ModelTier.MINI,
             temperature=0.2,
-            max_tokens=1200,
+            max_tokens=TokenBudget.SCENE_SUMMARY,
         )
     except ScoreLLMError as exc:
         logger.warning("scene_summary LLM failed, fallback to extractive summaries: %s", exc)

@@ -29,7 +29,7 @@ from .base_tool import BaseTool, ToolResult
 logger = logging.getLogger(__name__)
 
 
-_DIMENSIONS = ("opening_hook", "reward_density", "motivation", "pacing", "risk")
+_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing", "compliance")
 
 
 # ============================================================
@@ -75,10 +75,11 @@ class ScoreDimensionTool(BaseTool):
         super().__init__(
             name="score_dimension_tool",
             description=(
-                "复核或重新计算某一维度评分（5 维之一：opening_hook / reward_density / "
-                "motivation / pacing / risk）。返回 score / level / reason 以及若干证据场景的 ID。"
-                "用户在 chat 里追问「为什么 motivation 给 4 分」「再核一下 risk」时调用本工具。"
-                "注意：完整 5 维报告由后台流水线一次性生成；本工具只跑单一维度。"
+                "复核或重新计算单一维度评分（阅文五力之一：story / character / concept / "
+                "emotion / pacing；或独立合规审核：compliance）。"
+                "返回 score / level / reason 以及若干证据场景的 ID。"
+                "用户在 chat 里追问「为什么人物力给 4 分」「再核一下合规」时调用本工具。"
+                "注意：完整五力报告由后台流水线一次性生成；本工具只跑单一维度。"
             ),
         )
         self.parameters_schema = {
@@ -396,12 +397,12 @@ _REWRITE_PROMPT = """你是中文短剧资深编剧。请基于「整剧上下�
 3. 改写后字数与原文 ±30% 以内
 4. 必须与【后续场次】的剧情走向自洽（例如下场如果该角色出现，本场不能让他死）
 
-维度对应的优化方向（取一即可，不要堆砌）：
-- opening_hook : 把矛盾 / 钩子提前到本场前 1/3，删冗余铺垫
-- reward_density: 加一个反转 / 打脸 / 逆袭节点，回应前情已埋的伏笔
-- motivation   : 给关键决策补一段可追溯的因果（用前情人物关系 / 已发生事件做铺垫）
-- pacing       : 删冗余对白 / 重复信息，节奏前推
-- risk         : 软化敏感表达，但保留戏剧冲突，不删整段
+维度对应的优化方向（取一即可，不要堆砌；阅文五力 docs/08 §3）：
+- story    : 强化主线推进 / 补一个反转或打脸节点，回应前情已埋的伏笔
+- character: 给关键决策补一段可追溯的因果（用前情人物关系 / 已发生事件做铺垫）
+- concept  : 把题材标识 / 核心卖点的钩子提前到本场前 1/3，删冗余铺垫
+- emotion  : 加一个情感钩子或爽点（CP 进展 / 反派败落 / 逆袭）放大情绪密度
+- pacing   : 删冗余对白 / 重复信息，节奏前推；首场 20 段内出冲突
 
 输出严格 JSON（不要 markdown 代码块包裹）：
 {{
@@ -489,8 +490,7 @@ class ProposeRewriteTool(BaseTool):
         if not scene_text.strip():
             return ToolResult(success=False, error="scene text is empty", summary="场景为空")
 
-        # 调 LLM
-        from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError
+        from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 
         prompt = _REWRITE_PROMPT.format(
             scene_label=scene.get("scene_label") or "",
@@ -508,7 +508,7 @@ class ProposeRewriteTool(BaseTool):
                 prompt,
                 tier=ModelTier.PRIMARY,
                 temperature=0.4,
-                max_tokens=1024,
+                max_tokens=TokenBudget.REWRITE_EXCERPT,
             )
         except ScoreLLMError as e:
             logger.warning("propose_rewrite_tool LLM failed: %s", e)

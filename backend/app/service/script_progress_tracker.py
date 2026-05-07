@@ -45,19 +45,19 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "LLM 通读全剧，抽取反转 / 打脸 / 逆袭 / 觉醒等关键事件，供「爽点密度」「节奏控制」共用",
     ),
     (
+        "extracting_narrative",
+        "提炼故事 / 人物 / 合规",
+        "并行生成 30 秒速览卡、三幕节拍、人物关系图、动机决策回扫、合规审核（五力评分依赖的基础信号）",
+    ),
+    (
         "scoring_dimensions",
-        "5 维并行评分",
-        "并行评估开场钩子、爽点密度、动机自洽、节奏控制、审核风险（rubric §3.1–§3.5）",
+        "阅文五力评分",
+        "基于上一步的基础信号并行评估故事力 / 人物力 / 题材力 / 情感力 / 叙事力（docs/08-evaluation-framework.md §3）",
     ),
     (
         "aggregating_decision",
         "汇总整体决策",
-        "综合 5 维评分生成决策卡（recommend / cautious / not_recommended）和一句话理由",
-    ),
-    (
-        "extracting_narrative",
-        "提炼故事 / 人物",
-        "生成 30 秒速览卡、三幕故事节拍、人物关系图和节奏曲线",
+        "综合五力评分 + 合规等级生成决策卡（recommend / cautious / not_recommended）和一句话理由",
     ),
     (
         "building_evidence",

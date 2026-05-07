@@ -706,7 +706,7 @@ class AnalyzeContextTool(BaseTool):
         # LLM 配置（用于文本分析）- 和主 API 服务保持一致
         self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        self.model = os.getenv("DASHSCOPE_MODEL_NAME", "qwen3-max")
+        self.model = os.getenv("DASHSCOPE_MODEL_NAME", "qwen-max-latest")
         
         # 使用 OpenAI SDK 客户端（和主 API 服务一样）
         if self.api_key:
@@ -1684,7 +1684,7 @@ class AnswerWithoutEditTool(BaseTool):
         }
         self.api_key = os.getenv("DASHSCOPE_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = os.getenv("DASHSCOPE_BASE_URL", "https://dashscope.aliyuncs.com/compatible-mode/v1")
-        self.model = os.getenv("DASHSCOPE_MODEL_NAME", "qwen3-max")
+        self.model = os.getenv("DASHSCOPE_MODEL_NAME", "qwen-max-latest")
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url) if self.api_key else None
 
     async def execute(

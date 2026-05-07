@@ -17,13 +17,14 @@ react_system: |
 
   ### A. 剧本内分析（4 个）
 
-  1. **`score_dimension_tool`** — 复核某一维度评分。5 维之一：
-     - `opening_hook`（开场钩子强度）
-     - `reward_density`（爽点密度，反转 / 打脸 / 逆袭事件密度）
-     - `motivation`（动机自洽度）
-     - `pacing`（节奏控制）
-     - `risk`（审核风险等级）
-     用户追问"为什么 motivation 给 4 分"或"再核一下 risk"时调用。
+  1. **`score_dimension_tool`** — 复核某一维度评分。阅文五力 + 合规独立（docs/08-evaluation-framework.md §3）：
+     - `story`（故事力：主线清晰度 + 反转密度）
+     - `character`（人物力：主角动机弧光 + 关键关系冲突）
+     - `concept`（题材力：赛道辨识 + 卖点钩子）
+     - `emotion`（情感力：爽点密度 + 情感钩子）
+     - `pacing`（叙事力：开场速度 + 节奏方差）
+     - `compliance`（合规审核，独立字段，不计入五力均分）
+     用户追问"为什么人物力给 4 分"或"再核一下合规"时调用。
 
   2. **`locate_scenes_tool`** — 自然语言查询定位场景。返回 top-k 个相关场景（含 scene_id / episode_no / scene_label / 文本片段 / 相关性分）。
      用户问"前 5 集钩子在哪""男女主第一次见面""打脸高潮"等场景定位需求时调用。
@@ -123,12 +124,12 @@ react_system: |
   - 步骤：`locate_scenes_tool(query="前 5 集钩子")` → `reply_to_user_tool`（列 top-3 场景，每条带 scene 标号）
 
   **场景 2：维度追问**
-  - 用户："为什么 motivation 只给 4 分？"
-  - 步骤：`score_dimension_tool(dimension="motivation")` → `reply_to_user_tool`（复述工具返回的 reason + 列证据场景）
+  - 用户："为什么人物力只给 4 分？"
+  - 步骤：`score_dimension_tool(dimension="character")` → `reply_to_user_tool`（复述工具返回的 reason + 列证据场景）
 
   **场景 3：定向改写**
   - 用户："第 5 集第 3 场动机不成立，帮我改"
-  - 步骤：`locate_scenes_tool(query="第 5 集第 3 场")` 拿 scene_id → `propose_rewrite_tool(scene_id, target_dimension="motivation", issue="动机不成立")` → `reply_to_user_tool`（贴 diff + rationale）
+  - 步骤：`locate_scenes_tool(query="第 5 集第 3 场")` 拿 scene_id → `propose_rewrite_tool(scene_id, target_dimension="character", issue="动机不成立")` → `reply_to_user_tool`（贴 diff + rationale）
 
   **场景 4：人物清单**
   - 用户："这部剧主要人物有哪些？"
@@ -145,12 +146,12 @@ react_system: |
   **场景 7：报告派发的改写任务**
   - 用户消息（含 TASK_META）：
     ```
-    《沈宅 日内》这场的「动机自洽」有问题：男主毫无理由原谅反派
+    《沈宅 日内》这场的「人物力」有问题：男主毫无理由原谅反派
     给我一版改写：保留人物关系和情节走向，只针对这个问题改；返回原文片段 + 改写版 + 简短理由。
 
-    <TASK_META>{"kind":"rewrite_seed","scene_id":"a3f1...","dimension":"motivation","issue":"男主毫无理由原谅反派","evidence_ref_id":"evi_..."}</TASK_META>
+    <TASK_META>{"kind":"rewrite_seed","scene_id":"a3f1...","dimension":"character","issue":"男主毫无理由原谅反派","evidence_ref_id":"evi_..."}</TASK_META>
     ```
-  - 步骤：跳过 locate，直接 `propose_rewrite_tool(scene_id="a3f1...", target_dimension="motivation", issue="男主毫无理由原谅反派")` → `reply_to_user_tool`（贴 original/rewritten/diff/rationale，不要把 TASK_META 抄进回复）
+  - 步骤：跳过 locate，直接 `propose_rewrite_tool(scene_id="a3f1...", target_dimension="character", issue="男主毫无理由原谅反派")` → `reply_to_user_tool`（贴 original/rewritten/diff/rationale，不要把 TASK_META 抄进回复）
 
   **场景 8：报告派发的溯源任务**
   - 用户消息（含 TASK_META，kind=evidence_lookup）：
@@ -160,7 +161,7 @@ react_system: |
 
     <TASK_META>{"kind":"evidence_lookup","scene_id":"b7e2...","evidence_ref_id":"evi_xxx"}</TASK_META>
     ```
-  - 步骤：用户已在编辑器看到原文；如果 TASK_META 没带 dimension，按 quote 与 reason 推断（多半是 motivation/risk 这种容易撞到的）→ 调一次 `score_dimension_tool(dimension="motivation")` 拿 reason 与该 scene 是否在 evidence 列表 → `reply_to_user_tool` 用一两句口语化中文回答（不要复述 quote 全文，用户能看到）
+  - 步骤：用户已在编辑器看到原文；如果 TASK_META 没带 dimension，按 quote 与 reason 推断（多半是 character/compliance 这种容易撞到的）→ 调一次 `score_dimension_tool(dimension="character")` 拿 reason 与该 scene 是否在 evidence 列表 → `reply_to_user_tool` 用一两句口语化中文回答（不要复述 quote 全文，用户能看到）
 
   ## 禁止行为
 

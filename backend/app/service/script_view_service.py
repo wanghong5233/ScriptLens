@@ -2,15 +2,16 @@
 
 GET /api/scripts/{id}/view 的核心逻辑都在这里：
 
-  1. 按角色重排 scorecard 优先级（不重生成评分）
+  1. 按角色重排 scorecard 优先级（不重生成评分；阅文五力，docs/08 §3）
   2. 重选 must_read_scene_ids（把角色优先维度的 evidence 提到前面）
-  3. 派生 `rewrite_seeds`：从 score<7 / *_risk / major 维度的第一条 evidence
-     生成「最值得改的 N 场」候选（详见 docs/03-system-mental-model.md §6）
+  3. 派生 `rewrite_seeds`：从 score<7 五力维度的第一条 evidence 生成
+     「最值得改的 N 场」候选（详见 docs/03-system-mental-model.md §6）
+     注：合规违规不进改写候选——合规问题需人工二次审核，不交给 LLM 改写
   4. 派生 `task_status`：从 script_operations 表派生每个 (scene_id, dimension)
      上的改写任务状态（详见 docs/03-system-mental-model.md §8）
 
 报告本身（reports.report_json）保持不变；rewrite_seeds / task_status 是
-**视图层派生**，不污染持久化层（PRD §7 ReportPayload schema 不动）。
+**视图层派生**，不污染持久化层。
 """
 
 from __future__ import annotations
@@ -31,17 +32,15 @@ from service import script_operation_service
 logger = logging.getLogger(__name__)
 
 
+# 阅文五力按角色重排（compliance 独立成 ReportPayload.compliance，不参与 scorecard 排序）
 _ROLE_DIMENSION_PRIORITY: Dict[str, Tuple[str, ...]] = {
-    # 选品视角：先看钩子能不能抓人，再看爽点密度，最后审核风险兜底
-    "selection": ("opening_hook", "reward_density", "risk", "pacing", "motivation"),
-    # 编剧视角：动机不立则一切白搭，节奏次之
-    "writer": ("motivation", "pacing", "opening_hook", "reward_density", "risk"),
-    # 审核视角：风险红线优先
-    "review": ("risk", "motivation", "pacing", "opening_hook", "reward_density"),
+    # 选品视角：题材卖点优先 → 情感钩子 → 故事走向 → 节奏 → 人物
+    "selection": ("concept", "emotion", "story", "pacing", "character"),
+    # 编剧视角：人物动机最重要 → 故事走向 → 节奏 → 情感 → 题材
+    "writer": ("character", "story", "pacing", "emotion", "concept"),
+    # 审核视角：合规独立显示，五力以叙事力（节奏抓人）和题材力为锚
+    "review": ("pacing", "concept", "emotion", "story", "character"),
 }
-
-
-_LOW_RISK_LEVELS = {"high_risk", "medium_risk", "major"}
 
 
 def get_role_priority(role: str) -> Tuple[str, ...]:
@@ -117,6 +116,7 @@ def build_view(
         overall_score=report.overall_score,
         summary=report.summary or report.decision.summary,
         scorecard=scorecard_sorted,
+        compliance=report.compliance,
         must_read_scene_ids=focused_ref_ids[:3],
         risk_flags=report.risk_flags,
         role_focus=role_focus_dims,
@@ -135,35 +135,31 @@ def build_view(
 def _derive_rewrite_seeds(report: ReportPayload, *, max_seeds: int = 3) -> List[RewriteSeed]:
     """从报告里按"最值得改"规则挑出 N 个改写候选。
 
-    选择规则（详见 docs/03-system-mental-model.md §6 §10）：
-      - 维度入选条件：score 是数字且 <7，或 level ∈ {high_risk, medium_risk, major}
-      - 排序：先按是否 *_risk/major（高风险优先）、再按 score 升序
-      - 每个入选维度取其第一条 evidence_ref（已被 LLM 标为该维度的 top-1 证据）
-      - 同一 scene 不重复（同 scene 多维问题只挑最高优先级那一个，避免噪音）
+    选择规则（docs/08-evaluation-framework.md + docs/03-system-mental-model.md §6）：
+      - 维度入选条件：score 是数字且 <7（五力维度）
+      - 排序：score 升序（最低分先改）
+      - 每个入选维度取其第一条 evidence_ref（该维度的 top-1 证据）
+      - 同一 scene 不重复（同 scene 多维问题只挑最低分那一个，避免噪音）
+      - 合规问题不进改写候选——合规违规需人工二次审核，不交给 LLM 改写
     """
     if not report.scorecard or not report.evidence_refs:
         return []
 
     evi_by_id: Dict[str, ReportEvidenceRef] = {ref.id: ref for ref in report.evidence_refs}
 
-    candidates: List[Tuple[int, int, ReportScorecardItem]] = []
+    candidates: List[Tuple[int, ReportScorecardItem]] = []
     for sc in report.scorecard:
-        is_risk_flag = (sc.level or "") in _LOW_RISK_LEVELS
-        score_low = sc.score is not None and sc.score < 7
-        if not (is_risk_flag or score_low):
+        if sc.score is None or sc.score >= 7:
             continue
         if not sc.evidence_ref_ids:
-            continue  # 没证据的维度不出种子（避免无锚点改写）
-        # 排序键：is_risk_flag 优先（0 排前），其次 score 升序（None 视为 99 沉底）
-        risk_key = 0 if is_risk_flag else 1
-        score_key = sc.score if sc.score is not None else 99
-        candidates.append((risk_key, score_key, sc))
+            continue
+        candidates.append((sc.score, sc))
 
-    candidates.sort(key=lambda t: (t[0], t[1]))
+    candidates.sort(key=lambda t: t[0])
 
     seeds: List[RewriteSeed] = []
     used_scenes: set[str] = set()
-    for _, _, sc in candidates:
+    for _, sc in candidates:
         if len(seeds) >= max_seeds:
             break
         # 取第一条命中 evidence_refs 的 ref_id

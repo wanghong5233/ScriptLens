@@ -302,14 +302,14 @@ async def _llm_pick_scenes(
         + f"\n\n请挑出最相关的 {top_k} 场，按相关性排序。"
     )
 
-    from service.script_tools.llm_caller import LlmCaller, ModelTier
+    from service.script_tools.llm_caller import LlmCaller, ModelTier, TokenBudget
 
     caller = LlmCaller()
     resp = await caller.call_json(
         prompt=user_prompt,
-        tier=ModelTier.MINI,  # 轻任务，省 token
+        tier=ModelTier.MINI,
         system_message=_LLM_PICK_SYSTEM_PROMPT,
-        max_tokens=512,
+        max_tokens=TokenBudget.RAG_PICK,
     )
     parsed = resp.parsed if hasattr(resp, "parsed") else None
     if not isinstance(parsed, dict):
