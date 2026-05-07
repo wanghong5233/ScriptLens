@@ -15,41 +15,43 @@ interface DimensionCard {
   exampleLevel: 'high' | 'medium' | 'low' | 'clean'
 }
 
+// 阅文五力（docs/08-evaluation-framework.md §3）：story / character / concept / emotion / pacing
+// 业内最广为使用的中文网文 / 短剧改编 / 内容选品评级体系，5 维互不重叠
 const DIMENSIONS: DimensionCard[] = [
   {
-    key: 'opening_hook',
-    name: '开场钩子',
-    question: '前 3 集前 3 场是否抓人？',
+    key: 'story',
+    name: '故事力',
+    question: '主线清晰吗？反转 / 钩子节拍是否完整？',
     exampleScore: '8/10',
     exampleLevel: 'high',
   },
   {
-    key: 'reward_density',
-    name: '爽点密度',
-    question: '反转 / 打脸 / 逆袭密度够不够？',
+    key: 'character',
+    name: '人物力',
+    question: '主角动机弧光、关键关系冲突立得住吗？',
     exampleScore: '6/10',
     exampleLevel: 'medium',
   },
   {
-    key: 'motivation',
-    name: '动机自洽',
-    question: '关键决策有没有铺垫？',
+    key: 'concept',
+    name: '题材力',
+    question: '赛道辨识度够不够？卖点能一句话讲清吗？',
+    exampleScore: '7/10',
+    exampleLevel: 'high',
+  },
+  {
+    key: 'emotion',
+    name: '情感力',
+    question: '爽点密度 / 情感钩子 / 共情触达够不够？',
     exampleScore: '5/10',
     exampleLevel: 'medium',
   },
   {
     key: 'pacing',
-    name: '节奏控制',
-    question: '中段是否塌陷？',
+    name: '叙事力',
+    question: '开场抓人吗？中段会不会塌陷？',
     exampleScore: '7/10',
     exampleLevel: 'high',
-  },
-  {
-    key: 'risk',
-    name: '审核风险',
-    question: '有无广电红线 / 题材风险？',
-    exampleScore: '9/10',
-    exampleLevel: 'clean',
   },
 ]
 

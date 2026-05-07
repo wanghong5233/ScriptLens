@@ -798,10 +798,9 @@ const MAX_FILE_MENTION_COUNT = 8
 const MAX_FILE_MENTION_CANDIDATES = 8
 
 const DASHSCOPE_TEXT_MODEL_OPTIONS = [
-  { label: 'qwen-plus', value: 'qwen-plus' },
-  { label: 'qwen3-max', value: 'qwen3-max' },
+  { label: 'qwen-max-latest', value: 'qwen-max-latest' },
   { label: 'qwen-max', value: 'qwen-max' },
-  { label: 'qwen-turbo', value: 'qwen-turbo' },
+  { label: 'qwen3-max', value: 'qwen3-max' },
 ] as const
 
 const DASHSCOPE_VISION_MODEL_OPTIONS = [
@@ -835,7 +834,7 @@ type LlmModelOption = {
   contextWindow?: number | null
 }
 
-const DEFAULT_DASHSCOPE_MODEL = 'qwen3-max'
+const DEFAULT_DASHSCOPE_MODEL = 'qwen-max-latest'
 const DEFAULT_DASHSCOPE_VISION_MODEL = 'qwen-vl-max'
 const DEFAULT_OPENAI_MODEL = 'gpt-5.2'
 const DEFAULT_OPENAI_VISION_MODEL = 'gpt-4o'
@@ -1645,8 +1644,9 @@ const LatexEditorPage = () => {
   }, [])
 
   /**
-   * F1：5 维改写快捷指令模板。Key 与后端 RewriteRequest.target_dimension 一致。
-   * Agent 收到这个 prompt 后，会通过 ReAct 调 locate_scenes_tool + propose_rewrite_tool。
+   * F1：阅文五力改写快捷指令模板。Key 与后端 RewriteRequest.target_dimension 一致
+   * （docs/08-evaluation-framework.md §3）。compliance 不出现在改写菜单——红线问题
+   * 由专门的"降风险"专项工具处理，不走普通改写通道。
    *
    * 提示词只描述「任务」，不描述「呈现」——diff / Keep / Undo 是编辑器自身机制
    * （propose_rewrite_tool 输出的 result 由前端 chat 流接到 AgentDiffReview，跟 LLM 无关）。
@@ -1655,25 +1655,25 @@ const LatexEditorPage = () => {
    */
   const REWRITE_QUICK_COMMANDS: Record<string, { label: string; prompt: string }> = useMemo(
     () => ({
-      opening_hook: {
-        label: '改钩子',
-        prompt: '请针对「开场钩子」维度（前 3 集前 3 场抓人），结合整本剧的人物关系与主线走向，定位最弱的场次并给出具体改写建议。',
+      story: {
+        label: '改故事',
+        prompt: '请针对「故事力」维度（主线清晰度 + 反转密度 + 情节因果），结合整本剧人物关系与主线走向，定位最弱的场次并给出具体改写建议。',
       },
-      reward_density: {
-        label: '改爽点',
-        prompt: '请针对「爽点密度」维度（反转 / 打脸 / 逆袭），结合前后场次的铺垫与回收，定位塌陷的场次并给出具体改写建议。',
+      character: {
+        label: '改人物',
+        prompt: '请针对「人物力」维度（主角动机弧光 + 关键关系冲突），结合前后场次的铺垫与回收，定位人物塌陷的场次并给出具体改写建议。',
       },
-      motivation: {
-        label: '改动机',
-        prompt: '请针对「动机自洽」维度（关键决策是否有铺垫），结合人物前情与后续走向，定位动机断裂的场次并给出具体改写建议。',
+      concept: {
+        label: '改题材',
+        prompt: '请针对「题材力」维度（赛道辨识度 + 卖点钩子 + 用户画像匹配），结合短剧市场常见赛道，定位题材模糊或卖点稀薄的场次并给出具体改写建议。',
+      },
+      emotion: {
+        label: '改情感',
+        prompt: '请针对「情感力」维度（情感钩子 + 爽点密度 + 共鸣点），结合前后场次的情绪曲线，定位干瘪 / 塌陷的场次并给出具体改写建议。',
       },
       pacing: {
         label: '改节奏',
-        prompt: '请针对「节奏控制」维度（中段是否塌陷），结合整本剧的节奏曲线，定位拖沓 / 跳跃的场次并给出具体改写建议。',
-      },
-      risk: {
-        label: '降风险',
-        prompt: '请针对「审核风险」维度（广电红线 / 题材合规），结合该场在整剧中的功能定位，定位高风险场次并给出「去风险化」的改写建议。',
+        prompt: '请针对「叙事力」维度（开场速度 + 节奏方差 + 中段密度），结合整本剧的节奏曲线，定位拖沓 / 跳跃的场次并给出具体改写建议。',
       },
     }),
     [],

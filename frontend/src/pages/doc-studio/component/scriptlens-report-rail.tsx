@@ -54,6 +54,7 @@ import {
   type BeatActDTO,
   type CharacterGraphEdgeDTO,
   type CharacterGraphNodeDTO,
+  type ComplianceDTO,
   type EvidenceRefDTO,
   type HighlightDTO,
   type HighlightType,
@@ -75,12 +76,23 @@ const { Text, Paragraph } = Typography
 // 元数据
 // ============================================================
 
+// 阅文五力（docs/08-evaluation-framework.md §3）；合规独立用 COMPLIANCE_LABEL
 const DIMENSION_LABELS: Record<string, string> = {
-  opening_hook: '开场钩子',
-  reward_density: '爽点密度',
-  motivation: '动机自洽',
-  pacing: '节奏控制',
-  risk: '审核风险',
+  story: '故事力',
+  character: '人物力',
+  concept: '题材力',
+  emotion: '情感力',
+  pacing: '叙事力',
+  compliance: '合规审核',
+}
+
+const DIMENSION_HINTS: Record<string, string> = {
+  story: '主线清晰度 + 反转密度',
+  character: '主角动机弧光 + 关键关系冲突',
+  concept: '赛道辨识 + 卖点钩子',
+  emotion: '情感钩子 + 爽点密度',
+  pacing: '开场速度 + 节奏方差',
+  compliance: '广电八关 + 6 类红线',
 }
 
 const LEVEL_COLOR: Record<string, string> = {
@@ -91,8 +103,6 @@ const LEVEL_COLOR: Record<string, string> = {
   high_risk: 'red',
   medium_risk: 'orange',
   low_risk: 'gold',
-  minor: 'orange',
-  major: 'red',
 }
 
 const LEVEL_LABEL: Record<string, string> = {
@@ -103,8 +113,6 @@ const LEVEL_LABEL: Record<string, string> = {
   high_risk: '高风险',
   medium_risk: '中风险',
   low_risk: '低风险',
-  minor: '次要',
-  major: '严重',
 }
 
 const DECISION_LABEL: Record<string, { text: string; color: string }> = {
@@ -660,8 +668,8 @@ function ReadyRail({
         <>
           <section className={styles.scorecardSection}>
             <SectionHeader
-              title="数据评估"
-              hint="点证据 → 跳原文；点 🔍 → 让 Agent 解释这一维"
+              title="数据评估 · 阅文五力"
+              hint="故事/人物/题材/情感/叙事 五维评分（合规独立见下方），点证据→跳原文，点 🔍→让 Agent 解释"
             />
             <Space direction="vertical" size={8} style={{ width: '100%', marginTop: 8 }}>
               {view.scorecard.map((item) => (
@@ -676,6 +684,24 @@ function ReadyRail({
               ))}
             </Space>
           </section>
+
+          {view.compliance ? (
+            <section className={styles.scorecardSection}>
+              <SectionHeader
+                title="合规审核"
+                hint="独立维度，不计入综合评分；high_risk 会强制把整剧决策降为「不建议立项」"
+              />
+              <div style={{ marginTop: 8 }}>
+                <ComplianceCard
+                  compliance={view.compliance}
+                  evidenceMap={evidenceMap}
+                  activeEvidenceId={activeEvidenceId}
+                  onTraceEvidence={onTraceEvidence}
+                  onDispatchTask={onDispatchTask}
+                />
+              </div>
+            </section>
+          ) : null}
           {view.rewrite_seeds.length > 0 ? (
             <section className={styles.seedsSection}>
               <SectionHeader
@@ -1705,6 +1731,7 @@ function DimCard({
   onDispatchTask,
 }: DimCardProps) {
   const label = DIMENSION_LABELS[item.dimension] || item.dimension
+  const hint = DIMENSION_HINTS[item.dimension]
   const isNoScore = item.score === null || item.score === undefined
   const evidences: EvidenceRefDTO[] = (item.evidence_ref_ids || [])
     .map((rid) => evidenceMap.get(rid))
@@ -1713,7 +1740,10 @@ function DimCard({
   return (
     <div className={styles.dimCard}>
       <div className={styles.dimCardHeader}>
-        <span className={styles.dimLabel}>{label}</span>
+        <span className={styles.dimLabel}>
+          {label}
+          {hint ? <span className={styles.dimHint}>· {hint}</span> : null}
+        </span>
         <Space size={6} className={styles.dimRight}>
           {item.level ? (
             <Tag color={LEVEL_COLOR[item.level] || 'default'} className={styles.dimLevelTag}>
@@ -1732,7 +1762,7 @@ function DimCard({
               onClick={() =>
                 onDispatchTask({
                   kind: 'dim_inquiry',
-                  dimension: item.dimension as AgentTask extends { dimension: infer D } ? D : never,
+                  dimension: item.dimension,
                   current_score: item.score ?? null,
                 })
               }
@@ -1744,6 +1774,92 @@ function DimCard({
       {item.reason ? (
         <Paragraph className={styles.dimReason} ellipsis={{ rows: 3, expandable: true, symbol: '展开' }}>
           {humanizeReportText(item.reason)}
+        </Paragraph>
+      ) : null}
+
+      {evidences.length > 0 && (
+        <div className={styles.evidenceList}>
+          {evidences.slice(0, 5).map((ref) => (
+            <EvidenceChip
+              key={ref.id}
+              evidence={ref}
+              active={activeEvidenceId === ref.id}
+              onTrace={() =>
+                onTraceEvidence({
+                  evidenceRefId: ref.id,
+                  sceneId: ref.scene_id,
+                  startLine: ref.start_line ?? null,
+                  endLine: ref.end_line ?? null,
+                })
+              }
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// === 合规审核独立卡片（docs/08 §4，与五力分离） ===
+interface ComplianceCardProps {
+  compliance: ComplianceDTO
+  evidenceMap: Map<string, EvidenceRefDTO>
+  activeEvidenceId: string | null
+  onTraceEvidence: Props['onTraceEvidence']
+  onDispatchTask: (task: AgentTask) => void
+}
+
+function ComplianceCard({
+  compliance,
+  evidenceMap,
+  activeEvidenceId,
+  onTraceEvidence,
+  onDispatchTask,
+}: ComplianceCardProps) {
+  const label = DIMENSION_LABELS.compliance
+  const hint = DIMENSION_HINTS.compliance
+  const isNoScore = compliance.score === null || compliance.score === undefined
+  const evidences: EvidenceRefDTO[] = (compliance.evidence_ref_ids || [])
+    .map((rid) => evidenceMap.get(rid))
+    .filter((x): x is EvidenceRefDTO => x !== undefined)
+
+  return (
+    <div className={styles.dimCard}>
+      <div className={styles.dimCardHeader}>
+        <span className={styles.dimLabel}>
+          {label}
+          {hint ? <span className={styles.dimHint}>· {hint}</span> : null}
+        </span>
+        <Space size={6} className={styles.dimRight}>
+          {compliance.level ? (
+            <Tag color={LEVEL_COLOR[compliance.level] || 'default'} className={styles.dimLevelTag}>
+              {LEVEL_LABEL[compliance.level] || compliance.level}
+            </Tag>
+          ) : null}
+          <span className={styles.dimScore}>
+            {isNoScore ? '—' : `${compliance.score} / 10`}
+          </span>
+          <Tooltip title="让 Agent 解释合规审核结果">
+            <Button
+              type="text"
+              size="small"
+              icon={<SearchOutlined />}
+              className={styles.dimInquiryBtn}
+              onClick={() =>
+                onDispatchTask({
+                  kind: 'dim_inquiry',
+                  dimension: 'compliance',
+                  current_score: compliance.score ?? null,
+                })
+              }
+            />
+          </Tooltip>
+        </Space>
+      </div>
+
+      {compliance.reason ? (
+        <Paragraph className={styles.dimReason} ellipsis={{ rows: 3, expandable: true, symbol: '展开' }}>
+          {humanizeReportText(compliance.reason)}
         </Paragraph>
       ) : null}
 
