@@ -38,17 +38,29 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ForceGraph2D from 'react-force-graph-2d'
 import { forceCollide as forceCollide2D } from 'd3-force'
 import * as echarts from 'echarts/core'
-import { GraphChart } from 'echarts/charts'
+import { GraphChart, LineChart } from 'echarts/charts'
 import {
   TooltipComponent,
   LegendComponent,
   TitleComponent,
   ToolboxComponent,
+  GridComponent,
+  MarkPointComponent,
 } from 'echarts/components'
 import { CanvasRenderer } from 'echarts/renderers'
 import ReactECharts from 'echarts-for-react/lib/core'
 
-echarts.use([GraphChart, TooltipComponent, LegendComponent, TitleComponent, ToolboxComponent, CanvasRenderer])
+echarts.use([
+  GraphChart,
+  LineChart,
+  TooltipComponent,
+  LegendComponent,
+  TitleComponent,
+  ToolboxComponent,
+  GridComponent,
+  MarkPointComponent,
+  CanvasRenderer,
+])
 import {
   fetchScriptDetail,
   fetchScriptView,
@@ -66,6 +78,12 @@ import {
   type ScriptViewResponseDTO,
 } from '@/api/docStudio'
 import { formatSceneLocator, type AgentTask, type DimensionKey } from '../agentTask'
+import {
+  DIMENSION_RUBRICS,
+  getDimensionMeta,
+  getRubricLevel,
+  type RubricLevel,
+} from '../evaluationRubric'
 import ScriptlensReportProgress, {
   ProgressFallbackPanel,
 } from './scriptlens-report-progress'
@@ -489,7 +507,8 @@ function ReadyRail({
     .map((rid) => evidenceMap.get(rid))
     .filter((ref): ref is EvidenceRefDTO => Boolean(ref))
 
-  const overviewHighlights = highlights.slice(0, 5)
+  // 速览传入完整 highlights，由 HighlightsSection 自身的 defaultLimit + 展开机制控制可见量
+  const overviewHighlights = highlights
   const riskCount = view.risk_flags?.length ?? 0
   const beatCount = view.beat_sheet?.acts?.reduce((sum, act) => sum + (act.beats?.length || 0), 0) ?? 0
 
@@ -526,18 +545,18 @@ function ReadyRail({
 
       {reportMode === 'overview' ? (
         <>
-          <div className={styles.quickStats}>
-            <span>关键人物 {view.character_graph?.nodes?.length ?? 0}</span>
-            <span>关键场景 {keySceneRefs.length}</span>
-            <span>故事节拍 {beatCount}</span>
-            <span>风险标签 {riskCount}</span>
-          </div>
-
+          {/* Hero 决策卡 + KPI + 3 优 / 3 劣 分栏 — 业内对照：抖音文心 / Linear / Bloomberg pitch deck */}
           {view.coverage_card ? (
             <CoverageCardSection
               coverage={view.coverage_card}
               decisionReason={view.decision.one_sentence_reason || null}
               overallScore={view.overall_score ?? null}
+              kpis={{
+                characters: view.character_graph?.nodes?.length ?? 0,
+                keyScenes: keySceneRefs.length,
+                beats: beatCount,
+                risks: riskCount,
+              }}
               evidenceBySceneId={evidenceBySceneId}
               activeEvidenceId={activeEvidenceId}
               onTraceEvidence={onTraceEvidence}
@@ -545,10 +564,7 @@ function ReadyRail({
           ) : null}
 
           {summaryText ? (
-            <section className={styles.summarySection}>
-              <SectionHeader title="剧本概览" hint="先读这一段，判断是否值得继续看" />
-              <Paragraph className={styles.summaryText}>{humanizeReportText(summaryText)}</Paragraph>
-            </section>
+            <CollapsibleSummary text={humanizeReportText(summaryText)} />
           ) : null}
 
           {keySceneRefs.length > 0 ? (
@@ -556,6 +572,7 @@ function ReadyRail({
               evidences={keySceneRefs}
               activeEvidenceId={activeEvidenceId}
               onTraceEvidence={onTraceEvidence}
+              compact
             />
           ) : null}
 
@@ -565,7 +582,8 @@ function ReadyRail({
               activeEvidenceId={activeEvidenceId}
               onTraceEvidence={onTraceEvidence}
               grouped={false}
-              hint="前 5 个剧情抓手"
+              defaultLimit={3}
+              hint="剧情抓手"
             />
           ) : null}
         </>
@@ -1298,18 +1316,34 @@ function SectionHeader({
   )
 }
 
+/**
+ * 速览 Hero（30 秒判断）。
+ *
+ * 业内对照：抖音文心剧本助手 / Linear issue overview / Bloomberg equity research /
+ * Notion property header。共性 = Hero block（决策大字）→ KPI row（数字加粗）→
+ * 3 优 / 3 劣（左右分栏）。
+ *
+ * 当前实装层级（自顶向下）：
+ *   ① Hero 行：decision badge + 综合分大字 + 题材 chips
+ *   ② Logline：1 句标题
+ *   ③ Reason callout：decision.one_sentence_reason（带左侧色条）
+ *   ④ KPI row：4 个数字（人物 / 关键场 / 节拍 / 风险）
+ *   ⑤ Core value：核心价值一行（小字 + label）
+ *   ⑥ Strengths / Concerns：左右分栏，每条 ≤ 1 行 + tone icon
+ */
 function CoverageCardSection({
   coverage,
   decisionReason,
   overallScore,
+  kpis,
   evidenceBySceneId,
   activeEvidenceId,
   onTraceEvidence,
 }: {
   coverage: NonNullable<ScriptViewResponseDTO['coverage_card']>
-  // 顶部 hero 卡删除后下沉到这里：让 default segment（速览）依然能看到决策一句话和综合分。
   decisionReason: string | null
   overallScore: number | null
+  kpis: { characters: number; keyScenes: number; beats: number; risks: number }
   evidenceBySceneId: Map<string, EvidenceRefDTO>
   activeEvidenceId: string | null
   onTraceEvidence: Props['onTraceEvidence']
@@ -1317,14 +1351,20 @@ function CoverageCardSection({
   const info = DECISION_LABEL[coverage.recommendation] || { text: coverage.recommendation, color: 'default' }
   const overallColor =
     overallScore == null ? '#bfbfbf' : overallScore >= 7 ? '#52c41a' : overallScore >= 5 ? '#faad14' : '#ff4d4f'
-  const renderPoint = (point: { title: string; detail: string; anchor_scene_id?: string | null }, tone: 'good' | 'risk') => {
+
+  const renderPoint = (
+    point: { title: string; detail: string; anchor_scene_id?: string | null },
+    tone: 'good' | 'risk',
+  ) => {
     const evi = point.anchor_scene_id ? evidenceBySceneId.get(point.anchor_scene_id) : undefined
     const active = !!(evi && activeEvidenceId === evi.id)
     return (
       <button
         key={`${tone}:${point.title}:${point.anchor_scene_id || ''}`}
         type="button"
-        className={`${styles.actItem} ${active ? styles.actItemActive : ''}`}
+        className={`${styles.spcItem} ${tone === 'good' ? styles.spcGood : styles.spcRisk} ${
+          active ? styles.spcItemActive : ''
+        }`}
         onClick={() => {
           if (!evi) return
           onTraceEvidence({
@@ -1335,38 +1375,147 @@ function CoverageCardSection({
           })
         }}
       >
-        <Tag color={tone === 'good' ? 'green' : 'orange'}>{point.title}</Tag>
-        <span>{humanizeReportText(point.detail)}</span>
+        <span className={styles.spcTitle}>{point.title}</span>
+        <span className={styles.spcDetail}>{humanizeReportText(point.detail)}</span>
       </button>
     )
   }
+
+  const strengths = (coverage.strengths || []).slice(0, 3)
+  const concerns = (coverage.concerns || []).slice(0, 3)
+
   return (
-    <section className={styles.summarySection}>
+    <section className={styles.heroSection}>
       <SectionHeader title="30 秒判断" hint="先判断值不值得继续读" />
-      <div className={styles.headlineRow}>
-        <Tag color={info.color} className={styles.decisionTag}>{info.text}</Tag>
-        {coverage.genre?.slice(0, 3).map((g) => <Tag key={g}>{g}</Tag>)}
+
+      {/* ① Hero 行 */}
+      <div className={styles.heroRow}>
+        <div className={styles.heroLeft}>
+          <Tag color={info.color} className={styles.decisionTag}>{info.text}</Tag>
+          {coverage.genre?.slice(0, 3).map((g) => (
+            <Tag key={g} className={styles.heroGenreTag}>{g}</Tag>
+          ))}
+        </div>
         {overallScore != null ? (
-          <Tag color="blue" className={styles.overallScoreTag}>
-            综合 <span style={{ color: overallColor, fontWeight: 600 }}>{overallScore.toFixed(1)}</span> / 10
-          </Tag>
+          <div className={styles.heroScore}>
+            <span className={styles.heroScoreNum} style={{ color: overallColor }}>
+              {overallScore.toFixed(1)}
+            </span>
+            <span className={styles.heroScoreUnit}>/10</span>
+          </div>
         ) : null}
       </div>
-      <Paragraph className={styles.summaryText}>{humanizeReportText(coverage.logline)}</Paragraph>
+
+      {/* ② Logline */}
+      <Paragraph className={styles.heroLogline}>{humanizeReportText(coverage.logline)}</Paragraph>
+
+      {/* ③ Reason callout */}
       {decisionReason ? (
-        <Paragraph className={styles.oneLineReason}>{humanizeReportText(decisionReason)}</Paragraph>
+        <div className={styles.heroReasonCallout}>
+          <span className={styles.heroReasonText}>{humanizeReportText(decisionReason)}</span>
+        </div>
       ) : null}
-      {coverage.core_value ? (
-        <Paragraph className={styles.oneLineReason}>核心价值：{humanizeReportText(coverage.core_value)}</Paragraph>
-      ) : null}
-      <div className={styles.corePlotList}>
-        {coverage.strengths?.slice(0, 3).map((p) => renderPoint(p, 'good'))}
-        {coverage.concerns?.slice(0, 3).map((p) => renderPoint(p, 'risk'))}
+
+      {/* ④ KPI row */}
+      <div className={styles.heroKpiRow}>
+        <KpiCell num={kpis.characters} label="关键人物" />
+        <KpiCell num={kpis.keyScenes} label="关键场景" />
+        <KpiCell num={kpis.beats} label="故事节拍" />
+        <KpiCell num={kpis.risks} label="风险标签" tone={kpis.risks > 0 ? 'risk' : 'neutral'} />
       </div>
+
+      {/* ⑤ Core value */}
+      {coverage.core_value ? (
+        <div className={styles.heroCoreValue}>
+          <span className={styles.heroCoreValueLabel}>核心价值</span>
+          <span className={styles.heroCoreValueText}>{humanizeReportText(coverage.core_value)}</span>
+        </div>
+      ) : null}
+
+      {/* ⑥ Strengths / Concerns 左右分栏 */}
+      {(strengths.length > 0 || concerns.length > 0) ? (
+        <div className={styles.spcGrid}>
+          <div className={styles.spcCol}>
+            <div className={styles.spcColHeader}>
+              <span className={styles.spcDot} style={{ background: '#52c41a' }} />
+              <Text type="secondary" className={styles.spcColTitle}>亮点 {strengths.length}</Text>
+            </div>
+            {strengths.map((p) => renderPoint(p, 'good'))}
+          </div>
+          <div className={styles.spcCol}>
+            <div className={styles.spcColHeader}>
+              <span className={styles.spcDot} style={{ background: '#fa8c16' }} />
+              <Text type="secondary" className={styles.spcColTitle}>风险 {concerns.length}</Text>
+            </div>
+            {concerns.map((p) => renderPoint(p, 'risk'))}
+          </div>
+        </div>
+      ) : null}
     </section>
   )
 }
 
+function KpiCell({
+  num,
+  label,
+  tone = 'neutral',
+}: {
+  num: number
+  label: string
+  tone?: 'neutral' | 'risk'
+}) {
+  return (
+    <div className={styles.kpiCell}>
+      <span
+        className={styles.kpiNum}
+        style={{ color: tone === 'risk' && num > 0 ? '#cf1322' : '#3F3835' }}
+      >
+        {num}
+      </span>
+      <span className={styles.kpiLabel}>{label}</span>
+    </div>
+  )
+}
+
+/**
+ * 剧本概览：默认折叠（业内对照：Linear / GitHub PR summary / Notion toggle block）。
+ * 长散文不应在 30 秒判断面板首屏强塞——读者已经从 Hero / KPI / 优劣分栏获取了
+ * 决策所需的全部信号；3-5 句概要属于"想看才看"的二级信息。
+ */
+function CollapsibleSummary({ text }: { text: string }) {
+  const [open, setOpen] = useState(false)
+  return (
+    <section className={styles.summarySection}>
+      <button
+        type="button"
+        className={styles.collapseToggle}
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+      >
+        <Text strong className={styles.sectionTitle}>剧本概览</Text>
+        <Text type="secondary" className={styles.collapseHint}>
+          {open ? '收起' : '展开 · 3-5 句概要'}
+        </Text>
+      </button>
+      {open ? (
+        <Paragraph className={styles.summaryText} style={{ marginTop: 8 }}>
+          {text}
+        </Paragraph>
+      ) : null}
+    </section>
+  )
+}
+
+/**
+ * 故事骨架（三幕横向卡片 + 节拍 chip 点击展开 / 跳原文）。
+ *
+ * 业内对照：Final Draft Story Map / Save the Cat Beat Sheet /
+ * Sudowrite Manuscript Analysis / 抖音文心节拍图谱。共性 = 横向时间轴 > 纵向列表，
+ * 每幕一栏（开局 / 发展 / 收束），节拍 chip 点击展开详情或跳原文。
+ *
+ * 旧设计是纵向"幕标签 + 节拍按钮"列表（每节拍占一整行 = 7 行），扫一眼无法看清三幕骨架；
+ * 新设计三栏卡片 + chip 行让"看到三幕完整 / 看到每幕几个节拍"成为视觉一目了然。
+ */
 function BeatTimelineSection({
   acts,
   evidenceBySceneId,
@@ -1378,36 +1527,53 @@ function BeatTimelineSection({
   activeEvidenceId: string | null
   onTraceEvidence: Props['onTraceEvidence']
 }) {
+  // 节拍类型 → 中文标签 + 颜色（与 docs/05 §6 / docs/08 §3.1 五个关键节拍同步）
+  const BEAT_LABEL: Record<string, string> = {
+    opening: '开场',
+    inciting: '激励',
+    midpoint: '中点',
+    twist: '反转',
+    reward: '爽点',
+    climax: '高潮',
+    closing: '收束',
+  }
   return (
-    <section className={styles.corePlotSection}>
+    <section className={styles.beatSection}>
       <SectionHeader title="故事骨架" hint="三幕结构 + 关键节拍；点击节拍跳原文" />
-      <div className={styles.corePlotList}>
+      <div className={styles.beatActsRow}>
         {acts.map((act) => (
-          <div key={act.act} className={styles.actGroup}>
-            <Tag color="purple">第 {act.act} 幕 · {act.title}</Tag>
-            {act.beats.map((beat) => {
-              const evi = evidenceBySceneId.get(beat.anchor_scene_id)
-              const active = !!(evi && activeEvidenceId === evi.id)
-              return (
-                <button
-                  key={`${act.act}:${beat.type}:${beat.anchor_scene_id}`}
-                  type="button"
-                  className={`${styles.actItem} ${active ? styles.actItemActive : ''}`}
-                  onClick={() => {
-                    if (!evi) return
-                    onTraceEvidence({
-                      evidenceRefId: evi.id,
-                      sceneId: evi.scene_id,
-                      startLine: evi.start_line ?? null,
-                      endLine: evi.end_line ?? null,
-                    })
-                  }}
-                >
-                  <Tag color="geekblue">{beat.type}</Tag>
-                  <span>{humanizeReportText(beat.summary)}</span>
-                </button>
-              )
-            })}
+          <div key={act.act} className={styles.beatActCol}>
+            <div className={styles.beatActHeader}>
+              <Tag color="purple" className={styles.beatActTag}>
+                第 {act.act} 幕
+              </Tag>
+              <span className={styles.beatActTitle}>{act.title}</span>
+              <span className={styles.beatActCount}>{act.beats.length} 节拍</span>
+            </div>
+            <div className={styles.beatChipList}>
+              {act.beats.map((beat) => {
+                const evi = evidenceBySceneId.get(beat.anchor_scene_id)
+                const active = !!(evi && activeEvidenceId === evi.id)
+                const beatLabel = BEAT_LABEL[beat.type] || beat.type
+                return (
+                  <BeatChip
+                    key={`${act.act}:${beat.type}:${beat.anchor_scene_id}`}
+                    typeLabel={beatLabel}
+                    summary={humanizeReportText(beat.summary)}
+                    active={active}
+                    onTrace={() => {
+                      if (!evi) return
+                      onTraceEvidence({
+                        evidenceRefId: evi.id,
+                        sceneId: evi.scene_id,
+                        startLine: evi.start_line ?? null,
+                        endLine: evi.end_line ?? null,
+                      })
+                    }}
+                  />
+                )
+              })}
+            </div>
           </div>
         ))}
       </div>
@@ -1415,27 +1581,169 @@ function BeatTimelineSection({
   )
 }
 
+/**
+ * 节拍 chip：默认收起（type chip + ≤ 30 字一句话），点击展开详情或跳原文。
+ * 业内对照：Final Draft / Sudowrite 节拍点 click 行为。
+ */
+function BeatChip({
+  typeLabel,
+  summary,
+  active,
+  onTrace,
+}: {
+  typeLabel: string
+  summary: string
+  active: boolean
+  onTrace: () => void
+}) {
+  const [open, setOpen] = useState(false)
+  // summary 短就直接渲染（不需要展开）；长就一行省略 + 点击展开
+  const isLong = summary.length > 30
+  return (
+    <div className={`${styles.beatChip} ${active ? styles.beatChipActive : ''}`}>
+      <button
+        type="button"
+        className={styles.beatChipHead}
+        onClick={() => {
+          if (isLong) setOpen((v) => !v)
+          else onTrace()
+        }}
+      >
+        <Tag color="geekblue" className={styles.beatChipTypeTag}>
+          {typeLabel}
+        </Tag>
+        <span className={`${styles.beatChipSummary} ${open ? styles.beatChipSummaryFull : ''}`}>
+          {summary}
+        </span>
+      </button>
+      {isLong && open ? (
+        <button type="button" className={styles.beatChipJumpBtn} onClick={onTrace}>
+          跳原文 →
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+/**
+ * 节奏曲线（ECharts line chart）。
+ *
+ * 业内对照：YouTube Studio analytics / Bloomberg / Tableau 时序数据可视化 /
+ * 抖音文心剧本助手集数密度图谱。共性 = x 集数 / y 事件密度 / spike 标红 / hover 看具体值。
+ *
+ * 取代旧的"每集一行 Progress 条"——100 集 = 100 行的纵向列表无法表达整体趋势，
+ * 也无法快速定位 spike / 塌陷段。折线图自动 binning（ECharts dataZoom）可直接拖。
+ */
 function PacingCurveSection({
   points,
 }: {
   points: NonNullable<ScriptViewResponseDTO['pacing_curve']>
 }) {
   const maxEvent = Math.max(1, ...points.map((p) => p.event_count || 0))
+  // 平均值：让用户判断"低于 / 高于平均"
+  const avgEvent = points.length > 0
+    ? points.reduce((sum, p) => sum + (p.event_count || 0), 0) / points.length
+    : 0
+
+  // spike 阈值：取最大值的 70% 作为 spike 标记（与原 Progress 配色阈值一致）
+  const spikeThreshold = maxEvent * 0.7
+
+  // ECharts 数据
+  const xData = points.map((p) => `第 ${p.episode_no} 集`)
+  const yData = points.map((p) => p.event_count || 0)
+
+  // markPoint 高亮 spike（事件数 ≥ 70% maxEvent）
+  const spikeMarkPoints = points
+    .map((p, idx) => ({ p, idx }))
+    .filter(({ p }) => p.event_count >= spikeThreshold && p.event_count > 0)
+    .map(({ idx }) => ({ coord: [idx, yData[idx]] }))
+
+  const option = {
+    grid: { top: 28, right: 16, bottom: 36, left: 36, containLabel: true },
+    tooltip: {
+      trigger: 'axis' as const,
+      backgroundColor: '#FFFDFB',
+      borderColor: '#E8DDD3',
+      textStyle: { color: '#3F3835', fontSize: 12 },
+      formatter: (params: { name: string; value: number }[]) => {
+        if (!params || !params.length) return ''
+        const { name, value } = params[0]
+        const above = value > avgEvent ? '↑ 高于平均' : value < avgEvent ? '↓ 低于平均' : '= 平均'
+        const tag = value >= spikeThreshold && value > 0 ? '<span style="color:#cf1322">· spike</span>' : ''
+        return `${name}<br/>事件密度 <b>${value}</b> · ${above} ${tag}`
+      },
+    },
+    xAxis: {
+      type: 'category' as const,
+      data: xData,
+      axisLabel: { color: '#9C8E89', fontSize: 10, interval: Math.max(0, Math.floor(points.length / 12) - 1) },
+      axisLine: { lineStyle: { color: '#ECDFCE' } },
+      axisTick: { show: false },
+    },
+    yAxis: {
+      type: 'value' as const,
+      name: '事件密度',
+      nameTextStyle: { color: '#9C8E89', fontSize: 10 },
+      axisLabel: { color: '#9C8E89', fontSize: 10 },
+      axisLine: { show: false },
+      splitLine: { lineStyle: { color: '#F1ECE7', type: 'dashed' as const } },
+    },
+    series: [
+      {
+        type: 'line' as const,
+        data: yData,
+        smooth: true,
+        symbol: 'circle',
+        symbolSize: 4,
+        lineStyle: { color: '#E07A8C', width: 2 },
+        itemStyle: { color: '#E07A8C' },
+        areaStyle: {
+          color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+            { offset: 0, color: 'rgba(224, 122, 140, 0.25)' },
+            { offset: 1, color: 'rgba(224, 122, 140, 0.02)' },
+          ]),
+        },
+        markPoint: spikeMarkPoints.length > 0
+          ? {
+              symbol: 'pin',
+              symbolSize: 28,
+              data: spikeMarkPoints,
+              itemStyle: { color: '#cf1322' },
+              label: { color: '#FFF', fontSize: 10, formatter: (params: { value: number }) => `${params.value}` },
+            }
+          : undefined,
+        markLine: avgEvent > 0
+          ? {
+              silent: true,
+              symbol: 'none',
+              lineStyle: { color: '#B0A39E', type: 'dashed' as const, width: 1 },
+              label: {
+                position: 'end' as const,
+                formatter: `平均 ${avgEvent.toFixed(1)}`,
+                color: '#9C8E89',
+                fontSize: 10,
+              },
+              data: [{ yAxis: avgEvent }],
+            }
+          : undefined,
+      },
+    ],
+  }
+
   return (
     <section className={styles.highlightsSection}>
-      <SectionHeader title="节奏曲线" hint="每集事件密度 + 情绪起伏，帮助判断哪里拖、哪里抓人" />
-      <div className={styles.highlightItems}>
-        {points.slice(0, 30).map((p) => (
-          <div key={p.episode_no} className={styles.highlightRow}>
-            <div className={styles.highlightRowHead}>
-              <span className={styles.highlightLocator}>第 {p.episode_no} 集</span>
-              <Tag color={p.event_count >= maxEvent * 0.7 ? 'red' : p.event_count > 0 ? 'gold' : 'default'}>
-                事件 {p.event_count}
-              </Tag>
-            </div>
-            <Progress percent={Math.round((p.event_count / maxEvent) * 100)} showInfo={false} size="small" />
-          </div>
-        ))}
+      <SectionHeader
+        title="节奏曲线"
+        hint={`${points.length} 集 · spike ${spikeMarkPoints.length} 处 · 平均 ${avgEvent.toFixed(1)}`}
+      />
+      <div className={styles.pacingChartWrap}>
+        <ReactECharts
+          echarts={echarts}
+          option={option}
+          style={{ height: 220, width: '100%' }}
+          notMerge
+          lazyUpdate
+        />
       </div>
     </section>
   )
@@ -2258,6 +2566,18 @@ interface DimCardProps {
   onDispatchTask: (task: AgentTask) => void
 }
 
+/**
+ * 评估维度卡（可展开 · 业内对照见 docs/08 §3 + frontend evaluationRubric.ts）。
+ *
+ * 收起态（30 秒判断）：维度名 + 副标题 + 档位 tag + 分数大字 + reason 1 句 + 证据 chip
+ * 展开态（追问论据）：上面 + 完整 reason + Rubric 4 档表（高亮当前档）+ 证据列表完整版 + 追问 Agent
+ *
+ * 业内对照（rubric-based 评分卡片）：
+ *   - 学术 peer review (Elsevier / EditPro)：rubric 等级 + 评审意见 + 引用证据
+ *   - Coursera Smart Review / Khan Academy AI 评分：rubric tier + 改进建议
+ *   - Grammarly / DeepL Write："Why this rating?" 展开 + rubric + 重写
+ *   - Sudowrite Manuscript Analysis：每维 rubric 锚点 + 5 条证据
+ */
 function DimCard({
   item,
   evidenceMap,
@@ -2265,54 +2585,51 @@ function DimCard({
   onTraceEvidence,
   onDispatchTask,
 }: DimCardProps) {
+  const [expanded, setExpanded] = useState(false)
   const label = DIMENSION_LABELS[item.dimension] || item.dimension
-  const hint = DIMENSION_HINTS[item.dimension]
+  const meta = getDimensionMeta(item.dimension)
+  const subtitle = meta?.subtitle || DIMENSION_HINTS[item.dimension] || ''
   const isNoScore = item.score === null || item.score === undefined
   const evidences: EvidenceRefDTO[] = (item.evidence_ref_ids || [])
     .map((rid) => evidenceMap.get(rid))
     .filter((x): x is EvidenceRefDTO => x !== undefined)
 
+  const currentLevel = getRubricLevel(item.score)
+  const rubrics =
+    item.dimension in DIMENSION_RUBRICS ? DIMENSION_RUBRICS[item.dimension as DimensionKey] : []
+
+  // 收起态 reason 取首句；展开态显示全文（fail aloud：null 不渲染）
+  const reasonFirst = item.reason ? humanizeReportText(_firstSentence(item.reason, 120)) : ''
+  const reasonFull = item.reason ? humanizeReportText(item.reason) : ''
+
   return (
-    <div className={styles.dimCard}>
-      <div className={styles.dimCardHeader}>
-        <span className={styles.dimLabel}>
-          {label}
-          {hint ? <span className={styles.dimHint}>· {hint}</span> : null}
+    <div className={`${styles.dimCard} ${expanded ? styles.dimCardExpanded : ''}`}>
+      <button
+        type="button"
+        className={styles.dimCardHeaderBtn}
+        onClick={() => setExpanded((v) => !v)}
+        aria-expanded={expanded}
+      >
+        <span className={styles.dimHeaderLeft}>
+          <span className={styles.dimLabel}>{label}</span>
+          {subtitle ? <span className={styles.dimHint}>· {subtitle}</span> : null}
         </span>
-        <Space size={6} className={styles.dimRight}>
+        <span className={styles.dimHeaderRight}>
           {item.level ? (
             <Tag color={LEVEL_COLOR[item.level] || 'default'} className={styles.dimLevelTag}>
               {LEVEL_LABEL[item.level] || item.level}
             </Tag>
           ) : null}
-          <span className={styles.dimScore}>
-            {isNoScore ? '—' : `${item.score} / 10`}
-          </span>
-          <Tooltip title={`让 Agent 解释「${label}」为什么这么打分`}>
-            <Button
-              type="text"
-              size="small"
-              icon={<SearchOutlined />}
-              className={styles.dimInquiryBtn}
-              onClick={() =>
-                onDispatchTask({
-                  kind: 'dim_inquiry',
-                  dimension: item.dimension,
-                  current_score: item.score ?? null,
-                })
-              }
-            />
-          </Tooltip>
-        </Space>
-      </div>
+          <span className={styles.dimScore}>{isNoScore ? '—' : `${item.score} / 10`}</span>
+          <span className={styles.dimExpandIcon}>{expanded ? '▴' : '▾'}</span>
+        </span>
+      </button>
 
-      {item.reason ? (
-        <Paragraph className={styles.dimReason} ellipsis={{ rows: 3, expandable: true, symbol: '展开' }}>
-          {humanizeReportText(item.reason)}
-        </Paragraph>
+      {/* 收起态 reason 一句话 + 证据 chip 简版 */}
+      {!expanded && reasonFirst ? (
+        <div className={styles.dimReasonOneLine}>{reasonFirst}</div>
       ) : null}
-
-      {evidences.length > 0 && (
+      {!expanded && evidences.length > 0 ? (
         <div className={styles.evidenceList}>
           {evidences.slice(0, 5).map((ref) => (
             <EvidenceChip
@@ -2330,9 +2647,104 @@ function DimCard({
             />
           ))}
         </div>
-      )}
+      ) : null}
+
+      {/* 展开态 */}
+      {expanded ? (
+        <div className={styles.dimDetail}>
+          {/* Rubric 锚点表 */}
+          {rubrics.length > 0 ? (
+            <div className={styles.dimDetailBlock}>
+              <div className={styles.dimDetailLabel}>Rubric 锚点 · 当前 {TAG_RANGE[currentLevel]}</div>
+              <div className={styles.rubricList}>
+                {rubrics.map((r) => (
+                  <div
+                    key={r.level}
+                    className={`${styles.rubricRow} ${
+                      r.level === currentLevel ? styles.rubricRowActive : ''
+                    }`}
+                  >
+                    <Tag color={r.color} className={styles.rubricTag}>
+                      {r.range} · {r.tag}
+                    </Tag>
+                    <span className={styles.rubricSignals}>{r.signals.join(' / ')}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* 评分推理（完整 reason 不截断） */}
+          {reasonFull ? (
+            <div className={styles.dimDetailBlock}>
+              <div className={styles.dimDetailLabel}>评分推理</div>
+              <div className={styles.dimReasonFull}>{reasonFull}</div>
+            </div>
+          ) : null}
+
+          {/* 维度定义 + 信号源 */}
+          {meta ? (
+            <div className={styles.dimDetailBlock}>
+              <div className={styles.dimDetailLabel}>评分依据</div>
+              <ul className={styles.dimSignalList}>
+                {meta.signals.map((s) => (
+                  <li key={s}>{s}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+
+          {/* 证据列表完整版 */}
+          {evidences.length > 0 ? (
+            <div className={styles.dimDetailBlock}>
+              <div className={styles.dimDetailLabel}>证据 {evidences.length}</div>
+              <div className={styles.evidenceList}>
+                {evidences.map((ref) => (
+                  <EvidenceChip
+                    key={ref.id}
+                    evidence={ref}
+                    active={activeEvidenceId === ref.id}
+                    onTrace={() =>
+                      onTraceEvidence({
+                        evidenceRefId: ref.id,
+                        sceneId: ref.scene_id,
+                        startLine: ref.start_line ?? null,
+                        endLine: ref.end_line ?? null,
+                      })
+                    }
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          {/* 追问 Agent */}
+          <Button
+            size="small"
+            icon={<SearchOutlined />}
+            block
+            className={styles.dimInquiryFullBtn}
+            onClick={() =>
+              onDispatchTask({
+                kind: 'dim_inquiry',
+                dimension: item.dimension,
+                current_score: item.score ?? null,
+              })
+            }
+          >
+            追问 Agent · 「{label}」凭什么这么打分？
+          </Button>
+        </div>
+      ) : null}
     </div>
   )
+}
+
+const TAG_RANGE: Record<RubricLevel, string> = {
+  high: '9-10 · 优秀',
+  good: '6-8 · 良好',
+  medium: '3-5 · 中等',
+  low: '0-2 · 待改',
 }
 
 // === 合规审核独立卡片（docs/08 §4，与五力分离） ===
@@ -2452,10 +2864,13 @@ function KeyScenesSection({
   evidences,
   activeEvidenceId,
   onTraceEvidence,
+  compact = false,
 }: {
   evidences: EvidenceRefDTO[]
   activeEvidenceId: string | null
   onTraceEvidence: Props['onTraceEvidence']
+  /** 速览模式：单行紧凑（标题 + ≤30 字 + →）；故事 / 评估 segment 用完整 mode */
+  compact?: boolean
 }) {
   return (
     <section className={styles.mustReadSection}>
@@ -2463,12 +2878,13 @@ function KeyScenesSection({
         title="关键场景"
         hint={`Top ${evidences.length} · 点击跳原文`}
       />
-      <Space direction="vertical" size={6} style={{ width: '100%', marginTop: 8 }}>
+      <Space direction="vertical" size={compact ? 4 : 6} style={{ width: '100%', marginTop: 8 }}>
         {evidences.map((ref) => (
           <MustReadChip
             key={ref.id}
             evidence={ref}
             active={activeEvidenceId === ref.id}
+            compact={compact}
             onTrace={() =>
               onTraceEvidence({
                 evidenceRefId: ref.id,
@@ -2488,14 +2904,35 @@ function KeyScenesSection({
 function MustReadChip({
   evidence,
   active,
+  compact = false,
   onTrace,
 }: {
   evidence: EvidenceRefDTO
   active: boolean
+  compact?: boolean
   onTrace: () => void
 }) {
   const locator = formatSceneLocator(evidence.episode_no, evidence.scene_no, evidence.scene_label)
   const summary = evidence.scene_summary || evidence.quote || ''
+  if (compact) {
+    // 业内对照（Linear / Notion 关联条目 / Bloomberg related stories）：
+    // 速览的关键场景应是缩略（一行 = locator + ≤30 字一句话 + → 跳转），不是 mini 详情。
+    return (
+      <button
+        type="button"
+        className={`${styles.mustReadItemCompact} ${active ? styles.mustReadItemActive : ''}`}
+        onClick={onTrace}
+      >
+        <Tag color={active ? 'magenta' : 'purple'} className={styles.mustReadSceneTag}>
+          {locator || (evidence.scene_id || '').slice(0, 8)}
+        </Tag>
+        <span className={styles.mustReadQuoteCompact}>
+          {summary ? humanizeReportText(summary) : '（无场景摘要）'}
+        </span>
+        <span className={styles.mustReadArrow}>→</span>
+      </button>
+    )
+  }
   return (
     <button
       type="button"
@@ -2530,6 +2967,7 @@ function HighlightsSection({
   grouped,
   groups,
   hint,
+  defaultLimit,
 }: {
   highlights: HighlightDTO[]
   activeEvidenceId: string | null
@@ -2537,8 +2975,15 @@ function HighlightsSection({
   grouped: boolean
   groups?: HighlightGroup[]
   hint: string
+  /** 速览模式：默认只渲染 top-K，超出有"展开看全部"按钮（业内对照：Linear / GitHub PR） */
+  defaultLimit?: number
 }) {
+  const [expanded, setExpanded] = useState(false)
   if (!highlights.length) return null
+
+  const useLimit = !grouped && defaultLimit != null && defaultLimit > 0
+  const visible = useLimit && !expanded ? highlights.slice(0, defaultLimit) : highlights
+  const hiddenCount = useLimit && !expanded ? Math.max(highlights.length - defaultLimit, 0) : 0
 
   const renderRow = (h: HighlightDTO) => (
     <HighlightRow
@@ -2583,9 +3028,27 @@ function HighlightsSection({
             </div>
           ))
         ) : (
-          <div className={styles.highlightItems}>{highlights.map(renderRow)}</div>
+          <div className={styles.highlightItems}>{visible.map(renderRow)}</div>
         )}
       </div>
+      {hiddenCount > 0 ? (
+        <button
+          type="button"
+          className={styles.highlightExpandBtn}
+          onClick={() => setExpanded(true)}
+        >
+          看全部 {highlights.length} 个 ({hiddenCount} 个折叠中)
+        </button>
+      ) : null}
+      {useLimit && expanded ? (
+        <button
+          type="button"
+          className={styles.highlightExpandBtn}
+          onClick={() => setExpanded(false)}
+        >
+          收起
+        </button>
+      ) : null}
     </section>
   )
 }

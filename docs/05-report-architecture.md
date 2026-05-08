@@ -170,13 +170,13 @@ ReportPayload (v3) {
 
 ## 6. 前端 5 segment
 
-| segment | 数据 | 心智 | 主要交互 |
-|---|---|---|---|
-| **速览** | `coverage_card` + decision badge + `overall_score` + `decision.one_sentence_reason`（顶部 hero 删除后下沉）+ `character_graph` 缩略 + `pacing_curve` 缩略 | 30 秒决策 | 看 logline / 推荐 / 综合分 / 优劣 |
-| **故事** | `beat_sheet` + `pacing_curve` 完整（事件 + 情感弧） | 5 分钟读懂故事 | 点节拍 → 编辑器跳锚点场 + 持久高亮 |
-| **人物** | `character_graph` 完整（force-directed） | 5 分钟读懂人物 | 点节点 → 编辑器跳首场；点边 → 看共现场列表 |
-| **评估** | `evaluation` + `evidence_refs` + `compliance` + `risk_flags` | 诊断验证 | 点证据跳原文（改写候选已迁移到行动） |
-| **行动** | derived from 上述 + `rewrite_seeds` | 决策与执行 | 切 persona（编剧 / 选品 / 审核）；编剧卡内段级 / 全剧两档改写 dispatch（详见 [`10-rewrite-agent.md`](10-rewrite-agent.md)） |
+| segment | 数据 | 心智 | 主要交互 | 关键 UI 模式 |
+|---|---|---|---|---|
+| **速览** | `coverage_card` + decision badge + `overall_score` + `decision.one_sentence_reason`（顶部 hero 删除后下沉）+ `character_graph` 节点数 + `pacing_curve` spike 数 | 30 秒决策 | 看 logline / 推荐 / 综合分 / 优劣 | Hero block（决策 + 综合分大字）→ KPI row（人物 / 关键场 / 节拍 / 风险）→ Reason callout → 3 优 / 3 劣 **左右分栏** → 剧本概览 **折叠** → 关键场景 **缩略**（locator + 一句话 + →）→ 主要看点 **top-3 + 展开**。业内对照：抖音文心 / Linear / Bloomberg pitch deck |
+| **故事** | `beat_sheet` + `pacing_curve` 完整（事件 + 情感弧） | 5 分钟读懂故事 | 点节拍 chip 展开 / 跳原文；曲线 hover 看具体集 | 三幕**横向 3 栏卡片**（开局 / 发展 / 收束），节拍 chip 默认收起、长 summary 点击展开；节奏曲线**ECharts line chart**（spike 标红 + 平均线）。业内对照：Final Draft Story Map / Save the Cat / 抖音文心节拍图谱 / YouTube Studio analytics |
+| **人物** | `character_graph` 完整（force-directed） | 5 分钟读懂人物 | 点节点 → 编辑器跳首场；点边 → 看共现场列表 | (本期不动) |
+| **评估** | `evaluation` + `evidence_refs` + `compliance` + `risk_flags` | 诊断验证 + 论据展开 | 点证据跳原文；点维度卡 **展开**看 Rubric 锚点 + 完整 reason + 证据列表 + 追问 Agent | 维度卡**可展开**：收起态（label + score + 一句 reason + 证据 chip 缩略）/ 展开态（4 档 Rubric 表 + 当前档高亮 + 完整 reason + 信号源 + 全证据 + 追问 Agent 按钮）。Rubric 数据源 = `frontend/src/pages/doc-studio/evaluationRubric.ts`，与 `docs/08 §3` 双向同步。业内对照：Sudowrite / Coursera / Grammarly / 学术 peer review |
+| **行动** | derived from 上述 + `rewrite_seeds` | 决策与执行 | 切 persona（编剧 / 选品 / 审核）；编剧卡内段级 / 全剧两档改写 dispatch（详见 [`10-rewrite-agent.md`](10-rewrite-agent.md)） | 三 Persona segmented 切换（默认编剧）；编剧卡内 Hero "全剧改写计划" + 全部 rewrite_seeds 列表 |
 
 视角切换由「行动」segment 的 Persona Action Card 实装，`scorecard` 与 `must_read_scene_ids` 不按角色重排（详见 [`09-action-lens.md`](09-action-lens.md)）。顶部独立 hero alert 已删除——`decision badge` / `overall_score` / `one_sentence_reason` 三度重复信息归位到「速览 § 30 秒判断」卡。
 

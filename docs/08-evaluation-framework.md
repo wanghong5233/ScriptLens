@@ -208,14 +208,40 @@ budget = ceil_to_pow2(field_count × avg_field_tokens × safety_factor)
 | `frontend/src/pages/doc-studio/agentTask.ts` | 维度枚举 |
 | `frontend/src/pages/doc-studio/index.tsx` | DEFAULT_DASHSCOPE_MODEL=qwen-max-latest；删除 turbo/plus 选项 |
 
-## 8. 与旧文档的关系
+## 8. Rubric 数据存放位置
 
-- **本文 (`08-evaluation-framework.md`)** = v2 评估框架的权威源，对应代码中的 `_DIMENSIONS_FIVE`
+| 层 | 位置 | 责任 |
+|---|---|---|
+| 框架级（rubric 锚点表） | `frontend/src/pages/doc-studio/evaluationRubric.ts` 常量 + 本文 §3 | 不变的评分标准（5/7/9 分含义） |
+| 实例级（评分输出） | LLM 输出 `evaluation.dimensions[].{score, level, reason, evidence_ref_ids}` | 单次评估实例的产出 |
+
+**业内对照（rubric 前端常量化是主流）**：
+
+| 产品 | rubric 存放 | 理由 |
+|---|---|---|
+| Sudowrite Manuscript Analysis | 前端常量 + 文档 | 框架级稳定 |
+| Grammarly Tone / Confidence | i18n 资源 | 跨用户复用 |
+| Coursera Smart Review | 课程模板 JSON | 教师预定义 |
+| Elsevier / EditPro 学术评审 | 平台模板 | 期刊绑定 |
+| ESLint / SonarQube | 内置规则配置 | 工具一部分 |
+
+**切换到后端字段化的触发条件**（任一命中前不动）：
+
+1. rubric 进入 A/B 测试（不同实验组用不同档位定义）
+2. rubric 多语言化（中英 / 短剧 vs 长篇 / 不同行业）
+3. 单 workspace 自定义 rubric 需求 ≥ 5 起
+
+满足时迁移路径：在 `ReportPayload.evaluation.dimensions[].rubric` 加字段，由 LLM 输出或后端配置注入；前端 evaluationRubric.ts 退化为兜底默认。
+
+## 9. 与旧文档的关系
+
+- **本文 (`08-evaluation-framework.md`)** = v2 评估框架的权威源，对应代码中的 `_DIMENSIONS_FIVE` + 前端 `evaluationRubric.ts`
 - [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md) = v1 archive，保留行业调研部分（§1 / §2），档位表（§3）已被本文 §3 覆盖。后续 v3 调整时直接更新本文，不动 02
 - [`01-requirements.md`](01-requirements.md) §6 = 用户向需求陈述，文案同步本文五力词表
 - [`05-report-architecture.md`](05-report-architecture.md) §6 = 前端 segment 结构契约，五力词表同步
+- `frontend/src/pages/doc-studio/evaluationRubric.ts` = 前端 rubric 常量，与本文 §3 双向同步：改任意一边时另一边必须跟改
 
-## 9. 演进路径
+## 10. 演进路径
 
 v2 → v3 的可能方向（不在本期）：
 
