@@ -1344,17 +1344,15 @@
     overflow: hidden;
   }
 
-  // ==================== 编剧卡 hero + 段级列表 ====================
-  // 详见 docs/10-rewrite-agent.md §4
-  // hero = 全剧改写计划 primary 入口（治本，业内 Plan-then-Execute 范式）
-  // 段级列表 = rewrite_seeds 完整渲染（治标，不限 3 条）
-  // 旧 RewriteSeedCard 已被 WriterSeedRow 取代，相关 .seedCard / .seedHeader /
-  // .seedActions 一同移除；.seedDimTag / .seedScene / .seedIssue 保留给新 row 复用。
+  // ==================== 编剧卡 全剧维度改写 ====================
+  // docs/10-rewrite-agent.md §5：A 一键五维度 + B 五维度独立按钮
+  // 段级精修（rewrite_seed / WriterSeedRow / RewriteSeedCard / .seedCard /
+  // .seedActions / .badgeIdle / .badgeAccepted 等）已整段下线。
 
   .writerHero {
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
     padding: 12px 12px 10px;
     background: linear-gradient(135deg, #FFF6E6 0%, #FFE8D6 100%);
     border: 1px solid #F2D9B8;
@@ -1374,12 +1372,6 @@
     line-height: 1.4;
   }
 
-  .writerHeroDims {
-    font-size: 11.5px;
-    color: #7A6A5C;
-    line-height: 1.45;
-  }
-
   .writerHeroBtn {
     height: 34px;
     font-weight: 500;
@@ -1391,73 +1383,71 @@
     line-height: 1.45;
   }
 
-  .writerSeedList {
+  .writerDimGrid {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    margin-top: 6px;
+    margin-top: 8px;
     padding-top: 8px;
     border-top: 1px dashed #F1ECE7;
   }
 
-  .writerSeedListLabel {
+  .writerDimGridLabel {
     font-size: 11.5px;
     color: #9C8E89;
     line-height: 1.5;
   }
 
-  .writerSeedListEmpty {
-    margin-top: 6px;
-    padding: 10px 12px;
-    background: #F8F4F0;
-    border: 1px dashed #ECE0D6;
-    border-radius: 8px;
-    font-size: 12px;
-    color: #6E5F58;
-    line-height: 1.5;
-  }
-
-  .writerSeedRow {
-    background: #FFF7EE;
-    border: 1px solid #F2E7D7;
-    border-radius: 8px;
-    padding: 8px 10px;
-    display: flex;
-    flex-direction: column;
+  .writerDimButtons {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
     gap: 6px;
   }
 
-  .writerSeedRowHeader {
+  .writerDimBtn {
     display: flex;
-    justify-content: space-between;
     align-items: center;
-    gap: 8px;
-  }
-
-  .seedDimTag {
-    margin: 0;
-  }
-
-  .seedScene {
-    font-size: 12px;
-    color: #6E5F58;
-  }
-
-  .seedIssue {
+    justify-content: space-between;
+    height: 32px;
+    padding: 0 10px;
+    border-radius: 8px;
     font-size: 12.5px;
     color: #3F3835;
-    line-height: 1.55;
+    background: #FFFCF7;
+    border-color: #F1ECE7;
+
+    &:hover {
+      color: #C77642 !important;
+      border-color: #F2D9B8 !important;
+      background: #FFF6E6 !important;
+    }
   }
 
-  .badgeIdle {
-    background: #EEEAE6;
-    color: #9C8E89;
-    border-color: #E5DED7;
-    margin: 0;
+  .writerDimBtnWeak {
+    color: #C77642;
+    border-color: #F2D9B8;
+    background: #FFF6E6;
   }
 
-  .badgeAccepted {
-    margin: 0;
+  .writerDimBtnLabel {
+    font-weight: 500;
+  }
+
+  .writerDimBtnScore {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11.5px;
+    color: #6E5F58;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .writerDimBtnDot {
+    display: inline-block;
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: #E07A8C;
   }
 
   // ==================== 底部清除高亮按钮 ====================

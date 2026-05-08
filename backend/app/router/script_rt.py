@@ -58,6 +58,8 @@ from schemas.script import (
     RevertOperationResponse,
     RewriteRequest,
     RewriteResponse,
+    SceneContentUpdateRequest,
+    SceneContentUpdateResponse,
     ScriptDeleteResponse,
     SceneItem,
     ScriptChatRequest,
@@ -86,6 +88,7 @@ from service.script_query_service import (
     get_script_status,
     list_scenes,
     list_user_scripts,
+    update_scene_text,
 )
 from service.script_report_service import generate_report
 from utils.database import get_db
@@ -304,6 +307,36 @@ def get_script_scenes(
         total=len(rows),
         scenes=[SceneItem(**r) for r in rows],
     )
+
+
+@router.put(
+    "/{script_id}/scenes/{scene_id}/content",
+    response_model=SceneContentUpdateResponse,
+    summary="写回场景全文（AgentDiffReview reject hunk 路径用）",
+    description=(
+        "前端 updateFileContent(path=scene_id) 走本端点直接 UPDATE scriptlens.scenes.text。"
+        "与 LaTeX 工作区写磁盘对称，承接 docs/10-rewrite-agent.md §6 diff 透明迁移机制。"
+        "权限：必须是当前用户的剧本（404 / 越权统一报 not_found）。"
+    ),
+)
+def put_scene_content(
+    script_id: str,
+    scene_id: str,
+    payload: SceneContentUpdateRequest,
+    current_user: User = Depends(get_current_user),
+) -> SceneContentUpdateResponse:
+    try:
+        result = update_scene_text(
+            script_id=script_id,
+            scene_id=scene_id,
+            user_id=current_user.id,
+            content=payload.content,
+        )
+    except ScriptNotFoundError:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本或场景不存在")
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+    return SceneContentUpdateResponse(**result)
 
 
 @router.get(

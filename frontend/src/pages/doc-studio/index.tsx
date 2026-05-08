@@ -68,7 +68,9 @@ import {
   buildPromptFromTask,
   highlightLineRange,
   type AgentTask,
+  type DimensionKey,
 } from './agentTask'
+import { RewritePlanCard, type RewritePlanData } from './RewritePlanCard'
 import { SCRIPTLENS_LIGHT_THEME } from './monacoTheme'
 import { ChatMarkdown } from '@/components/markdown/ChatMarkdown'
 import Recorder from '@/components/sender/recorder'
@@ -1262,6 +1264,14 @@ const LatexEditorPage = () => {
   const diffHunkDecorationsRef = useRef<string[]>([])
   const agentDiffReviewRef = useRef<AgentDiffReviewRef | null>(null)
   const diffEditorListenerRef = useRef<Array<{ dispose: () => void }>>([])
+  // fe_rescore_hook（docs/10-rewrite-agent.md §7）：dispatch fulltext_rewrite execute 时
+  // 把待评分维度记进来；最后一个 hunk 被 keep（closeDiffModal 走 contentByPath 分支）后
+  // 自动追发一条 rescore 用户消息。reject all 路径不触发；reset 在 close 之后。
+  const pendingRescoreRef = useRef<DimensionKey[] | null>(null)
+  // closeDiffModal 在文件靠后位置定义，但需要回调 dispatchAgentTask；用 ref 解循环依赖。
+  const dispatchAgentTaskRef = useRef<
+    ((task: AgentTask, options?: { autoSubmit?: boolean }) => Promise<void>) | null
+  >(null)
   const asyncRunResolvedRef = useRef(false)
   const liveDeltaStartedRef = useRef(false)
   const activeRunIdRef = useRef<string | null>(null)
@@ -2719,15 +2729,20 @@ const LatexEditorPage = () => {
   }, [snap.workspaceId, clearEvidenceTrace])
 
   /**
-   * 任务派发器（仅用于 rewrite_seed / dim_inquiry；evidence_lookup 改走 traceEvidence）。
+   * 任务派发器：4 类 AgentTask（evidence_lookup / dim_inquiry / fulltext_rewrite / rescore）。
    *
-   * 协议详见 docs/03-system-mental-model.md §6 §7：
-   *   1. openFile(scene_id) → revealLines(start_line, end_line) → Monaco 行级高亮 3s 淡出
-   *   2. 切右栏 tab 到 'chat'
-   *   3. composer 注入 prompt + <TASK_META> JSON（不自动 send，让用户检查 / 追加偏好）
+   * - evidence_lookup → 走 traceEvidence（只跳原文，不派 Agent）
+   * - dim_inquiry / fulltext_rewrite / rescore → 切 chat tab + 注入 prompt + 可选 autoSubmit
+   *
+   * options.autoSubmit:
+   *   - true  → 不污染 composer，直接走 handleSend({overridePrompt})；
+   *             供 RewritePlanCard 点「执行」、AgentDiffReview accept all 后 rescore hook 用
+   *   - false（默认）→ 注入 composer 让用户检查 / 追加偏好后手动发
+   *
+   * 协议详见 docs/03-system-mental-model.md §6 §7。
    */
   const dispatchAgentTask = useCallback(
-    async (task: AgentTask) => {
+    async (task: AgentTask, options: { autoSubmit?: boolean } = {}) => {
       const workspaceId = docStudioState.workspaceId
       if (!workspaceId) {
         message.warning('请先选择剧本工作区')
@@ -2748,7 +2763,20 @@ const LatexEditorPage = () => {
 
       setRightTab('chat')
       const promptText = buildPromptFromTask(task)
-      setPrompt(promptText)
+
+      // fe_rescore_hook：fulltext_rewrite execute 派发的同时记下待评分维度，
+      // 等 keep 全部 hunk 后由 closeDiffModal 自动派发 rescore（无须再让用户手点）。
+      if (task.kind === 'fulltext_rewrite' && task.mode === 'execute') {
+        const dims = (task.dimensions || []).filter(Boolean)
+        pendingRescoreRef.current = dims.length > 0 ? dims : null
+      }
+
+      if (options.autoSubmit) {
+        // 不动 composer，直接发；用户在 chat 流里看到自己派出去的简短消息（包含 TASK_META）
+        void handleSend({ overridePrompt: promptText, clearComposer: false })
+      } else {
+        setPrompt(promptText)
+      }
 
       const sceneId = (task as { scene_id?: string }).scene_id
       if (!sceneId) return
@@ -2801,6 +2829,12 @@ const LatexEditorPage = () => {
     },
     [openFile, setRightTab, setPrompt, traceEvidence],
   )
+
+  // 把最新一份 dispatchAgentTask 注入 ref，供 closeDiffModal 等"先定义后调用"
+  // 的回调反向引用，避免 useCallback 循环依赖。
+  useEffect(() => {
+    dispatchAgentTaskRef.current = dispatchAgentTask
+  }, [dispatchAgentTask])
 
 
   const loadWorkspaceChatHistory = useCallback(
@@ -5613,6 +5647,27 @@ const LatexEditorPage = () => {
           void openFile(p, true)
         }
       })
+
+      // fe_rescore_hook：keep 路径会带 contentByPath（reject 路径不带）；
+      // 全部 keep 完毕（最后一个 hunk close）才触发 rescore，避免在 reject 时误派发。
+      const isKeepPath = !!contentByPath && Object.keys(contentByPath).length > 0
+      const pendingDims = pendingRescoreRef.current
+      if (isKeepPath && pendingDims && pendingDims.length > 0) {
+        pendingRescoreRef.current = null
+        // 微延迟一帧，确保 setFileContent / closeDiffModal 同步状态都落地后再 send
+        window.setTimeout(() => {
+          void dispatchAgentTaskRef.current?.(
+            {
+              kind: 'rescore',
+              dimensions: pendingDims,
+            },
+            { autoSubmit: true },
+          )
+        }, 0)
+      } else if (!isKeepPath) {
+        // reject 路径：不重评，但要清掉 pending，避免下次 keep 误触发。
+        pendingRescoreRef.current = null
+      }
     const diffEditor = diffEditorRef.current
     const modifiedEditor =
       diffEditor && typeof diffEditor.getModifiedEditor === 'function'
@@ -6255,6 +6310,24 @@ const LatexEditorPage = () => {
           (response.changes && response.changes.length > 0),
       )
       const isFileOpIntent = String(response.intent_type || '').toLowerCase() === 'file_op'
+
+      // docs/10-rewrite-agent.md §5：从 execution_history 提取 plan tree，
+      // 让 RewritePlanCard 在该 agent 消息里渲染（chat 流原地展示，不切 modal）。
+      // 用 reverse 找最新一条 mode='plan' 的工具结果，避免连续 plan 时取到旧的。
+      let rewritePlan: RewritePlanData | null = null
+      const history = response.execution_history || []
+      for (let i = history.length - 1; i >= 0; i -= 1) {
+        const step = history[i] as any
+        if (step?.tool !== 'propose_dimension_rewrite_tool') continue
+        const data = step?.result?.data
+        if (!data || data.mode !== 'plan') continue
+        const planRaw = data.rewrite_plan
+        if (planRaw && Array.isArray(planRaw.steps)) {
+          rewritePlan = planRaw as RewritePlanData
+          break
+        }
+      }
+
       pushChatMessage({
         role: 'agent',
         content: response.execution_history?.[response.execution_history.length - 1]?.content
@@ -6264,6 +6337,7 @@ const LatexEditorPage = () => {
           changes: response.changes,
           traceId: response.trace_id || traceId,
           operationId,
+          rewritePlan,
         },
       })
       docStudioActions.setExecutionHistory(response.execution_history)
@@ -7156,6 +7230,47 @@ const LatexEditorPage = () => {
                 plan: payload.plan,
               })
             }
+            // Bug 5 兜底（被 LLM 拒答 / 后端拦截后 result 事件不来导致 spinner 永转）：
+            // finish 后 8s 仍未收到 result，主动 status polling 一次取最终态；
+            // 若已经是 succeeded / failed / cancelled 则立即收敛 chatLoading，不再死等。
+            window.setTimeout(() => {
+              if (asyncRunResolvedRef.current) return
+              void (async () => {
+                try {
+                  const snapshot = await fetchAgentRunStatus(
+                    {
+                      workspaceId: snap.workspaceId,
+                      runId: asyncResult.runId,
+                    },
+                    { loading: false, errorToast: false },
+                  )
+                  if (asyncRunResolvedRef.current) return
+                  if (snapshot?.status === 'succeeded' && snapshot.result) {
+                    asyncRunResolvedRef.current = true
+                    await handleAgentResponse(snapshot.result, traceId)
+                    closeAsyncStream()
+                  } else if (snapshot?.status === 'failed') {
+                    asyncRunResolvedRef.current = true
+                    const errText = snapshot.error || '执行失败'
+                    message.error(errText)
+                    setLiveAgentStatus('任务执行失败')
+                    activeRunIdRef.current = null
+                    pendingSendRef.current = null
+                    setChatLoading(false)
+                    closeAsyncStream()
+                  } else if (snapshot?.status === 'cancelled') {
+                    asyncRunResolvedRef.current = true
+                    setLiveAgentStatus('任务已取消')
+                    activeRunIdRef.current = null
+                    pendingSendRef.current = null
+                    setChatLoading(false)
+                    closeAsyncStream()
+                  }
+                } catch (error) {
+                  console.warn('finish-fallback polling failed', error)
+                }
+              })()
+            }, 8000)
           } catch (error) {
             console.warn('Failed to parse finish event', error)
           }
@@ -8782,6 +8897,23 @@ const LatexEditorPage = () => {
                                       {displayContent}
                                     </ChatMarkdown>
                                   </div>
+                                  {msg.meta?.rewritePlan ? (
+                                    <RewritePlanCard
+                                      plan={msg.meta.rewritePlan as RewritePlanData}
+                                      executed={!!msg.meta?.rewritePlanExecuted}
+                                      onTraceScene={(sceneId) => {
+                                        void openFile(sceneId, false, true)
+                                      }}
+                                      onDispatchExecute={(task) => {
+                                        // 与 RewritePlanCard 契约：父级负责 autoSubmit + 标记 executed，
+                                        // 防止用户在同一计划卡上重复点击。
+                                        docStudioActions.updateMessageMeta(msg.id, {
+                                          rewritePlanExecuted: true,
+                                        })
+                                        void dispatchAgentTask(task, { autoSubmit: true })
+                                      }}
+                                    />
+                                  ) : null}
                                   <div className="doc-studio__chat-feedback">
                                     <Tooltip title="复制回答">
                                       <Button
@@ -9305,7 +9437,7 @@ const LatexEditorPage = () => {
                       activeEvidenceId={activeEvidenceId}
                       onTraceEvidence={traceEvidence}
                       onClearTrace={clearEvidenceTrace}
-                      onDispatchTask={dispatchAgentTask}
+                      onDispatchTask={(task) => dispatchAgentTask(task, { autoSubmit: true })}
                       onScriptDetailLoaded={handleScriptDetailLoaded}
                     />
                   ) : (

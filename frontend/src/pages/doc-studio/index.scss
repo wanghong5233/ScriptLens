@@ -2598,3 +2598,156 @@
   width: 3px !important;
   margin-left: 2px;
 }
+
+/* ============================================================
+   RewritePlanCard —— chat 流内嵌全剧改写计划卡
+   - 出现位置：agent 消息 ChatMarkdown 之后、feedback 工具栏之前
+   - 视觉走莫兰迪暖灰 + 浅金描边，与 evidence 高亮（暖黄）形成同系色谱
+   - 不引入新组件库；只用 antd Button/Checkbox/Tag/Typography
+   ============================================================ */
+.rewrite-plan-card {
+  margin-top: 12px;
+  padding: 12px 14px 10px;
+  background: #FBF7F2;
+  border: 1px solid #E5DACA;
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  &--empty {
+    padding: 16px 14px;
+    align-items: center;
+  }
+
+  &__header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  &__icon {
+    color: #B8860B;
+  }
+
+  &__title {
+    font-size: 14px;
+    color: #5D4E3C;
+  }
+
+  &__dim-tag {
+    margin-inline-end: 0;
+  }
+
+  &__count {
+    font-size: 12px;
+    color: #9C8E89;
+  }
+
+  &__summary {
+    margin: 0 !important;
+    padding: 8px 10px;
+    font-size: 13px;
+    color: #5D4E3C;
+    background: #FFFDF8;
+    border-left: 3px solid #D4AF37;
+    border-radius: 4px;
+    line-height: 1.6;
+  }
+
+  &__toolbar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 0 0;
+    border-top: 1px dashed #E5DACA;
+    padding-top: 8px;
+  }
+
+  &__steps {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  &__step {
+    padding: 10px 12px;
+    background: #FFFFFF;
+    border: 1px solid #EDE3D2;
+    border-radius: 6px;
+    transition: opacity 0.15s ease, border-color 0.15s ease;
+
+    &--off {
+      opacity: 0.55;
+      border-style: dashed;
+    }
+  }
+
+  &__step-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 8px;
+  }
+
+  &__step-check {
+    flex: 1 1 auto;
+    min-width: 0;
+  }
+
+  &__step-locator {
+    font-size: 13px;
+    color: #4A3D2E;
+  }
+
+  &__step-dim {
+    margin-inline-end: 0;
+    font-size: 11px;
+  }
+
+  &__step-rationale,
+  &__step-excerpt {
+    margin-top: 6px;
+    display: flex;
+    gap: 6px;
+    align-items: flex-start;
+    font-size: 12.5px;
+    line-height: 1.55;
+  }
+
+  &__step-label {
+    flex: 0 0 56px;
+    font-size: 11px;
+    color: #9C8E89;
+    padding-top: 1px;
+  }
+
+  &__step-text {
+    flex: 1 1 auto;
+    color: #5D4E3C;
+    word-break: break-word;
+  }
+
+  &__step-excerpt-text {
+    flex: 1 1 auto;
+    color: #7A6D5A;
+    font-style: italic;
+    word-break: break-word;
+  }
+
+  &__actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding-top: 8px;
+    border-top: 1px dashed #E5DACA;
+    flex-wrap: wrap;
+  }
+
+  &__actions-hint {
+    font-size: 12px;
+    color: #9C8E89;
+  }
+}

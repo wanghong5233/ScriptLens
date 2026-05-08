@@ -72,8 +72,6 @@ import {
   type EvidenceRefDTO,
   type HighlightDTO,
   type HighlightType,
-  type RewriteSeedDTO,
-  type RewriteTaskStatusDTO,
   type ScorecardItemDTO,
   type ScriptViewResponseDTO,
 } from '@/api/docStudio'
@@ -214,7 +212,7 @@ interface Props {
   }) => void | Promise<void>
   /** 显式取消溯源（清掉编辑器持久高亮） */
   onClearTrace: () => void
-  /** 派 Agent：仅 rewrite_seed / dim_inquiry 走这条 */
+  /** 派 Agent：fulltext_rewrite / dim_inquiry / evidence_lookup 走这条 */
   onDispatchTask: (task: AgentTask) => void
   /** 把右栏拉到的新鲜 status 同步回 doc-studio 主区，避免两边状态显示错位。 */
   onScriptDetailLoaded?: (detail: ScriptDetailStatus) => void
@@ -986,140 +984,128 @@ function SelectionActionCard({
 }
 
 /**
- * 编剧卡：双层结构（hero 全剧入口 + 段级精修列表）。
+ * 编剧卡：全剧维度改写主控（A 一键 + B 五维度，docs/10-rewrite-agent.md §5）。
  *
- * 设计动因（详见 docs/10-rewrite-agent.md §1-2）：
- * - 短剧痛点为结构性（钩子密度 / 反转齐 / 节奏方差），段级精修治标，全剧 plan 治本
- * - 业内对照：Cursor Composer / Copilot Workspace / 抖音文心剧本助手 全采 Plan-then-Execute
- * - hero 入口 primary 治本，段级列表保留治标路径，两块同屏不切 tab
- *
- * Step 1（本版）：hero 按钮 stub，提示 Step 2 上线全剧 plan-execute；
- * 段级 rewrite_seed dispatch 时填完整 brief（题材 / 综合分 / 决策 / 维度评分 / 原文 quote）。
+ * 设计动因（业内对照 Cursor Composer / Copilot Workspace / 抖音文心剧本助手）：
+ * - 段级精修治标不治本——短剧痛点是结构性，**已整段移除**
+ * - 改为维度级全剧改写：A 模式（五维一键）端到端，B 模式（单维度按钮）精细化
+ * - 用户点击 → fulltext_rewrite kind / mode='plan' 派 Agent；Agent 调
+ *   propose_dimension_rewrite_tool 出 plan tree，由 chat 内 RewritePlanCard 渲染让用户审 / 勾选；
+ *   用户在 plan card 点「执行」→ 派 mode='execute' → Agent 写 DB → file_diffs 给 AgentDiffReview。
+ * - 用户消息只发简短意图（一行），800 字 brief 完全后端化，避免 chat 被 prompt 噪声淹没。
  */
 function WriterActionCard({
   view,
-  evidenceMap,
-  activeEvidenceId,
-  onTraceEvidence,
   onDispatchTask,
   onSwitchMode,
 }: ActionSegmentProps) {
-  const seeds = view.rewrite_seeds || []
-  const seedCount = seeds.length
-
-  const badge = seedCount >= 5 ? `${seedCount} 段需重写` : seedCount >= 1 ? `${seedCount} 段建议优化` : '整体可保留'
-  const badgeColor = seedCount >= 5 ? 'red' : seedCount >= 1 ? 'orange' : 'green'
-
-  // 五力短板 = 最低 2 维（< 6 才算短板，否则不显示）
-  const weakDims = useMemo(() => {
-    return [...view.scorecard]
-      .filter((s) => s.score != null && s.score < 6)
-      .sort((a, b) => (a.score ?? 99) - (b.score ?? 99))
-      .slice(0, 3)
+  // 五力短板（< 7 算短板，业内 7 分线：docs/08 §3）。
+  // 合规审核（compliance）独立字段不在 scorecard，不参与改写。
+  const weakDimSet = useMemo(() => {
+    const out = new Set<DimensionKey>()
+    for (const sc of view.scorecard) {
+      if (sc.score != null && sc.score < 7) out.add(sc.dimension)
+    }
+    return out
   }, [view.scorecard])
 
-  const lowest = weakDims[0]
+  const scoreByDim = useMemo(() => {
+    const out: Partial<Record<DimensionKey, number | null>> = {}
+    for (const sc of view.scorecard) {
+      out[sc.dimension] = sc.score ?? null
+    }
+    return out
+  }, [view.scorecard])
 
-  // 全剧基调（拼 rewrite_seed brief 用）
-  const decisionLabel = DECISION_LABEL[view.decision.label]?.text ?? view.decision.label
-  const genre = view.coverage_card?.genre ?? null
-  const overallScore = view.overall_score ?? null
+  const weakCount = weakDimSet.size
+  const badge =
+    weakCount >= 3 ? `${weakCount} 维待改` : weakCount >= 1 ? `${weakCount} 维短板` : '整体已稳'
+  const badgeColor = weakCount >= 3 ? 'red' : weakCount >= 1 ? 'orange' : 'green'
 
-  // 派发段级改写：填完整 brief（业内共识，详见 docs/10 §3）
-  const dispatchSeed = useCallback(
-    (seed: RewriteSeedDTO) => {
-      const ref = evidenceMap.get(seed.evidence_ref_id)
-      const sc = view.scorecard.find((s) => s.dimension === seed.dimension)
+  const lowest = useMemo(() => {
+    let best: { dim: DimensionKey; score: number } | null = null
+    for (const sc of view.scorecard) {
+      if (sc.score == null) continue
+      if (best == null || sc.score < best.score) {
+        best = { dim: sc.dimension, score: sc.score }
+      }
+    }
+    return best
+  }, [view.scorecard])
+
+  // A 模式：五维度一键 plan（全剧覆盖五力短板候选场，端到端）
+  const handleAllInOnePlan = useCallback(() => {
+    onDispatchTask({
+      kind: 'fulltext_rewrite',
+      mode: 'plan',
+      dimensions: FIVE_DIMENSIONS,
+    })
+  }, [onDispatchTask])
+
+  // B 模式：单维度 plan（精细化，只针对该维度的候选场）
+  const handleDimPlan = useCallback(
+    (dim: DimensionKey) => {
       onDispatchTask({
-        kind: 'rewrite_seed',
-        dimension: seed.dimension,
-        scene_id: seed.scene_id,
-        scene_label: seed.scene_label ?? null,
-        issue: humanizeReportText(seed.issue),
-        evidence_ref_id: seed.evidence_ref_id,
-        score: sc?.score ?? null,
-        dim_reason: sc?.reason ? humanizeReportText(_firstSentence(sc.reason, 200)) : null,
-        quote: ref?.quote ?? null,
-        episode_no: ref?.episode_no ?? null,
-        scene_no: ref?.scene_no ?? null,
-        genre,
-        overall_score: overallScore,
-        decision_label: decisionLabel,
+        kind: 'fulltext_rewrite',
+        mode: 'plan',
+        dimensions: [dim],
       })
     },
-    [evidenceMap, view.scorecard, onDispatchTask, genre, overallScore, decisionLabel],
+    [onDispatchTask],
   )
-
-  // 全剧改写计划：Step 2 路线，详见 docs/10 §5；本版按钮先 stub 提示
-  const handleFulltextPlan = useCallback(() => {
-    message.info({
-      content: '全剧改写计划 · Plan-then-Execute 版本即将上线（详见 docs/10-rewrite-agent.md §5）',
-      duration: 4,
-    })
-  }, [])
 
   return (
     <div className={styles.actionCard}>
       <div className={styles.actionCardHeader}>
-        <Text strong className={styles.actionCardTitle}>编剧 · 改哪段</Text>
+        <Text strong className={styles.actionCardTitle}>编剧 · 全剧改写</Text>
         <Tag color={badgeColor} className={styles.actionCardBadge}>{badge}</Tag>
       </div>
 
-      {/* Hero · 全剧改写计划入口（治本） */}
+      {/* A 模式：五维度一键 plan */}
       <div className={styles.writerHero}>
         <div className={styles.writerHeroHeader}>
-          <Text strong className={styles.writerHeroTitle}>全剧改写计划</Text>
-          {weakDims.length > 0 ? (
-            <Text type="secondary" className={styles.writerHeroDims}>
-              五力短板 ·{' '}
-              {weakDims.map((d, i) => (
-                <span key={d.dimension}>
-                  {i > 0 ? ' / ' : ''}
-                  {DIMENSION_LABELS[d.dimension] || d.dimension} {d.score}
-                </span>
-              ))}
-            </Text>
-          ) : null}
+          <Text strong className={styles.writerHeroTitle}>一键五维度改写</Text>
+          <Text type="secondary" className={styles.writerHeroHint}>
+            端到端 · plan → 审阅 → execute → 重评分
+          </Text>
         </div>
         <Button
           type="primary"
           icon={<ThunderboltOutlined />}
-          onClick={handleFulltextPlan}
+          onClick={handleAllInOnePlan}
           className={styles.writerHeroBtn}
           block
         >
-          让 Agent 出改写计划
+          按五力短板出全剧改写计划
         </Button>
-        <Text type="secondary" className={styles.writerHeroHint}>
-          Plan-then-Execute · 基于五力评分逐步改造（业内对照：Cursor Composer / 抖音文心剧本助手）
-        </Text>
       </div>
 
-      {/* 段级精修列表（治标，不限 3 条） */}
-      {seedCount > 0 ? (
-        <div className={styles.writerSeedList}>
-          <Text type="secondary" className={styles.writerSeedListLabel}>
-            或者，按段精修（共 {seedCount} 段）
-          </Text>
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
-            {seeds.map((seed) => (
-              <WriterSeedRow
-                key={`${seed.scene_id}:${seed.dimension}`}
-                seed={seed}
-                evidenceMap={evidenceMap}
-                taskStatus={view.task_status}
-                activeEvidenceId={activeEvidenceId}
-                onTraceEvidence={onTraceEvidence}
-                onDispatchSeed={dispatchSeed}
-              />
-            ))}
-          </Space>
+      {/* B 模式：分维度独立 plan */}
+      <div className={styles.writerDimGrid}>
+        <Text type="secondary" className={styles.writerDimGridLabel}>
+          或按单维度精改（点击进入该维度 plan）
+        </Text>
+        <div className={styles.writerDimButtons}>
+          {FIVE_DIMENSIONS.map((dim) => {
+            const score = scoreByDim[dim]
+            const isWeak = weakDimSet.has(dim)
+            return (
+              <Button
+                key={dim}
+                onClick={() => handleDimPlan(dim)}
+                className={`${styles.writerDimBtn} ${isWeak ? styles.writerDimBtnWeak : ''}`}
+                block
+              >
+                <span className={styles.writerDimBtnLabel}>{DIMENSION_LABELS[dim]}</span>
+                <span className={styles.writerDimBtnScore}>
+                  {score != null ? `${score}/10` : '—'}
+                  {isWeak ? <span className={styles.writerDimBtnDot} /> : null}
+                </span>
+              </Button>
+            )
+          })}
         </div>
-      ) : (
-        <div className={styles.writerSeedListEmpty}>
-          <Text type="secondary">无段级改写候选 · 整体已较稳，可直接出全剧风格优化计划</Text>
-        </div>
-      )}
+      </div>
 
       {/* 底部次级动作 */}
       <Space wrap size={6} className={styles.actionCardActions}>
@@ -1130,12 +1116,12 @@ function WriterActionCard({
             onClick={() =>
               onDispatchTask({
                 kind: 'dim_inquiry',
-                dimension: lowest.dimension as DimensionKey,
-                current_score: lowest.score ?? null,
+                dimension: lowest.dim,
+                current_score: lowest.score,
               })
             }
           >
-            追问 · {DIMENSION_LABELS[lowest.dimension] || lowest.dimension} 怎么改
+            追问 · {DIMENSION_LABELS[lowest.dim]} 怎么改
           </Button>
         ) : null}
         <Button size="small" onClick={() => onSwitchMode('story')}>
@@ -1146,76 +1132,7 @@ function WriterActionCard({
   )
 }
 
-/**
- * 编剧卡内的段级精修行：dim tag + score + 集场坐标 + issue + 行内按钮。
- * 把原 RewriteSeedCard 的样式收紧，改用紧凑两栏布局适应卡内嵌套。
- */
-function WriterSeedRow({
-  seed,
-  evidenceMap,
-  taskStatus,
-  activeEvidenceId,
-  onTraceEvidence,
-  onDispatchSeed,
-}: {
-  seed: RewriteSeedDTO
-  evidenceMap: Map<string, EvidenceRefDTO>
-  taskStatus: Record<string, RewriteTaskStatusDTO>
-  activeEvidenceId: string | null
-  onTraceEvidence: Props['onTraceEvidence']
-  onDispatchSeed: (seed: RewriteSeedDTO) => void
-}) {
-  const dimLabel = DIMENSION_LABELS[seed.dimension] || seed.dimension
-  const evi = evidenceMap.get(seed.evidence_ref_id)
-  const status = taskStatus[`${seed.scene_id}:${seed.dimension}`]
-  const badge = renderTaskBadge(status)
-  const locator = evi
-    ? formatSceneLocator(evi.episode_no, evi.scene_no, evi.scene_label)
-    : seed.scene_label || seed.scene_id.slice(0, 8)
-
-  return (
-    <div className={styles.writerSeedRow}>
-      <div className={styles.writerSeedRowHeader}>
-        <Space size={6} wrap>
-          <Tag color="gold" className={styles.seedDimTag}>{dimLabel}</Tag>
-          <Text className={styles.seedScene}>{locator}</Text>
-        </Space>
-        {badge}
-      </div>
-      <div className={styles.seedIssue}>{humanizeReportText(seed.issue || '（暂无 issue）')}</div>
-      <Space size={6} wrap>
-        <Button
-          size="small"
-          icon={<ThunderboltOutlined />}
-          type="primary"
-          ghost
-          onClick={() => onDispatchSeed(seed)}
-        >
-          Agent 改这段
-        </Button>
-        {evi ? (
-          <Button
-            size="small"
-            icon={<SearchOutlined />}
-            onClick={() =>
-              onTraceEvidence({
-                evidenceRefId: evi.id,
-                sceneId: evi.scene_id,
-                startLine: evi.start_line ?? null,
-                endLine: evi.end_line ?? null,
-                quote: evi.quote ?? null,
-              })
-            }
-            type={activeEvidenceId === evi.id ? 'primary' : 'default'}
-            ghost={activeEvidenceId === evi.id}
-          >
-            先看原文
-          </Button>
-        ) : null}
-      </Space>
-    </div>
-  )
-}
+const FIVE_DIMENSIONS: DimensionKey[] = ['story', 'character', 'concept', 'emotion', 'pacing']
 
 function ReviewActionCard({
   view,
@@ -3110,21 +3027,10 @@ function HighlightRow({
   )
 }
 
-// 旧的 RewriteSeedCard 在 v2 行动 lens 改造中被 WriterSeedRow 取代——
-// 段级改写是「行动 · 编剧」职责，不再放在评估 segment。详见 docs/10-rewrite-agent.md §1。
-
-function renderTaskBadge(status: RewriteTaskStatusDTO | undefined) {
-  if (!status || status.attempts <= 0) {
-    return <Tag className={styles.badgeIdle}>未处理</Tag>
-  }
-  if (status.last_status === 'accepted') {
-    return <Tag color="green" className={styles.badgeAccepted}>已采纳改写</Tag>
-  }
-  if (status.last_status === 'rejected') {
-    return <Tag color="orange">上次拒绝，可重试</Tag>
-  }
-  return <Tag color="blue">已尝试 {status.attempts} 次</Tag>
-}
+// 旧的 RewriteSeedCard / WriterSeedRow / renderTaskBadge 已被维度级全剧改写取代
+// （docs/10-rewrite-agent.md §5）。WriterActionCard 现在只发 fulltext_rewrite kind，
+// chat 流里 RewritePlanCard 负责渲染 plan tree + 勾选 + 执行；
+// task_status 字段保留但前端不再读（rewrite_seed 路径整体下线）。
 
 // ============================================================
 // 工具函数

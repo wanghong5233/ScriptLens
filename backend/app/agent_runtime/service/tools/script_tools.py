@@ -18,6 +18,7 @@ script_id 来源：
 
 from __future__ import annotations
 
+import asyncio
 import difflib
 import logging
 from typing import Any, Dict, List, Optional
@@ -721,3 +722,324 @@ def _scene_title(s: Dict[str, Any]) -> str:
     if label:
         parts.append(f"《{label}》")
     return " ".join(parts) if parts else "未命名场"
+
+
+# ============================================================
+# 5. PropDimensionRewriteTool —— 全剧维度改写（plan-then-execute）
+# ============================================================
+#
+# docs/10-rewrite-agent.md §5 实装。两阶段工具：
+#
+#   mode='plan'    → 调 rewrite_chain.propose_plan 输出全剧 plan tree（不写 DB），
+#                    交给前端 RewritePlanCard 渲染让用户审 / 勾选；
+#   mode='execute' → 拿 plan_steps（用户勾选过的子集）调 rewrite_chain.execute_plan_step
+#                    逐场改写，UPDATE scriptlens.scenes.text + mutate
+#                    state.modified_files / state.original_file_contents，
+#                    Agent 收尾时 _generate_file_diffs 自动产 file_diffs 给
+#                    AgentDiffReview（剧本场景透明走 LaTeX 同款 diff 链路）。
+#
+# 「LaTeX 工具直接写磁盘 → accept all 关闭 modal」语义在剧本下统一为
+# 「改写工具直接 UPDATE DB → accept all 关闭 modal」。reject 路径走前端
+# updateFileContent → PUT scenes/{id}/content 写 DB（与 LaTeX 写磁盘对称）。
+
+
+class PropDimensionRewriteTool(BaseTool):
+    """全剧维度级改写：plan / execute 双模式。"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="propose_dimension_rewrite_tool",
+            description=(
+                "对当前剧本做全剧改写。两阶段调用：\n"
+                "  1. mode='plan'：基于五力评分，输出全剧改写计划（plan tree，每条含 "
+                "scene_id / target_dimensions / rationale / expected_changes）。**不修改任何场**，"
+                "供用户审阅与勾选。返回 data.rewrite_plan。\n"
+                "  2. mode='execute'：拿前一步 plan_steps（用户勾选过的子集），逐场调 LLM "
+                "改写 → UPDATE scriptlens.scenes.text → 触发 file_diffs 给 AgentDiffReview。"
+                "返回 data.executed_scenes / data.failed_scenes。\n"
+                "用户消息含 <TASK_META>{kind:'fulltext_rewrite', dimensions, mode}</TASK_META> 时直调。"
+            ),
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "type": "string",
+                    "enum": ["plan", "execute"],
+                    "description": "plan = 出 plan tree 不改文；execute = 按 plan_steps 改写写库",
+                },
+                "dimensions": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["story", "character", "concept", "emotion", "pacing"],
+                    },
+                    "description": "目标维度（1-5 个，阅文五力子集；compliance 不参与改写）",
+                },
+                "plan_steps": {
+                    "type": "array",
+                    "description": (
+                        "execute 模式必传：前端从 plan tree 勾选后传回。"
+                        "每条形如 {scene_id, target_dimensions, expected_changes}。"
+                        "缺省时 execute 模式会重跑 propose_plan 取全部 step。"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scene_id": {"type": "string"},
+                            "target_dimensions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "expected_changes": {"type": "string"},
+                        },
+                        "required": ["scene_id", "target_dimensions"],
+                    },
+                },
+                "script_id": {
+                    "type": "string",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定的剧本",
+                },
+            },
+            "required": ["mode", "dimensions"],
+        }
+
+    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+        params = parameters or {}
+        mode = str(params.get("mode") or "").strip()
+        if mode not in ("plan", "execute"):
+            return ToolResult(
+                success=False,
+                error=f"mode must be 'plan' or 'execute', got {mode!r}",
+                summary="非法 mode",
+            )
+
+        dims_raw = params.get("dimensions") or []
+        dims = [d for d in dims_raw if isinstance(d, str) and d in _DIMENSIONS and d != "compliance"]
+        if not dims:
+            return ToolResult(
+                success=False,
+                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing",
+                summary="缺 dimensions",
+            )
+
+        try:
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as e:
+            return ToolResult(success=False, error=str(e), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+
+        from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
+        from service.script_tools.rewrite_chain import (
+            execute_plan_step,
+            propose_plan,
+            select_target_scenes,
+        )
+
+        caller = LlmCaller()
+
+        if mode == "plan":
+            try:
+                scenes = await asyncio.to_thread(
+                    select_target_scenes,
+                    script_id=script_id,
+                    dimensions=dims,
+                )
+                plan = await propose_plan(
+                    script_id=script_id,
+                    dimensions=dims,
+                    scenes=scenes,
+                    caller=caller,
+                )
+            except ValueError as e:
+                return ToolResult(success=False, error=str(e), summary="plan 参数错误")
+            except ScoreLLMError as e:
+                logger.warning("propose_dimension_rewrite_tool plan failed: %s", e)
+                return ToolResult(success=False, error=f"LLM error: {e}", summary="plan LLM 失败")
+            except Exception as e:
+                logger.error("propose_dimension_rewrite_tool plan unexpected: %s", e, exc_info=True)
+                return ToolResult(success=False, error=str(e), summary="plan 异常")
+
+            plan_dict = plan.to_dict()
+            step_count = len(plan_dict["steps"])
+            if step_count == 0:
+                summary = "全剧 plan：所选维度无 score<7 的明显短板场，无须改写"
+            else:
+                summary = f"全剧 plan 完成：共 {step_count} 场建议改写（dims={'/'.join(dims)}）"
+            return ToolResult(
+                success=True,
+                data={
+                    "mode": "plan",
+                    "rewrite_plan": plan_dict,
+                    "script_id": script_id,
+                },
+                summary=summary,
+            )
+
+        # mode == 'execute'
+        plan_steps_raw = params.get("plan_steps") or []
+        plan_steps: List[Dict[str, Any]] = []
+        if isinstance(plan_steps_raw, list) and plan_steps_raw:
+            for raw in plan_steps_raw:
+                if not isinstance(raw, dict):
+                    continue
+                sid = str(raw.get("scene_id") or "").strip()
+                tdims = [
+                    d for d in (raw.get("target_dimensions") or [])
+                    if isinstance(d, str) and d in dims
+                ]
+                if not sid or not tdims:
+                    continue
+                plan_steps.append(
+                    {
+                        "scene_id": sid,
+                        "target_dimensions": tdims,
+                        "expected_changes": str(raw.get("expected_changes") or ""),
+                    }
+                )
+
+        if not plan_steps:
+            # 兜底：用户没传 plan_steps（例如 chat 直接说"全剧改写吧"），重跑 plan 取全部
+            try:
+                plan = await propose_plan(
+                    script_id=script_id,
+                    dimensions=dims,
+                    caller=caller,
+                )
+            except ScoreLLMError as e:
+                return ToolResult(success=False, error=f"LLM error: {e}", summary="plan 兜底失败")
+            for step in plan.steps:
+                plan_steps.append(
+                    {
+                        "scene_id": step.scene_id,
+                        "target_dimensions": list(step.target_dimensions),
+                        "expected_changes": step.expected_changes,
+                    }
+                )
+
+        if not plan_steps:
+            return ToolResult(
+                success=False,
+                error="execute 阶段没有可改写的场（plan_steps 空且兜底 plan 也无短板场）",
+                summary="无可改写场",
+            )
+
+        executed: List[Dict[str, Any]] = []
+        failed: List[Dict[str, Any]] = []
+
+        for step in plan_steps:
+            sid = step["scene_id"]
+            tdims = step["target_dimensions"]
+            expected = step.get("expected_changes") or ""
+            try:
+                result = await execute_plan_step(
+                    script_id=script_id,
+                    scene_id=sid,
+                    target_dimensions=tdims,
+                    expected_changes=expected,
+                    caller=caller,
+                )
+            except (ValueError, ScoreLLMError) as e:
+                logger.warning("execute_plan_step failed for scene %s: %s", sid, e)
+                failed.append({"scene_id": sid, "error": str(e)})
+                continue
+            except Exception as e:
+                logger.error("execute_plan_step unexpected for scene %s: %s", sid, e, exc_info=True)
+                failed.append({"scene_id": sid, "error": str(e)})
+                continue
+
+            try:
+                _persist_scene_text(
+                    scene_id=sid,
+                    new_text=result.rewritten_text,
+                    expected_script_id=script_id,
+                )
+            except Exception as e:
+                logger.error("persist scene %s failed: %s", sid, e, exc_info=True)
+                failed.append({"scene_id": sid, "error": f"persist failed: {e}"})
+                continue
+
+            # mutate agent_state：让 _generate_file_diffs 走透明 diff 链路
+            # state.modified_files 装 scene_id（UUID 形态），state.original_file_contents
+            # 装改写前文本——后端 _generate_file_diffs 会做剧本工作区分支识别
+            try:
+                modified_files = getattr(agent_state, "modified_files", None)
+                if modified_files is None:
+                    modified_files = set()
+                    setattr(agent_state, "modified_files", modified_files)
+                modified_files.add(sid)
+
+                originals = getattr(agent_state, "original_file_contents", None)
+                if originals is None:
+                    originals = {}
+                    setattr(agent_state, "original_file_contents", originals)
+                # 只在第一次见到该 scene 时记 original，后续累积改写不能覆盖
+                if sid not in originals:
+                    originals[sid] = result.original_text
+            except Exception as e:
+                logger.warning("mutate agent_state failed for %s: %s (continuing)", sid, e)
+
+            executed.append(
+                {
+                    "scene_id": sid,
+                    "scene_label": result.scene_label,
+                    "target_dimensions": list(result.target_dimensions),
+                    "rationale": result.rationale,
+                    "original_chars": len(result.original_text),
+                    "rewritten_chars": len(result.rewritten_text),
+                }
+            )
+
+        ok = len(executed)
+        bad = len(failed)
+        if ok == 0:
+            return ToolResult(
+                success=False,
+                error=f"全部 {bad} 场改写均失败",
+                data={"mode": "execute", "executed_scenes": [], "failed_scenes": failed},
+                summary="全剧改写失败",
+            )
+        summary = (
+            f"改写完成：成功 {ok} 场"
+            + (f" / 失败 {bad} 场" if bad else "")
+            + f"（dims={'/'.join(dims)}）"
+        )
+        return ToolResult(
+            success=True,
+            data={
+                "mode": "execute",
+                "dimensions": dims,
+                "executed_scenes": executed,
+                "failed_scenes": failed,
+                "script_id": script_id,
+            },
+            summary=summary,
+        )
+
+
+def _persist_scene_text(
+    *,
+    scene_id: str,
+    new_text: str,
+    expected_script_id: str,
+) -> None:
+    """把改写后的文本写回 scriptlens.scenes.text（带 script_id 二次校验，防越权）。"""
+    from utils.database import engine
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                UPDATE scriptlens.scenes
+                   SET text = :txt
+                 WHERE id = :sid
+                   AND script_id = :script_id
+                """
+            ),
+            {"txt": new_text, "sid": scene_id, "script_id": expected_script_id},
+        )
+        if result.rowcount == 0:
+            raise ValueError(
+                f"persist failed: scene {scene_id} not found in script {expected_script_id}"
+            )

@@ -16,6 +16,7 @@ from .tools.response_tools import ReplyToUserTool
 from .tools.script_tools import (
     ExtractCharactersTool,
     LocateScenesTool,
+    PropDimensionRewriteTool,
     ProposeRewriteTool,
     ScoreDimensionTool,
 )
@@ -25,19 +26,23 @@ logger = logging.getLogger(__name__)
 
 
 def create_tool_registry() -> ToolRegistry:
-    """创建并初始化 ScriptLens Agent 工具注册表（6 个工具）。"""
+    """创建并初始化 ScriptLens Agent 工具注册表（7 个工具）。
+
+    剧本专属工具（5 个）：
+        - score_dimension_tool / locate_scenes_tool / extract_characters_tool
+        - propose_dimension_rewrite_tool ← 主路径：全剧维度改写（plan/execute）
+        - propose_rewrite_tool ← 兼容路径：单场改写，chat 自然指令偶尔用
+    """
     registry = ToolRegistry()
 
-    # 4 个剧本专属工具
     registry.register(ScoreDimensionTool())
     registry.register(LocateScenesTool())
     registry.register(ExtractCharactersTool())
+    registry.register(PropDimensionRewriteTool())
     registry.register(ProposeRewriteTool())
 
-    # 联网检索（task §六 真正可工作的 Agent 加分项）
     registry.register(WebSearchTool())
 
-    # ReAct 终止工具（必备）
     registry.register(ReplyToUserTool())
 
     logger.info("ScriptLens tool registry initialized: %s tools", len(registry.list_tools()))

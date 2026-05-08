@@ -487,6 +487,22 @@ class ScriptScenesResponse(BaseModel):
     scenes: List[SceneItem]
 
 
+class SceneContentUpdateRequest(BaseModel):
+    """PUT /api/scripts/{id}/scenes/{scene_id}/content 请求。
+
+    AgentDiffReview reject hunk 时前端会算出 reverted text 调本端点写库；
+    accept 全量保留路径不调本端点（改写工具已在 LLM 调用末尾 UPDATE 过）。
+    详见 docs/10-rewrite-agent.md §6 diff 透明迁移机制。
+    """
+
+    content: str = Field(..., description="场景全文（无长度上限：剧本场常达数千字）")
+
+
+class SceneContentUpdateResponse(BaseModel):
+    scene_id: str
+    char_count: int
+
+
 # ============================================================
 # Chat / Rewrite（D2-6）
 # ============================================================

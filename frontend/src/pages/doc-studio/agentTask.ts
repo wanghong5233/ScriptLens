@@ -17,7 +17,11 @@ import type * as Monaco from 'monaco-editor'
 // AgentTask 类型
 // ============================================================
 
-export type AgentTaskKind = 'evidence_lookup' | 'rewrite_seed' | 'dim_inquiry'
+export type AgentTaskKind =
+  | 'evidence_lookup'
+  | 'dim_inquiry'
+  | 'fulltext_rewrite'
+  | 'rescore'
 
 // 阅文五力（docs/08-evaluation-framework.md §3）；compliance 独立合规审核，不进 scorecard
 export type DimensionKey =
@@ -39,40 +43,6 @@ export interface EvidenceLookupTask {
   quote?: string | null
 }
 
-/**
- * 段级改写任务的 brief schema。
- *
- * 业内对照（Sudowrite / Notion AI / Cursor Composer / 抖音文心剧本助手）共识：
- * 改写 brief 必须包含【原文 + 维度元数据 + 全剧上下文 + 保留约束 + 改写目标】。
- * 详见 docs/10-rewrite-agent.md §3。
- *
- * 旧版只传 4 字段（dim/scene/issue/evidence_ref_id），等于让 Agent 在零上下文下硬猜，
- * 产出必然是表面润色。本次扩展为可选字段（向后兼容旧 base64 encode），由派发方
- * 尽量填满，未填时 buildPromptFromTask 会降级为兼容旧形态的简化 prompt。
- */
-export interface RewriteSeedTask {
-  kind: 'rewrite_seed'
-  dimension: DimensionKey
-  scene_id: string
-  scene_label?: string | null
-  issue: string
-  evidence_ref_id: string
-
-  // 维度元数据：当前分 + LLM 短板理由（来自 scorecard.score / .reason）
-  score?: number | null
-  dim_reason?: string | null
-
-  // 原文片段：业内全部产品都强调"改写必须吃到原文"——传原文片段 + 集场坐标
-  quote?: string | null
-  episode_no?: number | null
-  scene_no?: string | null
-
-  // 全剧上下文：决定改写的"基调"——题材 / 综合分 / 决策结论
-  genre?: string[] | null
-  overall_score?: number | null
-  decision_label?: string | null
-}
-
 export interface DimInquiryTask {
   kind: 'dim_inquiry'
   // 五力 + compliance：用户可以对任何报告卡片询问 Agent
@@ -80,7 +50,44 @@ export interface DimInquiryTask {
   current_score: number | null
 }
 
-export type AgentTask = EvidenceLookupTask | RewriteSeedTask | DimInquiryTask
+/**
+ * 全剧维度改写任务（plan / execute 两阶段，docs/10-rewrite-agent.md §5）。
+ *
+ * - mode='plan'：触发后端 propose_dimension_rewrite_tool 出 plan tree，前端 RewritePlanCard 渲染
+ * - mode='execute'：plan_steps 来自用户在 RewritePlanCard 勾选过的 step 子集
+ *
+ * 用户消息只发简短意图（一行），800 字 brief 完全后端化（不再前端拼 prompt）。
+ */
+export interface FulltextRewritePlanStep {
+  scene_id: string
+  target_dimensions: DimensionKey[]
+  expected_changes?: string
+  scene_label?: string
+}
+
+export interface FulltextRewriteTask {
+  kind: 'fulltext_rewrite'
+  dimensions: DimensionKey[]
+  mode: 'plan' | 'execute'
+  plan_steps?: FulltextRewritePlanStep[]
+}
+
+/**
+ * 改写后重新评分任务（AgentDiffReview accept all 后由 fe_rescore_hook 自动派发）。
+ *
+ * Agent 系统提示「任务派发协议」会按 dimensions 列表逐一调 score_dimension_tool，
+ * 然后在 reply 里列出每维度的「旧分 → 新分」对比。
+ */
+export interface RescoreTask {
+  kind: 'rescore'
+  dimensions: DimensionKey[]
+}
+
+export type AgentTask =
+  | EvidenceLookupTask
+  | DimInquiryTask
+  | FulltextRewriteTask
+  | RescoreTask
 
 // ============================================================
 // URL 编解码（独立 report 页跳回 doc-studio 时用 ?task=base64(...)）
@@ -103,7 +110,10 @@ export function decodeTaskParam(param: string): AgentTask | null {
     const json = decodeURIComponent(escape(atob(padded)))
     const obj = JSON.parse(json)
     if (!obj || typeof obj !== 'object' || typeof obj.kind !== 'string') return null
-    if (!['evidence_lookup', 'rewrite_seed', 'dim_inquiry'].includes(obj.kind)) return null
+    if (
+      !['evidence_lookup', 'dim_inquiry', 'fulltext_rewrite', 'rescore'].includes(obj.kind)
+    )
+      return null
     return obj as AgentTask
   } catch {
     return null
@@ -212,13 +222,8 @@ export function formatSceneLocatorCompact(
 export function buildPromptFromTask(task: AgentTask): string {
   const metaBlock = `<TASK_META>${JSON.stringify(task)}</TASK_META>`
 
-  if (task.kind === 'rewrite_seed') {
-    return buildRewriteSeedPrompt(task) + '\n\n' + metaBlock
-  }
-
   if (task.kind === 'evidence_lookup') {
     const sceneLabel = task.scene_label || '当前场'
-    // quote 已经在编辑器里高亮，不必在 prompt 里复述长引用，会喧宾夺主
     return [
       `我在《${sceneLabel}》看到一条被算法挂为证据的片段（编辑器已高亮）。`,
       `用一两句话告诉我：它对应的是哪个维度？为什么它是这个维度的支撑？`,
@@ -227,103 +232,44 @@ export function buildPromptFromTask(task: AgentTask): string {
     ].join('\n')
   }
 
-  // dim_inquiry
-  const dim = DIM_LABEL[task.dimension] || task.dimension
-  const scoreHint =
-    task.current_score === null || task.current_score === undefined
-      ? '尚未给分'
-      : `当前 ${task.current_score}/10`
+  if (task.kind === 'dim_inquiry') {
+    const dim = DIM_LABEL[task.dimension] || task.dimension
+    const scoreHint =
+      task.current_score === null || task.current_score === undefined
+        ? '尚未给分'
+        : `当前 ${task.current_score}/10`
+    return [
+      `针对「${dim}」维度（${scoreHint}）：`,
+      `1) 扣分点最集中的是哪几场？`,
+      `2) 这些场各自的核心问题是什么？`,
+      `3) 如果只能改 1 场，你建议先改哪一场，怎么改？`,
+      '',
+      metaBlock,
+    ].join('\n')
+  }
+
+  if (task.kind === 'fulltext_rewrite') {
+    // 用户消息只发一行简短意图，800 字 brief 完全后端化（docs/10-rewrite-agent.md §5）。
+    // Agent 收到 TASK_META 后直调 propose_dimension_rewrite_tool。
+    const dimsLabel = task.dimensions.map((d) => DIM_LABEL[d] || d).join(' / ')
+    if (task.mode === 'plan') {
+      return [`按「${dimsLabel}」全剧出一份改写计划。`, '', metaBlock].join('\n')
+    }
+    const stepCount = task.plan_steps?.length ?? 0
+    return [
+      `执行选中的 ${stepCount} 场改写（${dimsLabel}）。`,
+      '',
+      metaBlock,
+    ].join('\n')
+  }
+
+  // rescore
+  const dimsLabel = task.dimensions.map((d) => DIM_LABEL[d] || d).join(' / ')
   return [
-    `针对「${dim}」维度（${scoreHint}）：`,
-    `1) 扣分点最集中的是哪几场？`,
-    `2) 这些场各自的核心问题是什么？`,
-    `3) 如果只能改 1 场，你建议先改哪一场，怎么改？`,
+    `刚接受了一批改写，请按「${dimsLabel}」重新评分，给我前后分对比。`,
     '',
     metaBlock,
   ].join('\n')
-}
-
-// ============================================================
-// 段级改写 prompt 构造
-// ============================================================
-//
-// 输出结构（业内对照：Sudowrite Rewrite mode / Cursor Edit / Notion AI / 抖音文心剧本助手）：
-//
-//   1. 任务声明（一句话）
-//   2. 全剧元数据（题材 + 综合分 + 决策）—— Agent 把握基调
-//   3. 维度短板（当前维度 + 评分 + reason）—— 让 Agent 知道改的"病"在哪
-//   4. 待改场（坐标 + 原文 quote）—— Agent 不需要再调 tool 拿原文
-//   5. 改写目标（按维度差异化）—— 题材力低改人设题材；故事力低改三幕节拍；
-//                                 情感力低改钩子密度；叙事力低改起范 + 回报方差；
-//                                 人物力低改动机弧光 + 关键关系冲突
-//   6. 保留约束（人物关系 / 情节走向 / 题材 / 集数）
-//   7. 输出格式（原文 + 改写 + 简短理由 + 预期目标分）
-//
-// 字段缺失时静默降级（不 throw），旧 RewriteSeedTask 也能跑通。
-
-const REWRITE_GOAL_BY_DIM: Record<DimensionKey, string> = {
-  story:
-    '修复三幕节拍齐齐全：起范点 / 反转点 / 高潮点必须可见、可感、节奏在合理 beat 上，避免悬念塌陷或反转密度不足。',
-  character:
-    '强化主角动机弧光与关键关系冲突：动机要可观察（行为 ≠ 设定），冲突要在场景里发生（不是旁白）；OOC 与扁平化必须打掉。',
-  concept:
-    '抓住题材辨识度与卖点钩子：豪门 / 重生 / 古穿今 / 复仇 等核心标签要落到具象场景，避免类型套路重叠或核心卖点缺锚点。',
-  emotion:
-    '提高钩子密度与爽点节奏：维持 ≥1 个钩子 / 集，最长无爽点段 ≤ 2 集；情感钩子要有具体触发物（道具 / 台词 / 关键动作）。',
-  pacing:
-    '校正叙事节奏：开场 ≤ 3 场建立悬念，回报方差控制在合理区间，避免节奏疲软或冲突堆积失衡。',
-}
-
-function buildRewriteSeedPrompt(task: RewriteSeedTask): string {
-  const dim = DIM_LABEL[task.dimension] || task.dimension
-  const locator =
-    formatSceneLocator(task.episode_no ?? null, task.scene_no ?? null, task.scene_label ?? null) ||
-    task.scene_label ||
-    '当前场'
-
-  const lines: string[] = [`改写《${locator}》这场，提升「${dim}」维度。`]
-
-  const ctxParts: string[] = []
-  if (task.genre && task.genre.length > 0) ctxParts.push(`题材：${task.genre.join(' / ')}`)
-  if (task.overall_score != null) ctxParts.push(`综合分：${task.overall_score.toFixed(1)}/10`)
-  if (task.decision_label) ctxParts.push(`决策：${task.decision_label}`)
-  if (ctxParts.length > 0) {
-    lines.push('', '【全剧基调】', ctxParts.join(' · '))
-  }
-
-  const dimParts: string[] = [`当前 ${dim}`]
-  if (task.score != null) dimParts[0] += ` ${task.score}/10`
-  lines.push('', '【维度短板】', dimParts[0])
-  if (task.dim_reason) lines.push(task.dim_reason)
-  lines.push(`扣分点：${task.issue}`)
-
-  if (task.quote && task.quote.trim()) {
-    lines.push('', '【待改原文】', '```', task.quote.trim(), '```')
-  } else {
-    lines.push('', '【待改原文】', `（编辑器已定位到《${locator}》，请就近读取上下文）`)
-  }
-
-  const goal = REWRITE_GOAL_BY_DIM[task.dimension] || `修复「${dim}」维度的具体扣分点。`
-  lines.push('', '【改写目标】', goal)
-
-  lines.push(
-    '',
-    '【保留约束】',
-    '- 人物关系与主线情节走向不变',
-    '- 题材标签与集数序列不变',
-    '- 仅针对本场，不引入需要修改其他场的连锁改动',
-  )
-
-  lines.push(
-    '',
-    '【输出格式】',
-    '1. 原文片段（引用，不要节略）',
-    '2. 改写版本（直接可贴回剧本）',
-    '3. 改了什么、为什么这样改（≤3 句）',
-    `4. 预期 ${dim} 目标分（${task.score != null ? `从 ${task.score}` : '当前未给分'} → 目标 X / 10）`,
-  )
-
-  return lines.join('\n')
 }
 
 // ============================================================

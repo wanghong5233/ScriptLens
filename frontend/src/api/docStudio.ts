@@ -689,15 +689,42 @@ export async function fetchFileContent(
 }
 
 export async function updateFileContent(
-  _params: {
+  params: {
     workspaceId: string
     path: string
     content: string
     encoding?: string
   },
-  _options?: AxiosRequestConfig,
+  options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.SaveFileResponse> {
-  return unsupported('updateFileContent（保存场景内容未实现，PRD 未定义 PUT scene）')
+  // path == scene_id（与 fetchFileContent 对齐）。AgentDiffReview reject hunk 路径会调本接口
+  // 把 reverted text 写回 DB；与 LaTeX 工作区写磁盘对称（docs/10-rewrite-agent.md §6）。
+  const { workspaceId, path: sceneId, content } = params
+  if (!sceneId) {
+    throw new Error('updateFileContent: path（scene_id）不能为空')
+  }
+  const url = `${SCRIPTS_BASE}/${encodeURIComponent(workspaceId)}/scenes/${encodeURIComponent(sceneId)}/content`
+  await request<{ scene_id: string; char_count: number }>(
+    url,
+    { method: 'put', data: { content } },
+    options,
+  )
+
+  // 同步刷新 sceneCache，避免下次 fetchFileContent 取到旧文本
+  const cached = sceneCache.get(workspaceId)
+  if (cached) {
+    const idx = cached.findIndex((s) => s.id === sceneId)
+    if (idx >= 0) {
+      cached[idx] = { ...cached[idx], text: content }
+    }
+  }
+
+  return {
+    path: sceneId,
+    size: content.length,
+    modified_at: Math.floor(Date.now() / 1000),
+    encoding: 'utf-8',
+  }
 }
 
 export async function createFileOrDirectory(

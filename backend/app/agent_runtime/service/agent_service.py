@@ -3410,29 +3410,42 @@ class LaTeXEditAgent(BaseAgent):
     async def _generate_file_diffs(self, state: AgentState) -> List[Dict[str, Any]]:
         """
         生成文件 diff（用于前端预览）
-        
+
         对比原始文件和修改后的文件，生成完整的 diff 数据
-        
+
+        剧本场景透明迁移（docs/10-rewrite-agent.md §6）：
+            当 workspace_config.script_id 存在时，state.modified_files 装的是
+            scene_id（UUID），改写后的内容在 scriptlens.scenes.text。直接走 DB 读，
+            不再尝试在 LaTeX 工作区目录下找虚拟文件——剧本场景本来就不写盘。
+            前端 file_path 用 scene_id（与 fetchFileContent / sceneCache 对齐），
+            AgentDiffReview 不需要任何改动。
+
         Args:
             state: Agent 状态
-            
+
         Returns:
             文件 diff 列表，每个元素包含 file_path, original_content, modified_content
         """
+        if not state.modified_files:
+            return []
+
+        workspace_config = getattr(state, "workspace_config", None) or {}
+        bound_script_id = str(workspace_config.get("script_id") or "").strip()
+
+        if bound_script_id:
+            return self._generate_script_scene_diffs(state, bound_script_id)
+
+        # LaTeX 工作区原有路径（保持不动）
         import os
-        
-        file_diffs = []
+
+        file_diffs: List[Dict[str, Any]] = []
         workspace_path = self._get_workspace_path(state.user_id, state.workspace_id)
-        
-        # 遍历所有被修改的文件
+
         for file_path in state.modified_files:
-            # 获取原始内容
             original_content = state.original_file_contents.get(file_path, "")
-            
-            # 读取修改后的内容
             full_path = os.path.join(workspace_path, file_path)
             modified_content = ""
-            
+
             try:
                 if os.path.exists(full_path):
                     with open(full_path, 'r', encoding='utf-8') as f:
@@ -3440,7 +3453,7 @@ class LaTeXEditAgent(BaseAgent):
             except Exception as e:
                 logger.warning(f"Failed to read modified file {file_path}: {e}")
                 continue
-            
+
             if original_content == modified_content:
                 continue
 
@@ -3458,8 +3471,73 @@ class LaTeXEditAgent(BaseAgent):
                 "added_lines": line_stats.get("added_lines", 0),
                 "removed_lines": line_stats.get("removed_lines", 0),
             })
-        
-        logger.debug(f"Generated {len(file_diffs)} file diffs")
+
+        logger.debug(f"Generated {len(file_diffs)} file diffs (latex)")
+        return file_diffs
+
+    def _generate_script_scene_diffs(
+        self, state: AgentState, script_id: str,
+    ) -> List[Dict[str, Any]]:
+        """剧本场景版的 file_diffs：modified_files 是 scene_id，从 DB 读改后内容。
+
+        与 LaTeX 路径对称：
+            LaTeX  → state.modified_files 是相对路径，从工作区磁盘读 modified
+            剧本   → state.modified_files 是 scene_id（UUID），从 scriptlens.scenes.text 读
+
+        original 走 state.original_file_contents 镜像（PropDimensionRewriteTool
+        在写库前已把改前内容存进去），与 LaTeX 一致。
+        """
+        from sqlalchemy import text as _sql_text
+        from utils.database import engine
+
+        scene_ids = [str(p) for p in state.modified_files if p]
+        if not scene_ids:
+            return []
+
+        with engine.connect() as conn:
+            rows = conn.execute(
+                _sql_text(
+                    """
+                    SELECT id::text AS id, text
+                    FROM scriptlens.scenes
+                    WHERE script_id = :sid AND id::text = ANY(:ids)
+                    """
+                ),
+                {"sid": script_id, "ids": scene_ids},
+            ).mappings().all()
+
+        text_by_id = {row["id"]: row["text"] or "" for row in rows}
+        file_diffs: List[Dict[str, Any]] = []
+
+        for sid in scene_ids:
+            modified_content = text_by_id.get(sid)
+            if modified_content is None:
+                logger.warning(
+                    "script scene diff: scene %s missing in DB (script %s); skip",
+                    sid, script_id,
+                )
+                continue
+
+            original_content = state.original_file_contents.get(sid, "")
+            if original_content == modified_content:
+                continue
+
+            preview_original, preview_modified, truncated = generate_diff_preview(
+                original_content,
+                modified_content,
+            )
+            line_stats = compute_line_change_stats(original_content, modified_content)
+
+            file_diffs.append({
+                "file_path": sid,
+                "original_content": preview_original,
+                "modified_content": preview_modified,
+                "is_truncated": truncated,
+                "added_lines": line_stats.get("added_lines", 0),
+                "removed_lines": line_stats.get("removed_lines", 0),
+            })
+
+        logger.debug("Generated %d file diffs (script scenes)", len(file_diffs))
         return file_diffs
     
     def _is_task_completed(self, state: AgentState, user_intent: str) -> bool:

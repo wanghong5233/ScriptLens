@@ -134,3 +134,46 @@ def list_scenes(
             {"sid": script_id, "limit": limit},
         ).mappings().all()
     return [dict(r) for r in rows]
+
+
+def update_scene_text(
+    *,
+    script_id: str,
+    scene_id: str,
+    user_id: int,
+    content: str,
+    engine: Engine = default_engine,
+) -> dict:
+    """PUT /api/scripts/{id}/scenes/{scene_id}/content —— 写回场景全文。
+
+    与 LaTeX accept/reject 路径对称：用户在 AgentDiffReview 里 reject 一个 hunk
+    时，前端在内存里算出 reverted 内容，调 updateFileContent(path=scene_id) →
+    本端点直接 UPDATE scriptlens.scenes.text。
+
+    权限：先按 (script_id, user_id) 校验剧本归属（统一走 ScriptNotFoundError）。
+
+    Returns:
+        dict {"scene_id": str, "char_count": int}
+    """
+    if not isinstance(content, str):
+        raise ValueError("content must be a string")
+
+    # 权限：剧本属于当前用户（间接也校验剧本存在）
+    get_script_status(script_id=script_id, user_id=user_id, engine=engine)
+
+    with engine.begin() as conn:
+        result = conn.execute(
+            text(
+                """
+                UPDATE scriptlens.scenes
+                   SET text = :txt
+                 WHERE id = :sid
+                   AND script_id = :script_id
+                """
+            ),
+            {"txt": content, "sid": scene_id, "script_id": script_id},
+        )
+        if result.rowcount == 0:
+            raise ScriptNotFoundError(f"scene {scene_id} not found in script {script_id}")
+
+    return {"scene_id": scene_id, "char_count": len(content)}
