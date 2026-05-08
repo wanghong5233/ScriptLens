@@ -1,0 +1,195 @@
+# ============================================================
+# ScriptLens 生产 compose —— 完全独立栈
+#
+# 与本机其他项目（ScholarMind、个人主页等）无任何 service / network / volume 耦合，
+# 仅共享 ECS 主机资源（CPU / RAM / 磁盘 / 公网带宽）。
+#
+# 启动（建议用兄弟目录 /opt/apps/scriptlens/backend）：
+#   cd /opt/apps/scriptlens/backend
+#   cp .env.production.example .env.production   # 第一次：填密钥
+#   docker compose -f docker-compose.prod.yml --env-file .env.production -p scriptlens build scriptlens_api
+#   docker compose -f docker-compose.prod.yml --env-file .env.production -p scriptlens up -d
+#
+# 容器命名前缀全部带 scriptlens_，避免与同主机其他项目重名冲突。
+# ============================================================
+
+services:
+  scriptlens_api:
+    build:
+      context: .
+      dockerfile: ./app/Dockerfile
+    image: scriptlens_api:latest
+    container_name: scriptlens_api
+    hostname: scriptlens_api
+    env_file:
+      - .env.production
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-pg123456}@scriptlens_db:5432/${POSTGRES_DB:-scriptlens}
+      REDIS_HOST: scriptlens_redis
+      REDIS_PORT: "6379"
+      REDIS_DB: "0"
+      ROOT_PATH: ""
+      SM_VECTOR_STORE: pgvector
+      SM_PARSER_ORDER: ${SM_PARSER_ORDER:-llamaparse,unstructured_api,pymupdf}
+      SM_GROBID_ENABLED: "false"
+      SM_EMBEDDER_TYPE: dashscope
+      SM_RERANKER_TYPE: dashscope
+      SM_EMBEDDING_MODEL: text-embedding-v3
+      SM_EMBEDDING_DIMENSIONS: "1024"
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: /app
+    command:
+      [
+        "uvicorn",
+        "app_main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "8005",
+        "--workers",
+        "1",
+        "--timeout-graceful-shutdown",
+        "10",
+      ]
+    volumes:
+      - ${SCRIPTLENS_STORAGE_ROOT:-/opt/data/scriptlens/storage}:/app/service/core/storage
+      - scriptlens_workspaces:/app/workspaces
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request as u; u.urlopen('http://localhost:8005/health', timeout=5).read()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+    depends_on:
+      scriptlens_db:
+        condition: service_healthy
+      scriptlens_redis:
+        condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - scriptlens_net
+
+  scriptlens_db:
+    image: pgvector/pgvector:pg15
+    container_name: scriptlens_db
+    hostname: scriptlens_db
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-pg123456}
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-scriptlens}
+    command:
+      [
+        "postgres",
+        "-c",
+        "shared_buffers=64MB",
+        "-c",
+        "work_mem=2MB",
+        "-c",
+        "maintenance_work_mem=32MB",
+        "-c",
+        "effective_cache_size=256MB",
+        "-c",
+        "max_connections=40",
+      ]
+    volumes:
+      - scriptlens_pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-scriptlens}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - scriptlens_net
+
+  scriptlens_redis:
+    image: redis:7-alpine
+    container_name: scriptlens_redis
+    hostname: scriptlens_redis
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory",
+        "96mb",
+        "--maxmemory-policy",
+        "allkeys-lru",
+      ]
+    volumes:
+      - scriptlens_redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - scriptlens_net
+
+  cloudflared:
+    image: cloudflare/cloudflared:2026.2.0
+    container_name: cf_tunnel_scriptlens
+    command:
+      [
+        "tunnel",
+        "--no-autoupdate",
+        "--protocol",
+        "http2",
+        "--loglevel",
+        "info",
+        "--metrics",
+        "0.0.0.0:2000",
+        "run",
+        "--token",
+        "${CF_TUNNEL_TOKEN:-}",
+      ]
+    depends_on:
+      scriptlens_api:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+    networks:
+      - scriptlens_net
+
+volumes:
+  scriptlens_pg_data:
+    name: scriptlens_prod_pg_data
+  scriptlens_redis_data:
+    name: scriptlens_prod_redis_data
+  scriptlens_workspaces:
+    name: scriptlens_prod_workspaces
+
+networks:
+  scriptlens_net:
+    name: scriptlens_prod_net
+    driver: bridge
