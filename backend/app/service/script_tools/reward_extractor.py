@@ -20,26 +20,47 @@ from typing import List, Optional
 
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.risk_terms import REWARD_TERMS, all_reward_terms
-from service.script_tools.scene_repo import Scene, get_all_scenes, locate_scenes_by_keyword
+from service.script_tools.scene_repo import (
+    LLM_EVIDENCE_MAX_LEN,
+    Scene,
+    format_scene_for_llm,
+    get_all_scenes,
+    locate_scenes_by_keyword,
+    parse_line_range,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class RewardEvent:
+    """单条 reward 事件。
+
+    v3.3 line-range anchored：
+    - `evidence_line_range` 是 LLM 二筛时同次给出的场内行号区间（1-based 闭区间）
+    - `evidence` 仅作 tooltip 展示文本（≤ LLM_EVIDENCE_MAX_LEN 字）
+    """
+
     scene_id: str
     scene_no: str
     episode_no: Optional[int]
     event_type: str  # face_slap | reversal | revenge | romantic_progress | identity_reveal | humiliate_villain | underdog_rise | scheme_exposed
-    evidence: str  # 命中片段（≤90 字）
+    evidence: str  # 命中片段（≤90 字），tooltip-only
+    evidence_line_range: Optional[tuple[int, int]] = None
 
 
+# LLM 二级判定单批容量
+# 8 = TokenBudget.REWARD_EXTRACT (2560) / 单场判定 ~300 token 经验值；
+# 详见 docs/08 §6.3 TokenBudget 推导。
 _BATCH_SIZE = 8
+
+# 单场喂给 LLM 的文本截断
+# 800 字 = 短剧典型单场上限；超出基本是场景大段背景描述，对 reward 判定不增益。
 _MAX_TEXT_PER_SCENE = 800
 
 
-_PROMPT_TEMPLATE = """你是中文短剧爆款分析师。下面是 N 个候选场景，每场可能含 reward 事件
-（打脸 / 反转 / 复仇 / CP 进展 / 身份揭露 / 反派败落 / 逆袭 / 阴谋败露）。
+_PROMPT_TEMPLATE = """你是中文短剧爆款分析师。下面是 N 个候选场景（每场原文按行打了 [L{{n}}] 行号标注），
+每场可能含 reward 事件（打脸 / 反转 / 复仇 / CP 进展 / 身份揭露 / 反派败落 / 逆袭 / 阴谋败露）。
 
 判定规则：
 1. 必须是「事件已经发生」，不是预告或回忆。
@@ -55,10 +76,16 @@ _PROMPT_TEMPLATE = """你是中文短剧爆款分析师。下面是 N 个候选�
     {{
       "scene_no": "<必须是上面给出的 scene_no>",
       "event_type": "face_slap|reversal|revenge|romantic_progress|identity_reveal|humiliate_villain|underdog_rise|scheme_exposed",
-      "evidence": "<≤80 字原文片段，必须出自该场景>"
+      "evidence_line_range": [<起始行号>, <结束行号>],
+      "evidence": "<line_range 那段原文摘要，≤{evidence_max_len} 字>"
     }}
   ]
 }}
+
+evidence_line_range 规则：
+- 引用该场内的 [L{{n}}] 行号（1-based 闭区间），例如 [4, 9] 表示 L4 到 L9
+- 区间应**整段覆盖** reward 事件发生的那段戏（典型 4-10 行），不要给单行碎片
+- 不要给整场 [1, 99]，要切到事件真正发生的那段
 
 未命中的场景不要列出。如果没有任何场景命中，返回 {{"events": []}}。"""
 
@@ -149,14 +176,15 @@ async def _judge_batch(batch: List[Scene], caller: LlmCaller) -> List[RewardEven
     """
     blocks = []
     for sc in batch:
-        text = sc.text or ""
-        if len(text) > _MAX_TEXT_PER_SCENE:
-            text = text[:_MAX_TEXT_PER_SCENE] + "…"
+        annotated = format_scene_for_llm(scene_text=sc.text or "", max_chars=_MAX_TEXT_PER_SCENE)
         ep_label = f"第{sc.episode_no}集" if sc.episode_no else "未编集"
         blocks.append(
-            f"[scene_no={sc.scene_no}] [{ep_label}] [{sc.scene_label}]\n{text}"
+            f"[scene_no={sc.scene_no}] [{ep_label}] [{sc.scene_label}]\n{annotated}"
         )
-    prompt = _PROMPT_TEMPLATE.format(scenes_block="\n\n---\n\n".join(blocks))
+    prompt = _PROMPT_TEMPLATE.format(
+        scenes_block="\n\n---\n\n".join(blocks),
+        evidence_max_len=LLM_EVIDENCE_MAX_LEN,
+    )
 
     resp = await caller.call_json(
         prompt,
@@ -179,9 +207,11 @@ async def _judge_batch(batch: List[Scene], caller: LlmCaller) -> List[RewardEven
         etype = str(ev.get("event_type") or "").strip()
         if etype not in REWARD_TERMS:
             continue
-        evidence = str(ev.get("evidence") or "").strip()[:120]
+        evidence = str(ev.get("evidence") or "").strip()[: LLM_EVIDENCE_MAX_LEN + 10]
         if not evidence:
             continue
+        scene_lc = len((scene.text or "").split("\n"))
+        line_range = parse_line_range(ev.get("evidence_line_range"), scene_line_count=scene_lc)
         out.append(
             RewardEvent(
                 scene_id=scene.id,
@@ -189,6 +219,7 @@ async def _judge_batch(batch: List[Scene], caller: LlmCaller) -> List[RewardEven
                 episode_no=scene.episode_no,
                 event_type=etype,
                 evidence=evidence,
+                evidence_line_range=line_range,
             )
         )
     return out

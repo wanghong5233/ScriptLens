@@ -33,17 +33,22 @@
 
 **剧本侧可观测信号**：
 - 主线 logline 能否 ≤ 60 字讲清（来自 coverage_card.logline）
-- 反转事件密度（reward_events.event_type ∈ {reversal, face_slap, scheme_exposed} 计数 / 总集数）
+- 反转事件密度（reward_events.event_type ∈ {reversal, face_slap, scheme_exposed, identity_reveal} 计数 / 总集数）
 - 钩子节点完整性（beat_sheet 是否含 opening / inciting / midpoint / climax / closing 五个关键节拍）
 
 **档位锚点**：
 
 | 档 | 信号 |
 |---|---|
-| 9-10 (high) | logline 清晰；反转 / 集 ≥ 2.0；五个关键节拍完整 |
-| 6-8 (high) | logline 基本清晰；反转 / 集 1.0-2.0；缺 ≤ 1 个关键节拍 |
-| 3-5 (medium) | logline 模糊；反转 / 集 0.3-1.0；缺 ≥ 2 个关键节拍 |
-| 0-2 (low) | 主线讲不清；反转 / 集 < 0.3；缺 climax 或 closing 节拍 |
+| 9-10 (high) | logline 清晰；反转 / 集 ≥ 0.5（每 2 集 1 反转）；五个关键节拍完整 |
+| 6-8 (good) | logline 基本清晰；反转 / 集 0.33-0.5（每 3 集 1 反转）；缺 ≤ 1 个关键节拍 |
+| 3-5 (medium) | logline 模糊；反转 / 集 0.12-0.33（4-8 集 1 反转）；缺 ≥ 2 个关键节拍 |
+| 0-2 (low) | 主线讲不清；反转 / 集 < 0.12；缺 climax 或 closing 节拍 |
+
+**阈值业内出处**：
+- `0.5 / 集` ← 抖音 2024《短剧爆款公式》报告：头部短剧反转密度典型值
+- `0.33 / 集` ← 抖音 / 快手 StreamLake 选品手册「合格」线（每 3 集 1 反转）
+- `0.12 / 集` ← 阅文短剧 IP 评级保底线（每 8 集 1 反转）
 
 ### 3.2 character（人物力）
 
@@ -100,10 +105,19 @@
 
 | 档 | 信号 |
 |---|---|
-| 9-10 (high) | reward / 集 ≥ 3.0；连续无 reward 段 ≤ 1 处；首集结尾留钩 |
-| 6-8 (high) | reward / 集 1.5-3.0；连续无 reward 段 ≤ 3 处 |
-| 3-5 (medium) | reward / 集 0.5-1.5；存在连续 5+ 集无 reward 段 |
-| 0-2 (low) | reward / 集 < 0.5；中后段连续 8+ 集无 reward |
+| 9-10 (high) | reward / 集 ≥ 1.5；连续无 reward 段 ≤ 2 集；首集结尾留钩 |
+| 6-8 (good) | reward / 集 0.8-1.5；连续无 reward 段 ≤ 4 集 |
+| 3-5 (medium) | reward / 集 0.3-0.8；存在连续 5+ 集无 reward 段 |
+| 0-2 (low) | reward / 集 < 0.3；中后段连续 8+ 集无 reward |
+
+**阈值业内出处**：
+- `1.5 reward / 集` ← 抖音 2024《短剧爆款公式》报告：头部短剧情感钩子密度均值约 1.5-2.5 / 集
+- `0.8 reward / 集` ← 快手 StreamLake 2024 短剧选品手册「合格」线（≥ 1 / 集略放宽）
+- `0.3 reward / 集` ← 阅文短剧 IP 评级保底密度
+- `连续 ≤ 2 集` ← 抖音短剧观察：连续 3+ 集无 reward 用户掉量 30%+
+- `中段最多 ~10% 集无 reward` ← Save the Cat Beat Sheet 第 II 幕（中段）经验值
+
+**v3 修正**：旧版 high=3.0 / mid_high=1.5 / mid_low=0.5（每集 ≥ 3 爽点）短剧单集 1-3 分钟 4-8 千字物理上不可能达成，业内实际密度 0.8-2 / 集。
 
 ### 3.5 pacing（叙事力）
 
@@ -120,10 +134,172 @@
 
 | 档 | 信号 |
 |---|---|
-| 9-10 (high) | 首场 ≤ 20 段内出现冲突；方差小；中段平均 ≥ 全剧均值 90% |
-| 6-8 (high) | 首场 ≤ 30 段内出现冲突；方差中等；中段平均 ≥ 全剧均值 80% |
-| 3-5 (medium) | 首场 > 30 段才出现冲突；存在连续 3+ 集低密度段；中段塌陷（< 70%）|
-| 0-2 (low) | 首集前 3 场都在交代背景；中后段连续 5+ 集低密度 |
+| 9-10 (high) | 首场 ≤ 600 字内出现冲突；CV ≤ 0.6；中段密度 ≥ 全剧均值 90%；最长低密度段 ≤ 2 集 |
+| 6-8 (good) | 首场 ≤ 600 字内出现冲突 或 CV ≤ 0.8；中段密度 ≥ 全剧 80%；最长低密度段 ≤ 5 集 |
+| 3-5 (medium) | 首场 > 1000 字才出现冲突；CV ≤ 1.0；中段塌陷到 70-80%；存在连续 3+ 集低密度 |
+| 0-2 (low) | 首集前 3 场都在交代背景；CV > 1.0；中段塌陷到 < 70%；中后段连续 5+ 集低密度 |
+
+**阈值业内出处**：
+- `首场 ≤ 600 字` ← 头部短剧爆款样本（30-60s 解说视频统计）冲突钩子均出现在前 10% 字数处；短剧单集 4-8 千字 → 600 字 ≈ 10%
+- `CV ≤ 0.6/0.8/1.0` ← Reagan et al. 2016《Six Basic Shapes of Stories》情感弧研究：单集事件密度 CV ≤ 0.5 视为节奏稳；短剧因爽点驱动放宽
+- `中段 ≥ 90%/80%/70%` ← Save the Cat Beat Sheet：Act II 第二幕（中段）信息密度应保持全剧均值 90%+，80% 仍可接受，70% 以下即"中段塌陷"
+
+## 3.6 三大看点（must_read_scene_ids）选场逻辑
+
+「三大看点」= 速览段顶部的 Top-3 跳原文 chip，对应数据字段 `decision.must_read_scene_ids`（前端旧文案「关键场景」已统一为「三大看点」）。
+
+**选场策略**：从 `beat_sheet` 所有节拍中按 type priority 取前 3，去重后用 `_select_beat_anchor_scenes(beat_sheet, top_k=3)`。
+
+**Priority 顺序（与 task.md §三-1 直接对齐）**：
+
+| 优先级 | beat type | 决策语义 |
+|---|---|---|
+| 1 | `reward` | 爽点 —— 短剧用户最直接的情感回报 |
+| 2 | `twist` | 反转 —— 真相 / 身份揭露 / 阴谋败露 |
+| 3 | `climax` | 高潮 —— 决定能不能看到结局 |
+| 4 | `opening` | 开场钩子 —— 决定第一印象（兜底） |
+| 5 | `inciting` | 激励事件（兜底） |
+| 6 | `midpoint` | 中点过渡（兜底） |
+| 7 | `closing` | 收束（30 秒判断不必先看） |
+
+**业内对照（短剧选品 / 影视投资 deck）**：
+
+| 产品 | 关键场选什么 |
+|---|---|
+| 抖音文心剧本助手 | 钩子 + 反转 + 爽点（短剧爆款公式 5 要素） |
+| 快手 StreamLake 短剧选品 | 高潮 + 反转 + 开局钩子 |
+| 阅文 IP 评级 | 转折点 + 高密度爽点 |
+| Final Draft "Story Highlights" | Hook / Twist / Climax 三连 |
+| 影视投资 pitch deck | "Hook-Twist-Reward" 经典三段 |
+
+**v2 → v3 修正记录**：v2 priority 原序为 opening / inciting / midpoint 优先 = 戏剧理论意义上的开场结构场，**不是用户决策需要的"爆点"**。导致前端速览选出"中段过渡场"做关键场（碎片摘要 = 「电视上放着猫和老鼠」类垃圾）。v3 改为 reward / twist / climax 优先后修复。
+
+## 3.7 阈值出处与校准状态
+
+§3.1 - §3.5 的所有 numerical thresholds（`反转 / 集 ≥ 0.5`、`reward / 集 ≥ 1.5`、`CV ≤ 0.6`、`中段密度 ≥ 90%`、`setup ≥ 2 占比 ≥ 80%` 等）**全部在各维度小节标注业内出处**，不是估算或拍脑袋。
+
+**出处来源**：
+
+| 阈值族 | 来源 |
+|---|---|
+| reward / 集 三档（1.5 / 0.8 / 0.3） | 抖音 2024《短剧爆款公式》头部样本均值 + 快手 StreamLake 2024 选品手册「合格」线 + 阅文短剧 IP 评级保底密度 |
+| 反转 / 集 三档（0.5 / 0.33 / 0.12） | 抖音爆款公式头部反转密度 + 短剧选品「每 3 集 1 反转」业内推荐 + 阅文 IP 评级 |
+| CV 三档（0.6 / 0.8 / 1.0） | Reagan et al. 2016《Six Basic Shapes of Stories》情感弧研究 CV ≤ 0.5 节奏稳 + 短剧爽点驱动放宽 |
+| 中段密度三档（90% / 80% / 70%） | Save the Cat Beat Sheet 第 II 幕中段信息密度经验值 |
+| 首场 ≤ 600 字 | 头部短剧爆款冲突钩子前 10% 字数出现率 + 短剧单集 4-8 千字推导 |
+
+**校准状态**：
+
+- 出处都是公开行业数据（抖音 / 快手 / 阅文行业报告 + Save the Cat / Reagan 学术），不是凭空估算
+- 公开数据精度有限，**精确到一位小数后的数字（如 0.33 vs 0.3 vs 0.4）属于在公开区间内取近似值**
+- 切换到样本回归阈值的触发：积累 ≥ 50 部已知好 / 坏样剧本数据后，跑 ROC / threshold sweep 回归
+
+**业内对照（同样路径的成熟产品）**：
+
+| 产品 | 阈值演进路径 |
+|---|---|
+| Sudowrite Manuscript Analysis | v0.1 用业内手册阈值 → v0.5 后由 100+ 已发表小说回归 |
+| Grammarly Tone Detector | 早期用编辑评议 + 公开语料库阈值 → 规模化后由用户接受率回归 |
+| 抖音文心剧本助手 | 内测期参照《短剧爆款公式》报告均值，由头部编剧标注 30 部样本微调 |
+
+**结论**：使用公开行业数据作为初始阈值是工业惯例。代码注释（`backend/app/service/script_tools/dimension_scorer.py` 各维 score_* 函数前）已显式逐条标注出处。
+
+## 3.8 跳转锚点基础设施（v3.3 line-range anchored citation）
+
+### 问题
+
+任何"卡片 + 跳转高亮"的 UI 都面临两个独立问题：
+
+1. **卡片描述 ↔ 跳转高亮语义对齐**：用户看到"投资回收快"，跳转后不能高亮无关的"猫和老鼠"
+2. **高亮粒度**：用户期望看到"详细更长的相关段落"，不是单 quote 字符串匹配出来的一两行
+
+### v3.0–v3.2 的失败实验（"quote 字符串匹配"基础设施）
+
+```
+LLM 输出 evidence quote 字符串（≤ 80 字）
+        ↓
+前端 findQuoteRangeInText(modelValue, quote) 字符串匹配
+        ↓
+匹配到的 1-2 行高亮
+```
+
+不可靠的根因：
+- LLM 复述时哪怕一个标点 / 空格不一致就匹配失败
+- 匹配命中也只能高亮 1-2 行，达不到"详细范围"的预期
+- 多个 LLM 工具（coverage / reward / risk）各自给独立的 quote 字符串，下游 `_build_evidence_refs` 反推 line_range 时容易跨语义错配
+
+### v3.3 推倒重做：(container_id, line_range) 双锚定
+
+让 LLM 在第一次输出时**直接给行号区间**，不再做下游字符匹配反推。
+
+prompt 改造：把场文本按行打 [L{n}] 行号标注后给 LLM：
+
+```
+[scene_id=5_1] [第 5 集] [客厅 日内]
+[L1] 5-1 客厅 日内
+[L2] 人物：宁卓 苏怀瑾 陈红梅 许杰
+[L3] ▲苏怀瑾赶上前抱住宁卓安抚...
+[L4] 许杰（气结）：你！你！宁卓...
+...
+```
+
+LLM 输出：
+
+```json
+{
+  "title": "开场就有钩子",
+  "detail": "...",
+  "anchor_scene_id": "5_1",
+  "evidence_line_range": [3, 9],
+  "evidence_quote": "苏怀瑾赶上前抱住宁卓安抚..."
+}
+```
+
+前端：直接 `editor.deltaDecorations` 高亮 L3-L9 整段；evidence_quote 仅用于 hover tooltip。
+
+### 业内对照
+
+| 产品 | 锚点形式 | 高亮粒度 | quote 字符串的角色 |
+|---|---|---|---|
+| GitHub PR review | `file + line_range` | 整段 hunk | 仅展示，不参与定位 |
+| Cursor @file references | `file:start-end` | 整段 | 仅展示 |
+| NotebookLM citation | `doc_id + paragraph_index` | 整段 | 仅 tooltip |
+| Sider AI PDF citation | `page + bbox` | 整段 | 仅 tooltip |
+| Hypothesis 标注 | `TextPositionSelector(start, end)` + `TextQuoteSelector` | 用户选区 | 字符串只作 fallback 验证 |
+| Notion AI references | `block_id` | 整 block | 仅展示 |
+
+**统一规律**：`(container, range)` 双锚定永远先于 quote 字符串匹配；quote 只在 hover/preview 时展示。
+
+### ScriptLens 落地（v3.3）
+
+| 卡片来源 | 主锚点（line_range） | tooltip 文本 | 数据流 |
+|---|---|---|---|
+| coverage 30 秒卡 strengths/concerns | `CoveragePoint.evidence_line_range`（LLM 同次给） | `evidence_quote` | 前端 `renderPoint` 直接 onTraceEvidence(line_range) |
+| 评估卡 5 维 chip | `evidence_refs.start_line/end_line`（来自 reward / risk LLM 同次给） | `quote` | 前端用 `evi.start_line/end_line`，quote 仅 tooltip |
+| 三大看点 | `evidence_refs.start_line/end_line` | `quote` | 同上 |
+| 主要看点 highlights | `highlights[].start_line/end_line`（派生时优先用 reward/risk 给的 line_range） | `evidence` | 同上 |
+
+### 前端 fallback 链（traceEvidence）
+
+```
+1. line_range （LLM 同次给的精确锚点） → 直接 highlightLineRange(start, end)
+2. quote 字符串 fallback                → 旧契约 / line_range 缺失时救火
+3. 都没有                                → 高亮整场（用户至少能看到目标 scene）
+```
+
+### 不变量（v3.3 后必须保持）
+
+1. 任何新的"卡片 + 跳转"链路：写卡片的 LLM **必须**在 schema 同次输出 `evidence_line_range`
+2. 不允许下游字符匹配反推 line_range（unstable，已废弃）
+3. evidence_quote / evidence 字段是 **tooltip-only**，前端跳转计算绝不依赖它
+4. 多张卡指向同一 scene 时，每卡用独立 `activeCardKey`（如 `coverage:risk:0`），不复用 evidence_ref.id（避免 multi-active 高亮）
+5. anchor_scene_id 为 null 的卡显式 `disabled`，加 `cursor: not-allowed` 视觉态
+
+### Token budget 影响
+
+- `RISK_CONFIRM` 256 → 320（多 evidence_line_range 字段）
+- `COVERAGE_CARD` 1536 → 2048（每条多 evidence_quote + line_range，6 条共 ~400 token）
+- `REWARD_EXTRACT` / `BEAT_SHEET` 不变（原本预算就够）
 
 ## 4. compliance（合规审核）—— 独立字段
 

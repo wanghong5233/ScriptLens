@@ -23,6 +23,30 @@ from utils.database import engine as default_engine
 logger = logging.getLogger(__name__)
 
 
+# ============================================================
+# Evidence quote 长度上限
+# ============================================================
+#
+# 取值依据（不是魔法数字）：
+# - 前端 evidence chip 单行容器宽度 ≈ 720px（rail segment 宽 750px - 内边距）
+# - 默认字号 14px，中文字宽 ≈ 14px → 单行容纳约 51 个中文字符
+# - 多行展示限 2 行 → 102 字理论上限，留 10% 安全边 → 90 字
+# - LLM 输出预留省略号 + JSON 结构 overhead → reward / risk evidence 上限取 80 字
+#   （比展示上限 90 字小，留缓冲；超 80 由前端 ellipsis 处理）
+#
+# 调用站：
+# - extract_quote(max_chars=EVIDENCE_QUOTE_MAX_LEN)
+# - reward_extractor 提示模板「evidence ≤ 80 字」
+# - risk_screener evidence excerpt
+# - 前端 MustReadChip / HighlightRow scene_summary 截断
+#
+# 任何调用方需要不同长度上限时**必须在此声明常量**，不允许 inline 数字。
+
+EVIDENCE_QUOTE_MAX_LEN: int = 90
+LLM_EVIDENCE_MAX_LEN: int = 80
+SCENE_SUMMARY_MAX_LEN: int = 70
+
+
 @dataclass
 class Scene:
     """场景内存表示。与 DB 字段 1:1。"""
@@ -232,7 +256,7 @@ def _is_meta_line(line: str) -> bool:
 def extract_quote(
     *,
     scene_id: str,
-    max_chars: int = 90,
+    max_chars: int = EVIDENCE_QUOTE_MAX_LEN,
     engine: Engine = default_engine,
 ) -> Optional[dict]:
     """提取场景里最显著的一段，作为 evidence_refs.quote。
@@ -311,6 +335,139 @@ def extract_quote(
         "start_line": quote_line,
         "end_line": quote_line,
     }
+
+
+def format_scene_for_llm(
+    *,
+    scene_text: str,
+    max_chars: Optional[int] = None,
+) -> str:
+    """把场文本按行打 [L{n}] 行号标注，给 LLM 引用 evidence_line_range。
+
+    输出格式（n 是 1-based 行号）：
+        [L1] 5-1 客厅 日内
+        [L2] 人物：宁卓 苏怀瑾 陈红梅 许杰
+        [L3] ▲苏怀瑾赶上前抱住宁卓安抚...
+        [L4] 许杰（气结）：你！你！宁卓...
+
+    业内对照：Cursor codebase indexing / GitHub Copilot Workspace 都用这种
+    "原文带行号 → LLM 引用 file:start-end" 的方式把锚点责任前置到 LLM，
+    避免下游字符匹配反推（不稳定）。
+
+    若 max_chars 给定，截断时尽量按行切（保持行号语义），并在末尾标 [TRUNCATED]。
+    """
+    if not scene_text:
+        return ""
+    raw_lines = scene_text.split("\n")
+    if max_chars is None or sum(len(ln) for ln in raw_lines) + len(raw_lines) <= max_chars:
+        return "\n".join(f"[L{i + 1}] {ln}" for i, ln in enumerate(raw_lines))
+
+    out: List[str] = []
+    used = 0
+    for i, ln in enumerate(raw_lines):
+        cell = f"[L{i + 1}] {ln}"
+        if used + len(cell) + 1 > max_chars:
+            out.append("[TRUNCATED]")
+            break
+        out.append(cell)
+        used += len(cell) + 1
+    return "\n".join(out)
+
+
+def locate_quote_in_scene(
+    *,
+    scene_text: str,
+    quote: str,
+) -> Optional[tuple[int, int]]:
+    """在 scene.text 里定位一段 LLM 给的 evidence 文本的 1-indexed 行号范围。
+
+    返回 (start_line, end_line)；找不到返回 None（调用方应 fallback）。
+
+    用于：reward_extractor / risk_screener LLM 输出的 evidence 字段（要求是原文片段）
+    需要被精确定位到行号，前端高亮才能跳到真正的论据所在行。
+
+    匹配策略（递进 fallback）：
+    1. 完全匹配 scene_text.find(quote) —— 字面对齐
+    2. 行内子串匹配 —— 遍历 scene_text 每一行，找首条 contains(quote 前 30 字) 的行
+    3. 前 12 字模糊匹配 —— LLM 改写或加省略号时退化为头部对齐
+    """
+    if not scene_text or not quote:
+        return None
+    raw_lines = scene_text.split("\n")
+
+    pos = scene_text.find(quote)
+    if pos != -1:
+        before = scene_text[:pos]
+        start = before.count("\n") + 1
+        end = start + quote.count("\n")
+        return (start, end)
+
+    head = quote[:30].strip()
+    if head:
+        for idx, ln in enumerate(raw_lines):
+            if head and head in ln:
+                return (idx + 1, idx + 1)
+
+    head_short = quote[:12].strip()
+    if head_short:
+        for idx, ln in enumerate(raw_lines):
+            if head_short and head_short in ln:
+                return (idx + 1, idx + 1)
+    return None
+
+
+def parse_line_range(
+    raw: object,
+    *,
+    scene_line_count: int,
+    max_span: int = 20,
+) -> Optional[tuple[int, int]]:
+    """LLM 输出的 line_range 解析与校验。
+
+    - 接受 [start, end] / {"start": s, "end": e} / "L3-L9" / "3-9" 多种形态
+    - 1-based 闭区间；start <= end
+    - clamp 到 [1, scene_line_count]
+    - 跨度超 max_span 时截到 max_span（防 LLM 给整场 1-99 大区间）
+    - 解析失败返回 None（调用方应 fallback 到整场或 quote 反推）
+    """
+    if scene_line_count <= 0:
+        return None
+
+    start = end = None
+    if isinstance(raw, (list, tuple)) and len(raw) == 2:
+        try:
+            start = int(raw[0])
+            end = int(raw[1])
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(raw, dict):
+        try:
+            start = int(raw.get("start"))  # type: ignore[arg-type]
+            end = int(raw.get("end"))  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+    elif isinstance(raw, str):
+        s = raw.strip().lstrip("L").lstrip("l")
+        if "-" not in s:
+            return None
+        try:
+            a, b = s.split("-", 1)
+            start = int(a.strip().lstrip("L").lstrip("l"))
+            end = int(b.strip().lstrip("L").lstrip("l"))
+        except (TypeError, ValueError):
+            return None
+    else:
+        return None
+
+    if start is None or end is None:
+        return None
+    if end < start:
+        start, end = end, start
+    start = max(1, min(start, scene_line_count))
+    end = max(1, min(end, scene_line_count))
+    if end - start + 1 > max_span:
+        end = start + max_span - 1
+    return (start, end)
 
 
 def get_scene_id_by_no(

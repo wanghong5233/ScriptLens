@@ -30,21 +30,35 @@ from service.script_tools.risk_terms import (
     all_medium_risk_terms,
     categorize_term,
 )
-from service.script_tools.scene_repo import Scene, locate_scenes_by_keyword
+from service.script_tools.scene_repo import (
+    Scene,
+    format_scene_for_llm,
+    locate_scenes_by_keyword,
+    parse_line_range,
+)
 
 logger = logging.getLogger(__name__)
 
 
 @dataclass
 class RiskHit:
+    """单条 risk 命中。
+
+    v3.3 line-range anchored：
+    - `evidence_line_range` 是 LLM 二筛时同次给出的场内行号区间（1-based 闭区间）
+      （low_risk 不过 LLM，行号通过关键词位置反推；high/medium 由 LLM 直接给）
+    - `excerpt` 仅作 tooltip 展示文本
+    """
+
     scene_id: str
     scene_no: str
     episode_no: Optional[int]
     level: str  # high_risk | medium_risk | low_risk
     category: str  # underage_sexual / wealth_worship / vulgar_language / ...
     matched_term: str
-    excerpt: str  # 命中片段（≤120 字）
+    excerpt: str  # 命中片段（≤120 字），tooltip-only
     confirmed_by_llm: bool
+    evidence_line_range: Optional[tuple[int, int]] = None
 
 
 @dataclass
@@ -60,7 +74,7 @@ _BATCH_SIZE = 8
 _MAX_TEXT_PER_SCENE = 600
 
 
-_JUDGE_PROMPT = """下面是中文短剧场景片段，已被关键词「{term}」（属于 {category} 类）命中。
+_JUDGE_PROMPT = """下面是中文短剧场景片段（按行打了 [L{{n}}] 行号标注），已被关键词「{term}」（属于 {category} 类）命中。
 请判断这是「真实出现的违规内容」，还是「比喻 / 否定 / 引用 / 词义不同」的误命中。
 
 【场景】
@@ -70,8 +84,13 @@ _JUDGE_PROMPT = """下面是中文短剧场景片段，已被关键词「{term}�
 输出 JSON：
 {{
   "is_real_violation": <true|false>,
-  "rationale": "<≤60 字>"
-}}"""
+  "rationale": "<≤60 字>",
+  "evidence_line_range": [<违规内容起始行号>, <结束行号>]
+}}
+
+evidence_line_range 规则：
+- 仅在 is_real_violation=true 时填写；为 false 时填 null
+- 引用 [L{{n}}] 行号（1-based 闭区间），覆盖违规内容真正出现的那段（典型 1-3 行）"""
 
 
 async def screen_risks(
@@ -167,15 +186,14 @@ async def _confirm_with_llm(records: List[_Record], caller: LlmCaller) -> List[R
 
 
 async def _judge_one(rec: _Record, caller: LlmCaller) -> Optional[RiskHit]:
-    text = rec.scene.text or ""
-    if len(text) > _MAX_TEXT_PER_SCENE:
-        text = text[:_MAX_TEXT_PER_SCENE] + "…"
+    raw_text = rec.scene.text or ""
+    annotated = format_scene_for_llm(scene_text=raw_text, max_chars=_MAX_TEXT_PER_SCENE)
     prompt = _JUDGE_PROMPT.format(
         term=rec.matched_term,
         category=rec.category,
         scene_no=rec.scene.scene_no,
         scene_label=rec.scene.scene_label or "",
-        text=text,
+        text=annotated,
     )
     try:
         resp = await caller.call_json(
@@ -184,15 +202,29 @@ async def _judge_one(rec: _Record, caller: LlmCaller) -> Optional[RiskHit]:
         )
     except ScoreLLMError as e:
         logger.warning("risk judge failed scene_no=%s term=%s: %s", rec.scene.scene_no, rec.matched_term, e)
-        # 二级判定失败 → 保守起见保留为「未确认」，不算入正式分级
         return _to_hit(rec, confirmed=False)
 
     parsed = resp.parsed if isinstance(resp.parsed, dict) else {}
     is_real = bool(parsed.get("is_real_violation", False))
-    return _to_hit(rec, confirmed=is_real, rationale=str(parsed.get("rationale") or "")[:120])
+    line_range = None
+    if is_real:
+        scene_lc = len(raw_text.split("\n")) if raw_text else 0
+        line_range = parse_line_range(parsed.get("evidence_line_range"), scene_line_count=scene_lc, max_span=8)
+    return _to_hit(
+        rec,
+        confirmed=is_real,
+        rationale=str(parsed.get("rationale") or "")[:120],
+        line_range=line_range,
+    )
 
 
-def _to_hit(rec: _Record, *, confirmed: bool, rationale: str = "") -> RiskHit:
+def _to_hit(
+    rec: _Record,
+    *,
+    confirmed: bool,
+    rationale: str = "",
+    line_range: Optional[tuple[int, int]] = None,
+) -> RiskHit:
     excerpt = (rec.scene.text or "")[:120]
     if rationale:
         excerpt = f"{excerpt}｜判定：{rationale}"
@@ -205,6 +237,7 @@ def _to_hit(rec: _Record, *, confirmed: bool, rationale: str = "") -> RiskHit:
         matched_term=rec.matched_term,
         excerpt=excerpt,
         confirmed_by_llm=confirmed,
+        evidence_line_range=line_range,
     )
 
 

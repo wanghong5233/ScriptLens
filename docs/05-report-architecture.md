@@ -73,7 +73,9 @@
 | 短剧节奏特殊性 | 短剧每集需钩子，每 2-3 集需反转，集尾留钩；与 90 分钟商业片节奏不同 | 整剧用三幕（开局/发展/收束），单集事件密度 + 情感弧走 pacing_curve；不套 Save the Cat 15 节拍 |
 | 人物理解形式 | 学术（Elson 2010 共现网络）+ 工业（豆瓣 / Wikipedia 关系图）共识用图 | 共现矩阵给候选边 + LLM 给关系类型 + 力导向布局；避免「只共现没关系类型」与「纯 LLM 不稳」 |
 | LLM 调用成本 | 单 chain 1-2 次调用，4 chain 串行 ≈ 1-2 分钟 | 4 chain 并行（asyncio.gather），总耗时 ≈ 最慢的一个 |
-| 关键场景挑选 | 旧链路用 5 维评分证据当关键场，导致动作行被当关键场（「电视上放着猫和老鼠」） | beat_chain 给的节拍锚点场 = 关键场；scene_summary 由 LLM 全场总结，不是 quote 截取 |
+| 三大看点（关键场）挑选 | v1 用 5 维评分证据当关键场，动作行被截作摘要（「电视上放着猫和老鼠」碎片）；v2 改用 beat_chain 节拍锚点 + LLM 全场 scene_summary；**v3 调整 priority**：原序 opening/inciting/midpoint 优先 → 现序 reward/twist/climax 优先（爽点 / 反转 / 高潮 三连），开场钩子降为兜底 | 业内对照：抖音文心 / 快手 StreamLake「短剧爆款公式」均以 reward/twist/climax 为头号信号；Final Draft "Story Highlights" / pitch deck "Hook-Twist-Reward" 同；与 task.md §三-1「主要看点 / 钩子 / 反转 / 爽点」直接对齐 |
+| 卡片描述与跳转 quote 的语义对齐 | v3.1 之前所有 chip 跳转的 quote 统一从 evidence_refs 反查（`extract_quote` 拍场内第一行）→ 跟卡片描述完全无关（如「投资回收快」跳到「啪的一声给了她一巴掌」）；v3.2 让每个卡片自带 LLM 同源给出的 evidence_quote 字符串；**v3.3 推倒重做"quote 字符匹配"基础设施，改用 (scene_id, line_range) 双锚定**：prompt 把场文本按行打 [L{n}] 标注后给 LLM，LLM 直接输出 evidence_line_range；前端 deltaDecorations 高亮整段，quote 字符串退化为 tooltip-only | 业内对照：GitHub PR review hunk / Cursor @file references / NotebookLM citation / Sider AI PDF citation / Hypothesis TextPositionSelector / Notion block_id 都是 (container, range) 双锚定，quote 字符串只做展示，从不参与定位计算。详见 docs/08 §3.8 |
+| 多卡同时高亮 / 卡片不可点击 bug | v3.2 用 evidence_refs 的共享 id 作 activeKey → 多张 coverage 卡指向同一 scene_id 时同时 active；anchor_scene_id 为 null 的卡静默不响应 | **v3.3 修复**：每张卡用独立 `activeCardKey`（如 `coverage:risk:0`）；anchor 为 null 的卡显式 disabled + cursor: not-allowed |
 | 可视化库选型 | react-force-graph-2d ~150KB / vis-network ~500KB / cytoscape ~700KB / 自写 SVG 工作量大 | react-force-graph-2d（D3 内核 + API 简单 + 体积可控） |
 | 5 维评分定位 | task.md §五 3 是加分项，要的是「等级判断或量化分析」，不指定形式 | PRD §6 的 5 维（opening_hook / reward_density / motivation / pacing / risk）保留，作为评估 segment 的「数据评估卡」 |
 
@@ -94,8 +96,8 @@ ReportPayload (v3) {
     confidence:     'high' | 'medium' | 'low'
     genre:          string[]                        // 1-3 个
     core_value:     string                          // ≤ 30 字「最值得关注的价值」
-    strengths:      { title, detail, anchor_scene_id? }[]   // 3 项
-    concerns:       { title, detail, anchor_scene_id? }[]   // 3 项
+    strengths:      { title, detail, anchor_scene_id?, evidence_quote? }[]   // 3 项
+    concerns:       { title, detail, anchor_scene_id?, evidence_quote? }[]   // 3 项
   }
 
   beat_sheet: {
@@ -172,7 +174,7 @@ ReportPayload (v3) {
 
 | segment | 数据 | 心智 | 主要交互 | 关键 UI 模式 |
 |---|---|---|---|---|
-| **速览** | `coverage_card` + decision badge + `overall_score` + `decision.one_sentence_reason`（顶部 hero 删除后下沉）+ `character_graph` 节点数 + `pacing_curve` spike 数 | 30 秒决策 | 看 logline / 推荐 / 综合分 / 优劣 | Hero block（决策 + 综合分大字）→ KPI row（人物 / 关键场 / 节拍 / 风险）→ Reason callout → 3 优 / 3 劣 **左右分栏** → 剧本概览 **折叠** → 关键场景 **缩略**（locator + 一句话 + →）→ 主要看点 **top-3 + 展开**。业内对照：抖音文心 / Linear / Bloomberg pitch deck |
+| **速览** | `coverage_card` + decision badge + `overall_score` + `decision.one_sentence_reason`（顶部 hero 删除后下沉）+ `character_graph` 节点数 + `pacing_curve` spike 数 | 30 秒决策 | 看 logline / 推荐 / 综合分 / 优劣 | Hero block（决策 + 综合分大字）→ KPI row（人物 / 三大看点 / 节拍 / 风险）→ Reason callout → 3 优 / 3 劣 **左右分栏** → 剧本概览 **折叠** → **三大看点**（钩子 / 反转 / 爽点 三连，单行 = locator + 一句话 + →）→ 主要看点 **top-3 + 展开**。业内对照：抖音文心 / Linear / Bloomberg pitch deck |
 | **故事** | `beat_sheet` + `pacing_curve` 完整（事件 + 情感弧） | 5 分钟读懂故事 | 点节拍 chip 展开 / 跳原文；曲线 hover 看具体集 | 三幕**横向 3 栏卡片**（开局 / 发展 / 收束），节拍 chip 默认收起、长 summary 点击展开；节奏曲线**ECharts line chart**（spike 标红 + 平均线）。业内对照：Final Draft Story Map / Save the Cat / 抖音文心节拍图谱 / YouTube Studio analytics |
 | **人物** | `character_graph` 完整（force-directed） | 5 分钟读懂人物 | 点节点 → 编辑器跳首场；点边 → 看共现场列表 | (本期不动) |
 | **评估** | `evaluation` + `evidence_refs` + `compliance` + `risk_flags` | 诊断验证 + 论据展开 | 点证据跳原文；点维度卡 **展开**看 Rubric 锚点 + 完整 reason + 证据列表 + 追问 Agent | 维度卡**可展开**：收起态（label + score + 一句 reason + 证据 chip 缩略）/ 展开态（4 档 Rubric 表 + 当前档高亮 + 完整 reason + 信号源 + 全证据 + 追问 Agent 按钮）。Rubric 数据源 = `frontend/src/pages/doc-studio/evaluationRubric.ts`，与 `docs/08 §3` 双向同步。业内对照：Sudowrite / Coursera / Grammarly / 学术 peer review |

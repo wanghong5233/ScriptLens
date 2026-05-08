@@ -53,8 +53,14 @@ from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError,
 from service.script_tools.motivation_chain import score_motivation
 from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
-from service.script_tools.risk_screener import RiskResult, screen_risks
-from service.script_tools.scene_repo import extract_quote, get_scene
+from service.script_tools.risk_screener import RiskHit, RiskResult, screen_risks
+from service.script_tools.scene_repo import (
+    EVIDENCE_QUOTE_MAX_LEN,
+    LLM_EVIDENCE_MAX_LEN,
+    SCENE_SUMMARY_MAX_LEN,
+    extract_quote,
+    get_scene,
+)
 from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
@@ -224,16 +230,29 @@ async def _optional_chain(name: str, coro: Awaitable[Any]) -> Any:
 
 
 def _select_beat_anchor_scenes(beat_sheet: Optional[BeatSheet], *, top_k: int) -> List[str]:
+    """从 beat_sheet 选 top_k 个最值得用户先看的场。
+
+    业内对照（短剧选品 / 影视投资 deck）：
+        - 抖音文心剧本助手 / 快手 StreamLake：钩子 + 反转 + 爽点（reward / twist / climax）
+        - 阅文 IP 评级：转折点 + 高密度爽点
+        - Final Draft "Story Highlights" / "Hook-Twist-Reward" pitch 模板：reward / twist / climax 优先
+
+    与 task.md §三-1 列点完全对齐：「主要看点 / 钩子 / 反转 / 爽点在哪里」。
+    旧版 priority 取 opening / inciting / midpoint = 戏剧理论意义上的开场结构场，
+    不是用户决策需要的"爆点"——属于"看了 30 秒不知道值不值得继续读"的反向选场。
+    """
     if beat_sheet is None:
         return []
+    # 顺序：爽点 > 反转 > 高潮 > 开场钩子 > 激励 > 中点过渡 > 收束
+    # 短剧用户的判断顺序 = "有没有爽 → 有没有反转 → 有没有高潮 → 钩不钩人"
     priority = {
-        "opening": 0,
-        "inciting": 1,
-        "midpoint": 2,
-        "climax": 3,
-        "closing": 4,
-        "twist": 5,
-        "reward": 6,
+        "reward": 0,
+        "twist": 1,
+        "climax": 2,
+        "opening": 3,
+        "inciting": 4,
+        "midpoint": 5,
+        "closing": 6,
     }
     beats = [
         beat
@@ -429,9 +448,26 @@ async def generate_report(
             "running",
             detail="为每个评分挂载来源场次的原文 quote…",
         )
+        # v3.3 line-range anchored citation：所有跳转锚点都是 (scene_id, line_range) 双锚定。
+        # - coverage strengths/concerns：前端用 point.evidence_line_range，**不**走 evidence_refs
+        # - 评估卡 chip / 三大看点：用 evidence_refs.start_line/end_line（来自 reward / risk LLM 同次输出）
+        # - 主要看点 highlights：派生时用 reward / risk 的 evidence_line_range
+        reward_lookup: Dict[str, RewardEvent] = {ev.scene_id: ev for ev in reward_events}
+        risk_lookup: Dict[str, RiskHit] = {}
+        for hit in risk_r.hits or []:
+            if not hit.scene_id:
+                continue
+            if not (hit.excerpt or "").strip():
+                continue
+            if hit.level != "low_risk" and not hit.confirmed_by_llm:
+                continue
+            risk_lookup.setdefault(hit.scene_id, hit)
+
         evidence_refs_payload = _build_evidence_refs(
             dim_scores + [compliance_dim],
             extra_scene_ids=must_read_scene_ids,
+            reward_lookup=reward_lookup,
+            risk_lookup=risk_lookup,
             engine=engine,
         )
         await _attach_scene_summaries(evidence_refs_payload, caller=caller, engine=engine)
@@ -593,14 +629,22 @@ def _to_dim_from_risk(r: RiskResult) -> _DimScore:
 # ============================================================
 
 
+# 决策阈值常量。**整个文件只能从这里取数**，不许在 prompt / 规则兜底两处分别写。
+# 业内对照（Coverfly / Save the Cat workbook）：>=7.5 推荐立项，5-7.5 谨慎，<5 不立项。
+# 高风险硬约束 = `not_recommended`，独立于均分（rubric §4 + §5 已声明）。
+DECISION_THRESHOLDS = {
+    "recommend": 7.5,
+    "cautious": 5.0,
+}
+
 _DECISION_PROMPT = """你是中文短剧选品总监。下面是某剧的阅文五力评分 + 合规审核结果。
 任务：基于五力 + 合规给出**整体判断**：
 
 | 标签 | 触发条件 |
 |---|---|
-| recommend_continue | 五力平均 ≥7.5 且 合规不为 high_risk |
-| cautious_continue | 五力平均 5-7.5 / 个别维度低分但合规可控 |
-| not_recommended | 五力平均 <5 / 合规=high_risk / 多维同时低分 |
+| recommend_continue | 五力平均 ≥{recommend_threshold} 且 合规不为 high_risk |
+| cautious_continue | 五力平均 {cautious_threshold}-{recommend_threshold} / 个别维度低分但合规可控 |
+| not_recommended | 五力平均 <{cautious_threshold} / 合规=high_risk / 多维同时低分 |
 
 【五力评分】
 {scores_block}
@@ -661,6 +705,8 @@ async def _aggregate_decision(
         scores_block=scores_block,
         overall_score=overall_text,
         risk_level=risk_level,
+        recommend_threshold=DECISION_THRESHOLDS["recommend"],
+        cautious_threshold=DECISION_THRESHOLDS["cautious"],
     )
     # 决策聚合 LLM 失败 → 用规则法兜底（label/confidence 来自规则；reason 拼提示）
     # 这里**不是**评分 fail aloud，是"决策卡"层面的 graceful degradation：
@@ -700,15 +746,18 @@ async def _aggregate_decision(
 
 
 def _rule_label(overall: Optional[float], risk_level: str) -> str:
-    """规则兜底决策标签（决策卡 LLM 失败 / overall 缺失时使用）。"""
+    """规则兜底决策标签（决策卡 LLM 失败 / overall 缺失时使用）。
+
+    阈值与 _DECISION_PROMPT 同源 = `DECISION_THRESHOLDS`。
+    """
     if risk_level == "high_risk":
         return "not_recommended"
     if overall is None:
         # 评分证据不足，不能贸然 recommend；偏保守
         return "cautious_continue"
-    if overall >= 7.5:
+    if overall >= DECISION_THRESHOLDS["recommend"]:
         return "recommend_continue"
-    if overall >= 5.0:
+    if overall >= DECISION_THRESHOLDS["cautious"]:
         return "cautious_continue"
     return "not_recommended"
 
@@ -835,6 +884,7 @@ def _build_highlights(
     used_scenes: set[str] = set()
 
     # 1) reward_events（按 episode_no/scene_no 已排序）
+    # v3.3：start_line/end_line 优先用 LLM 给的 ev.evidence_line_range；否则退回 meta 行号
     for ev in reward_events:
         if ev.scene_id in used_scenes:
             continue
@@ -846,6 +896,7 @@ def _build_highlights(
             continue
         headline = _REWARD_TYPE_HEADLINE.get(ev.event_type, "看点")
         oneliner = _trim_oneliner(f"{headline} · {ev.evidence}")
+        line_range = ev.evidence_line_range
         out.append({
             "id": str(uuid.uuid4()),
             "type": hl_type,
@@ -853,8 +904,8 @@ def _build_highlights(
             "episode_no": ev.episode_no if ev.episode_no is not None else meta.get("episode_no"),
             "scene_no": ev.scene_no or meta.get("scene_no"),
             "scene_label": meta.get("scene_label"),
-            "start_line": meta.get("start_line"),
-            "end_line": meta.get("end_line"),
+            "start_line": line_range[0] if line_range else meta.get("start_line"),
+            "end_line": line_range[1] if line_range else meta.get("end_line"),
             "oneliner": oneliner,
             "evidence": ev.evidence,
         })
@@ -892,6 +943,7 @@ def _build_highlights(
         if meta is None:
             continue
         oneliner = _trim_oneliner(f"{h.category} · {h.matched_term}")
+        line_range = h.evidence_line_range
         out.append({
             "id": str(uuid.uuid4()),
             "type": "risk",
@@ -899,8 +951,8 @@ def _build_highlights(
             "episode_no": h.episode_no if h.episode_no is not None else meta.get("episode_no"),
             "scene_no": h.scene_no or meta.get("scene_no"),
             "scene_label": meta.get("scene_label"),
-            "start_line": meta.get("start_line"),
-            "end_line": meta.get("end_line"),
+            "start_line": line_range[0] if line_range else meta.get("start_line"),
+            "end_line": line_range[1] if line_range else meta.get("end_line"),
             "oneliner": oneliner,
             "evidence": h.excerpt,
         })
@@ -968,9 +1020,24 @@ def _build_evidence_refs(
     dim_scores: List[_DimScore],
     *,
     extra_scene_ids: Optional[List[str]] = None,
+    reward_lookup: Optional[Dict[str, RewardEvent]] = None,
+    risk_lookup: Optional[Dict[str, "RiskHit"]] = None,
     engine: Engine,
 ) -> List[Dict]:
-    """收集所有维度提到的 scene_id，去重，逐个调 extract_quote 生成 evidence_ref。"""
+    """收集所有维度提到的 scene_id，去重，按语义优先级生成 evidence_ref。
+
+    v3.3 line-range anchored citation：
+    - start_line / end_line **直接用 LLM 同次给的 evidence_line_range**，不再字符匹配反推
+    - quote 字段仅作 tooltip 展示文本
+
+    优先级（每条 evidence_ref 的锚点 + 展示文本）：
+    1. 该场是 reward 命中 → (line_range, quote) = (reward.evidence_line_range, reward.evidence)
+    2. 该场是 risk  命中 → (line_range, quote) = (risk.evidence_line_range,   risk.excerpt)
+    3. 都不是 → fallback extract_quote（场内首条非空行的行号 + 文本，仅占位）
+
+    业内对照：GitHub PR review hunk / Cursor codebase index / NotebookLM citation
+    都是 (container_id, line_range) 双锚定，quote 字符串只做展示，从不参与定位。
+    """
     seen_scene_ids: List[str] = []
     seen: set[str] = set()
     scene_to_dimensions: Dict[str, List[str]] = {}
@@ -986,13 +1053,50 @@ def _build_evidence_refs(
             seen_scene_ids.append(sid)
         scene_to_dimensions.setdefault(sid, []).append("关键场景")
 
+    reward_lookup = reward_lookup or {}
+    risk_lookup = risk_lookup or {}
+
     out: List[Dict] = []
     for sid in seen_scene_ids:
         q = extract_quote(scene_id=sid, engine=engine)
         if q is None:
             continue
+
+        final_quote: str = q.get("quote") or ""
+        final_start: Optional[int] = q.get("start_line")
+        final_end: Optional[int] = q.get("end_line")
+        quote_source: str = "fallback_first_line"
+
+        if sid in reward_lookup:
+            ev = reward_lookup[sid]
+            display_quote = ev.evidence or final_quote
+            if len(display_quote) > EVIDENCE_QUOTE_MAX_LEN:
+                display_quote = display_quote[: EVIDENCE_QUOTE_MAX_LEN - 1] + "…"
+            final_quote = display_quote
+            quote_source = f"reward:{ev.event_type}"
+            if ev.evidence_line_range is not None:
+                final_start, final_end = ev.evidence_line_range
+            else:
+                logger.warning(
+                    "evidence_refs.line_range_missing scene_id=%s source=%s",
+                    sid, quote_source,
+                )
+        elif sid in risk_lookup:
+            hit = risk_lookup[sid]
+            display_quote = hit.excerpt or final_quote
+            if len(display_quote) > EVIDENCE_QUOTE_MAX_LEN:
+                display_quote = display_quote[: EVIDENCE_QUOTE_MAX_LEN - 1] + "…"
+            final_quote = display_quote
+            quote_source = "risk_hit"
+            if hit.evidence_line_range is not None:
+                final_start, final_end = hit.evidence_line_range
+            else:
+                logger.warning(
+                    "evidence_refs.line_range_missing scene_id=%s source=risk_hit",
+                    sid,
+                )
+
         evi_id = str(uuid.uuid4())
-        # reason 字段：记录哪些维度 / 故事节拍引用了这一场
         dims = sorted(set(scene_to_dimensions.get(sid, [])))
         out.append({
             "id": evi_id,
@@ -1000,9 +1104,10 @@ def _build_evidence_refs(
             "episode_no": q.get("episode_no"),
             "scene_no": q.get("scene_no"),
             "scene_label": q.get("scene_label"),
-            "start_line": q.get("start_line"),
-            "end_line": q.get("end_line"),
-            "quote": q.get("quote"),
+            "start_line": final_start,
+            "end_line": final_end,
+            "quote": final_quote,
+            "quote_source": quote_source,
             "reason": f"被 {', '.join(dims)} 维度引用",
             "confidence": "medium",
         })
@@ -1029,7 +1134,7 @@ _SCENE_SUMMARY_PROMPT = """你是中文短剧剧本编辑。下面给你若干�
 }}"""
 
 
-def _fallback_scene_summary(text_: str, max_len: int = 70) -> str:
+def _fallback_scene_summary(text_: str, max_len: int = SCENE_SUMMARY_MAX_LEN) -> str:
     """LLM 摘要失败时的可读兜底：取前几行实质内容，避免只显示短 quote。"""
     cleaned: List[str] = []
     for raw in (text_ or "").splitlines():

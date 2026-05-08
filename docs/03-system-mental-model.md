@@ -85,7 +85,12 @@ interface RewriteSeedTask {
 
 `dispatchTask(task)` 干三件**原子操作**：
 
-1. **联动编辑器**：`openFile(scene_id)` → `revealLines(start_line, end_line)` → Monaco decoration 行高亮 3 s 淡出
+1. **联动编辑器**（quote-first 溯源，业内对照 Hypothes.is W3C TextQuoteSelector）：
+   - `openFile(scene_id)` 打开目标场（fileTree path = scene.id）
+   - retry loop 校验 `model.getValue() === scene.text`（确认 Editor key 重建已完成、model 已切换）
+   - 用 `indexOf(quote)` 在 model 文本里算真实 line range（quote 是 ground truth）
+   - 找不到 quote → fallback 用 task.start_line / end_line
+   - Monaco decoration：trace 类持久高亮（ttlMs=0），dispatch 类 3s 淡出
 2. **切右栏 tab**：自动切到「Agent 对话」
 3. **注入 composer**：人类可读 prompt + `<TASK_META>` JSON block（**不自动 send**，让用户检查 / 追加偏好后 Enter，符合 Cursor 习惯）
 
@@ -180,6 +185,7 @@ type RewriteTaskStatus = {
 | v2.1 embedding | `SCRIPTLENS_USE_EMBEDDING` flag，默认关闭；ingestion 跳过向量写入，retrieve_scenes 退化为纯 BM25 | 用户质疑："我们这个规模需要 embedding 吗？"——自查发现 evaluator/evidence_refs/任务派发三条链路都不查向量，唯一调用方是 `locate_scenes_tool`，而 BM25 + 元数据过滤已经够用 |
 | v3 报告重构 | 报告改为 4 segment（速览 / 故事 / 人物 / 评估）；新增 `coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` / `evaluation` 5 个并行 chain；5 维评分降级到「评估」segment；关键场从 beat_chain 锚点反推；详见 [`05-report-architecture.md`](05-report-architecture.md) | 用户反馈："关键场景出『电视上放着猫和老鼠』全是垃圾"——根因是关键场来自 5 维评分证据，非故事节拍；同时报告以分数主导而非决策主导，违反 task.md §六「围绕用户决策设计结果，不是围绕文本做机械摘要」 |
 | v3 存储评估 | DB 保留 PostgreSQL（与 ScholarMind compose 共部署）；Agent 检索加 jieba 关键词兜底；SQLite + FTS5 作为未来优化点，详见 [`06-storage-architecture.md`](06-storage-architecture.md) | 实际看代码后 SQLite 迁移涉及 15+ 文件 PG-only SQL，1-1.5 天工作量与 task.md 主线无关；当前主线是报告质量、可溯源、可追问、可改写 |
+| v3.1 溯源 quote-first | `traceEvidence` / `dispatchAgentTask` 改为 quote-first：（a）retry loop 校验 `model.getValue() === scene.text` 才认为 model 已切到目标 scene；（b）拿 model 文本里的 `indexOf(quote)` 计算真实 line range，覆盖后端可能漂移的 start_line；（c）`onTraceEvidence` 全部调用站补 `quote` 字段。业内对照：Hypothes.is W3C TextQuoteSelector / VSCode openTextDocument / Notion block reference。`findQuoteRangeInText` 在 `index.tsx` 顶部 module-level | 用户反馈："溯源高亮内容全部对不上"——根因是 `<Editor key={activeFilePath}>` 在 path 变化时强制 unmount + remount，retry loop 只校验 `lineCount > 0` 命中 stale 旧 model，highlight 永远跑在错文件上。修复后 quote 是 ground truth，line 仅作 fallback |
 
 ## 12. 相关文档
 

@@ -294,6 +294,56 @@ const collectAllFilePaths = (nodes: DocStudioAPI.FileNode[]): string[] => {
 const FULL_SCRIPT_VIRTUAL_PATH = '__SCRIPTLENS_FULL_SCRIPT__'
 
 /**
+ * 在文本里精确定位 quote 的 1-based 物理行号范围。
+ *
+ * 业内对照（Hypothes.is W3C TextQuoteSelector / Notion / GitHub PR）：
+ * 引用应以原文片段为 ground truth，行号仅作加速。直接 indexOf 优先；
+ * 命中失败时退化到「逐行子串包含」（覆盖 quote 是某行子串的常见情况：
+ * 比如 LLM 截了句号但原文行末是逗号）。仍找不到 → null，调用方走 fallback。
+ *
+ * 不使用复杂 fuzzy match（编辑距离 / token 对齐）：剧本是结构化纯文本，
+ * 后端 quote 是直接 split("\\n") 取的真实 line，indexOf 精确匹配率应 ≥ 95%；
+ * 真有偏差大概率是 LLM 改写了 quote（属于后端 bug，前端不应掩盖）。
+ */
+function findQuoteRangeInText(
+  text: string,
+  quote: string,
+): { start: number; end: number } | null {
+  const trimmedQuote = quote.trim()
+  if (!trimmedQuote || !text) return null
+
+  // 策略 1：原样 indexOf（最准）
+  const idx = text.indexOf(trimmedQuote)
+  if (idx >= 0) {
+    const before = text.slice(0, idx)
+    const startLine = before.split('\n').length
+    const linesInQuote = trimmedQuote.split('\n').length
+    return { start: startLine, end: startLine + linesInQuote - 1 }
+  }
+
+  // 策略 2：逐行子串包含（quote 是某行子串的兜底，常见于 LLM 截标点）
+  const lines = text.split('\n')
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].includes(trimmedQuote)) {
+      return { start: i + 1, end: i + 1 }
+    }
+  }
+
+  // 策略 3：取 quote 前 20 字（去标点 / 空白）逐行子串模糊匹配
+  const head = trimmedQuote.replace(/[\s\p{P}]/gu, '').slice(0, 20)
+  if (head.length >= 6) {
+    for (let i = 0; i < lines.length; i += 1) {
+      const lineNorm = lines[i].replace(/[\s\p{P}]/gu, '')
+      if (lineNorm.includes(head)) {
+        return { start: i + 1, end: i + 1 }
+      }
+    }
+  }
+
+  return null
+}
+
+/**
  * 在场次树顶部插入「📖 完整剧本」虚拟节点。
  * 显示「集数 / 场数」帮用户一眼看到剧本规模。
  */
@@ -1533,6 +1583,11 @@ const LatexEditorPage = () => {
     Number(activeScriptDetail?.config?.total_chars || snap.workspaceConfig?.total_chars || 0) >= 50000 ||
     inferEpisodeUpperBoundFromTitle(activeWorkspaceName) >= 80
 
+  // syncWorkspaceFileTree 在下面才声明，但 handleScriptDetailLoaded 需要引用它来在
+  // detail.status=ready 时立即同步场景树（解决"报告轮询比 pollScriptStatus 快、左栏
+  // 卡在 stale fileTree"的 race）。用 ref 间接引用：声明顺序无关，每次 render 同步赋值。
+  const syncFileTreeRef = useRef<((id: string) => Promise<void>) | null>(null)
+
   const handleScriptDetailLoaded = useCallback((detail: {
     id: string
     title: string
@@ -1562,6 +1617,19 @@ const LatexEditorPage = () => {
       config,
     })
     docStudioActions.setWorkspaceConfig(config)
+
+    // ⚠️ 关键：报告流程（ScriptlensReportProgress）跟 pollScriptStatus 是两条独立轮询，
+    // 报告通常先就绪、status 慢一拍刷到 ready。这里以"报告 detail 拿到 status=ready"
+    // 为信号立即 sync 场景树，避免左栏卡在上一份剧本的 stale fileTree。
+    // 用 scriptReadyRefreshRef 去重——避免多次 mount/切 tab 反复拉。
+    if (
+      detail.status === 'ready' &&
+      detail.id &&
+      !scriptReadyRefreshRef.current[detail.id]
+    ) {
+      scriptReadyRefreshRef.current[detail.id] = true
+      void syncFileTreeRef.current?.(detail.id)
+    }
   }, [])
 
   useEffect(() => {
@@ -2542,19 +2610,31 @@ const LatexEditorPage = () => {
     setActiveEvidenceId(null)
   }, [])
 
+  // ============================================================
+  // v3.3 Line-range anchored 溯源
+  // ============================================================
   /**
-   * 溯源：跳到 scene + 持久高亮，并把 evidence_id 标记为当前激活态（rail 联动同色高亮）。
+   * 溯源跳原文 + 持久高亮。
    *
-   * @param evidenceRefId  rail 用来同色高亮的 key（不参与编辑器高亮，仅 UI 标记）
-   * @param sceneId        UUID
-   * @param startLine/endLine  scene.text 内的物理行号（1-indexed）
+   * 业内对照（GitHub PR review hunk / Cursor codebase index / NotebookLM citation /
+   * Hypothesis W3C TextPositionSelector）：line_range 是 primary anchor，quote
+   * 字符串只作 fallback，**绝不**让 quote 字符匹配主导跳转。
+   *
+   * 优先级（推倒重做后的统一基础设施）：
+   *   1. (startLine, endLine) ← LLM 同次给的 evidence_line_range  → 直接高亮该区间
+   *   2. quote 字符串 fallback → 在 model 文本里 indexOf 找位置（旧契约 / line_range 缺失时救火）
+   *   3. 都没有 → 高亮整场（用户至少能看到目标 scene 内容，比白屏好）
+   *
+   * Editor 用 key={activeFilePath} unmount+remount，model.getValue() === scene.text
+   * 强校验保证不命中旧文件 model。
    */
   const traceEvidence = useCallback(
     async (params: {
-      evidenceRefId: string
+      evidenceRefId: string | null
       sceneId: string
       startLine?: number | null
       endLine?: number | null
+      quote?: string | null
     }): Promise<void> => {
       const workspaceId = docStudioState.workspaceId
       if (!workspaceId) {
@@ -2568,49 +2648,67 @@ const LatexEditorPage = () => {
         return
       }
 
-      // 再点同一个卡片 = 取消溯源高亮。用户是在对齐论点/论据，不是在进入新任务。
-      if (activeEvidenceId === params.evidenceRefId) {
+      // 再点同一张卡 = 取消高亮（仅在 activeEvidenceId 非 null 时；coverage 卡可能不带 ref id）
+      if (params.evidenceRefId != null && activeEvidenceId === params.evidenceRefId) {
         clearEvidenceTrace()
         return
       }
 
-      // 切到当前 evidence；上一次的持久高亮先清
       if (traceDisposeRef.current) {
-        try {
-          traceDisposeRef.current()
-        } catch {
-          // ignore
-        }
+        try { traceDisposeRef.current() } catch { /* ignore */ }
         traceDisposeRef.current = null
       }
       setActiveEvidenceId(params.evidenceRefId)
 
       await openFile(params.sceneId, false, true)
-      const startLine = params.startLine ?? null
-      const endLine = params.endLine ?? null
-      if (startLine == null) return
+      const givenStart = params.startLine ?? null
+      const givenEnd = params.endLine ?? null
+      const quote = (params.quote || '').trim()
+      const expectedSceneText = (sceneExists.text || '').replace(/\r\n/g, '\n')
 
-      // 等 Monaco model 挂上来；持久高亮（ttlMs=0），返回 dispose 存到 ref，下次溯源/取消时调用
-      for (let attempt = 0; attempt < 8; attempt += 1) {
+      for (let attempt = 0; attempt < 12; attempt += 1) {
         const editor = editorRef.current
         const model = editor?.getModel?.()
         const lineCount = Number(model?.getLineCount?.() ?? 0)
+
         if (model && lineCount > 0) {
-          const dispose = highlightLineRange(
-            editor,
-            startLine,
-            endLine ?? startLine,
-            { focus: false, ttlMs: 0 },
-          )
+          const modelValue = String(model.getValue?.() ?? '').replace(/\r\n/g, '\n')
+          const modelMatchesScene = expectedSceneText.length > 0
+            ? modelValue === expectedSceneText
+            : true
+          if (!modelMatchesScene) {
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((resolve) => window.setTimeout(resolve, 60))
+            continue
+          }
+
+          let finalStart: number | null = givenStart
+          let finalEnd: number | null = givenEnd ?? givenStart
+
+          if (finalStart == null && quote) {
+            const r = findQuoteRangeInText(modelValue, quote)
+            if (r) { finalStart = r.start; finalEnd = r.end }
+          }
+
+          if (finalStart == null) {
+            finalStart = 1
+            finalEnd = lineCount
+          }
+
+          const start = Math.max(1, Math.min(finalStart, lineCount))
+          const end = Math.max(start, Math.min(finalEnd ?? start, lineCount))
+
+          const dispose = highlightLineRange(editor, start, end, { focus: false, ttlMs: 0 })
           traceDisposeRef.current = dispose
           return
         }
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((resolve) => window.setTimeout(resolve, 50))
+        await new Promise((resolve) => window.setTimeout(resolve, 60))
       }
-      // editor 没及时挂上：静默降级（rail 仍然标记了 activeEvidenceId，等编辑器就绪用户可重新点）
       // eslint-disable-next-line no-console
-      console.warn('[ScriptLens] traceEvidence: editor not ready, skip line highlight')
+      console.warn('[ScriptLens] traceEvidence: editor not ready after 12 retries', {
+        sceneId: params.sceneId,
+      })
     },
     [activeEvidenceId, clearEvidenceTrace, openFile],
   )
@@ -2643,6 +2741,7 @@ const LatexEditorPage = () => {
           sceneId: task.scene_id,
           startLine: task.start_line ?? null,
           endLine: task.end_line ?? null,
+          quote: task.quote ?? null,
         })
         return
       }
@@ -2663,22 +2762,42 @@ const LatexEditorPage = () => {
       await openFile(sceneId, false, true)
       const startLine = (task as { start_line?: number | null }).start_line ?? null
       const endLine = (task as { end_line?: number | null }).end_line ?? null
-      if (startLine == null) return
+      const quote = ((task as { quote?: string | null }).quote || '').trim()
+      const expectedSceneText = (sceneExists.text || '').replace(/\r\n/g, '\n')
+      if (startLine == null && !quote) return
 
       // 派 Agent 类用 3s 淡出（视线引导后让用户视线回到 chat composer）
-      for (let attempt = 0; attempt < 8; attempt += 1) {
+      // 与 traceEvidence 同步采用 quote-first + model 校验，避免 Editor key 重建 race
+      for (let attempt = 0; attempt < 12; attempt += 1) {
         const editor = editorRef.current
         const model = editor?.getModel?.()
         const lineCount = Number(model?.getLineCount?.() ?? 0)
+
         if (model && lineCount > 0) {
-          highlightLineRange(editor, startLine, endLine ?? startLine, { focus: false })
+          const modelValue = String(model.getValue?.() ?? '').replace(/\r\n/g, '\n')
+          const modelMatchesScene = expectedSceneText.length > 0
+            ? modelValue === expectedSceneText
+            : true
+
+          if (!modelMatchesScene) {
+            // eslint-disable-next-line no-await-in-loop
+            await new Promise((resolve) => window.setTimeout(resolve, 60))
+            continue
+          }
+
+          const quoteRange = quote ? findQuoteRangeInText(modelValue, quote) : null
+          const finalStart = quoteRange?.start ?? startLine
+          const finalEnd = quoteRange?.end ?? endLine ?? finalStart
+          if (finalStart != null) {
+            highlightLineRange(editor, finalStart, finalEnd ?? finalStart, { focus: false })
+          }
           return
         }
         // eslint-disable-next-line no-await-in-loop
-        await new Promise((resolve) => window.setTimeout(resolve, 50))
+        await new Promise((resolve) => window.setTimeout(resolve, 60))
       }
       // eslint-disable-next-line no-console
-      console.warn('[ScriptLens] dispatchAgentTask: editor not ready, skip line highlight')
+      console.warn('[ScriptLens] dispatchAgentTask: editor not ready after 12 retries')
     },
     [openFile, setRightTab, setPrompt, traceEvidence],
   )
@@ -2941,12 +3060,25 @@ const LatexEditorPage = () => {
         )
         if (docStudioState.workspaceId !== workspaceId) return
         docStudioActions.setFileTree(data.files)
+        // 新上传的剧本第一次拿到 fileTree 时，自动打开第一个场景，让用户立刻看到原文
+        // （否则左栏出现场景树但编辑器仍是空白，体验割裂）
+        const firstFile = findFirstFile(data.files)
+        if (firstFile && !docStudioState.activeFilePath) {
+          await openFile(firstFile, true)
+          docStudioActions.setActiveFile(firstFile)
+        }
       } catch (error) {
         console.warn('[DocStudio] 静默刷新文件树失败', error)
       }
     },
-    [],
+    [openFile],
   )
+
+  // 把 syncWorkspaceFileTree 同步到 ref，让上文中"声明顺序在前"的 callback
+  // （如 handleScriptDetailLoaded）可以无依赖地间接调用最新的 sync 函数
+  useEffect(() => {
+    syncFileTreeRef.current = syncWorkspaceFileTree
+  }, [syncWorkspaceFileTree])
 
   const loadKnowledgeBases = useCallback(async () => {
     setKnowledgeLoading(true)
@@ -3499,11 +3631,12 @@ const LatexEditorPage = () => {
         setScriptProcessingStartedAt(null)
         if (nextStatus === 'ready' && !scriptReadyRefreshRef.current[workspaceId]) {
           scriptReadyRefreshRef.current[workspaceId] = true
-          if (!docStudioState.fileTree.length) {
-            await loadWorkspaceFiles(workspaceId)
-            if (!cancelled && docStudioState.workspaceId === workspaceId) {
-              message.success('剧本解析完成，已自动刷新大纲')
-            }
+          // 不再用 `fileTree.length` 防御去重——scriptReadyRefreshRef 已经按 workspaceId
+          // 做了"每个剧本只刷一次"的标记，再叠 fileTree.length 反而会把"上一个剧本的
+          // 残留 fileTree"误判为"新剧本已加载"，导致新剧本场景树永远不出现（v3.4 修）。
+          await loadWorkspaceFiles(workspaceId)
+          if (!cancelled && docStudioState.workspaceId === workspaceId) {
+            message.success('剧本解析完成，已自动刷新大纲')
           }
         }
       } catch (error) {
@@ -3949,6 +4082,11 @@ const LatexEditorPage = () => {
       setScriptProcessingStartedAt(Date.now())
       setScriptElapsedNow(Date.now())
       delete scriptReadyRefreshRef.current[workspace.workspaceId]
+      // ⚠️ 必须清掉上一个剧本的 fileTree / openedFiles 残留——否则 pollScriptStatus 在
+      // status=ready 时会被「fileTree 已有内容」误判跳过 loadWorkspaceFiles，导致左栏
+      // 卡在旧场景树（视觉上 path 失配 → 显示"无场次"）。
+      docStudioActions.setFileTree([])
+      docStudioActions.setOpenedFiles([])
       setWorkspaceModalOpen(false)
       setNewWorkspaceName('')
       setNewWorkspaceType('latex')
@@ -9498,10 +9636,12 @@ const LatexEditorPage = () => {
         title="上传剧本"
         open={workspaceModalOpen}
         onOk={handleCreateWorkspace}
-        okText={newWorkspaceFile ? `上传：${newWorkspaceFile.name}` : '请选择文件'}
+        okText="上传"
+        okButtonProps={{ disabled: !newWorkspaceFile }}
         onCancel={() => {
           setWorkspaceModalOpen(false)
           setNewWorkspaceFile(null)
+          setNewWorkspaceName('')
           setNewWorkspaceType('latex')
         }}
         confirmLoading={workspaceSubmitting}
@@ -9509,7 +9649,7 @@ const LatexEditorPage = () => {
         <Form layout="vertical">
           <Form.Item
             label="剧本文件"
-            extra="支持 .docx / .pdf / .txt / .md，单文件 ≤50MB"
+            extra="支持 .docx / .pdf / .txt / .md，单文件 ≤50MB；剧本标题默认用文件名"
           >
             <input
               type="file"
@@ -9517,17 +9657,8 @@ const LatexEditorPage = () => {
               onChange={(event) => {
                 const file = event.target.files?.[0] || null
                 setNewWorkspaceFile(file)
-                if (file && !newWorkspaceName.trim()) {
-                  setNewWorkspaceName(file.name.replace(/\.[^.]+$/, ''))
-                }
+                setNewWorkspaceName(file ? file.name.replace(/\.[^.]+$/, '') : '')
               }}
-            />
-          </Form.Item>
-          <Form.Item label="剧本标题（可选，不填用文件名）">
-            <Input
-              placeholder="例如：闪婚总裁夜夜宠"
-              value={newWorkspaceName}
-              onChange={(event) => setNewWorkspaceName(event.target.value)}
             />
           </Form.Item>
         </Form>

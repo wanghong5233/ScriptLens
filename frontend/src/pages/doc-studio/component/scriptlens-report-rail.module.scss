@@ -619,6 +619,16 @@
     box-shadow: 0 0 0 2px rgba(224, 122, 140, 0.15);
   }
 
+  .spcItemDisabled {
+    cursor: not-allowed;
+    opacity: 0.55;
+
+    &:hover {
+      transform: none;
+      box-shadow: none;
+    }
+  }
+
   .spcTitle {
     font-size: 12px;
     font-weight: 500;

@@ -5,7 +5,7 @@
  *   - 报告 = 解决「不能只看摘要、又没时间读全文」的核心阅读层（task.md §三）
  *   - 信息分层：顶部 30 秒判断 → 中段 5 分钟核心理解 → 底部深度评分 / 改写候选
  *   - 报告里所有可点元素分两类：
- *       a) 溯源（evidence chip / 关键场景 / 看点条）→ 跳原文 + 双向持久高亮，**不派 Agent**
+ *       a) 溯源（evidence chip / 三大看点 / 看点条）→ 跳原文 + 双向持久高亮，**不派 Agent**
  *       b) 改写 / 追问（"让 Agent 改写" / 维度 search 按钮）→ 切 chat tab 派 AgentTask
  *
  * 数据源：fetchScriptView(scriptId)，view 包含派生的 rewrite_seeds + task_status。
@@ -196,12 +196,21 @@ interface Props {
   scriptId: string
   /** 当前激活的 evidence id（doc-studio 维护，rail 用来同色高亮对齐） */
   activeEvidenceId: string | null
-  /** 溯源动作：跳原文 + 持久高亮，**不派 Agent** */
+  /**
+   * 溯源动作：跳原文 + 持久高亮，**不派 Agent**。
+   *
+   * quote 是 ground truth（业内对照 Hypothes.is W3C TextQuoteSelector / Notion / GitHub PR）：
+   * doc-studio 用 quote 在切换后的 scene 文件里搜真实 line range，避免 Editor key
+   * 重建导致的 model race（旧 model 上跑 highlight）+ start_line 漂移。
+   * startLine / endLine 仅作 fallback，quote 找不到才用。
+   */
   onTraceEvidence: (params: {
-    evidenceRefId: string
+    /** 可为 null：coverage strengths/concerns 直接用 anchor_scene_id 跳转，不一定有 evidence_ref 对应 */
+    evidenceRefId: string | null
     sceneId: string
     startLine?: number | null
     endLine?: number | null
+    quote?: string | null
   }) => void | Promise<void>
   /** 显式取消溯源（清掉编辑器持久高亮） */
   onClearTrace: () => void
@@ -557,7 +566,6 @@ function ReadyRail({
                 beats: beatCount,
                 risks: riskCount,
               }}
-              evidenceBySceneId={evidenceBySceneId}
               activeEvidenceId={activeEvidenceId}
               onTraceEvidence={onTraceEvidence}
             />
@@ -864,6 +872,7 @@ function ActionCardShell({
                       sceneId: evi.ref.scene_id,
                       startLine: evi.ref.start_line ?? null,
                       endLine: evi.ref.end_line ?? null,
+                      quote: evi.ref.quote ?? null,
                     })
                   }
                 >
@@ -1194,6 +1203,7 @@ function WriterSeedRow({
                 sceneId: evi.scene_id,
                 startLine: evi.start_line ?? null,
                 endLine: evi.end_line ?? null,
+                quote: evi.quote ?? null,
               })
             }
             type={activeEvidenceId === evi.id ? 'primary' : 'default'}
@@ -1327,7 +1337,7 @@ function SectionHeader({
  *   ① Hero 行：decision badge + 综合分大字 + 题材 chips
  *   ② Logline：1 句标题
  *   ③ Reason callout：decision.one_sentence_reason（带左侧色条）
- *   ④ KPI row：4 个数字（人物 / 关键场 / 节拍 / 风险）
+ *   ④ KPI row：4 个数字（人物 / 三大看点 / 节拍 / 风险）
  *   ⑤ Core value：核心价值一行（小字 + label）
  *   ⑥ Strengths / Concerns：左右分栏，每条 ≤ 1 行 + tone icon
  */
@@ -1336,7 +1346,6 @@ function CoverageCardSection({
   decisionReason,
   overallScore,
   kpis,
-  evidenceBySceneId,
   activeEvidenceId,
   onTraceEvidence,
 }: {
@@ -1344,7 +1353,6 @@ function CoverageCardSection({
   decisionReason: string | null
   overallScore: number | null
   kpis: { characters: number; keyScenes: number; beats: number; risks: number }
-  evidenceBySceneId: Map<string, EvidenceRefDTO>
   activeEvidenceId: string | null
   onTraceEvidence: Props['onTraceEvidence']
 }) {
@@ -1353,25 +1361,39 @@ function CoverageCardSection({
     overallScore == null ? '#bfbfbf' : overallScore >= 7 ? '#52c41a' : overallScore >= 5 ? '#faad14' : '#ff4d4f'
 
   const renderPoint = (
-    point: { title: string; detail: string; anchor_scene_id?: string | null },
+    point: {
+      title: string
+      detail: string
+      anchor_scene_id?: string | null
+      evidence_line_range?: [number, number] | null
+      evidence_quote?: string | null
+    },
     tone: 'good' | 'risk',
+    index: number,
   ) => {
-    const evi = point.anchor_scene_id ? evidenceBySceneId.get(point.anchor_scene_id) : undefined
-    const active = !!(evi && activeEvidenceId === evi.id)
+    // 每卡独立 activeKey（v3.3 修复：之前用共享 evi.id → 多张卡指向同一 scene 时同时高亮）
+    const cardKey = `coverage:${tone}:${index}`
+    const canTrace = Boolean(point.anchor_scene_id)
+    const active = canTrace && activeEvidenceId === cardKey
     return (
       <button
-        key={`${tone}:${point.title}:${point.anchor_scene_id || ''}`}
+        key={cardKey}
         type="button"
+        disabled={!canTrace}
+        title={!canTrace ? '该卡 LLM 未给出锚定场景，无法跳转' : (point.evidence_quote || point.detail)}
         className={`${styles.spcItem} ${tone === 'good' ? styles.spcGood : styles.spcRisk} ${
           active ? styles.spcItemActive : ''
-        }`}
+        } ${!canTrace ? styles.spcItemDisabled : ''}`}
         onClick={() => {
-          if (!evi) return
+          if (!canTrace || !point.anchor_scene_id) return
+          // v3.3 line-range anchored：直接用 LLM 同次给的 line_range；quote 仅留作 fallback
+          const lr = point.evidence_line_range
           onTraceEvidence({
-            evidenceRefId: evi.id,
-            sceneId: evi.scene_id,
-            startLine: evi.start_line ?? null,
-            endLine: evi.end_line ?? null,
+            evidenceRefId: cardKey,
+            sceneId: point.anchor_scene_id,
+            startLine: lr ? lr[0] : null,
+            endLine: lr ? lr[1] : null,
+            quote: point.evidence_quote || null,
           })
         }}
       >
@@ -1419,7 +1441,7 @@ function CoverageCardSection({
       {/* ④ KPI row */}
       <div className={styles.heroKpiRow}>
         <KpiCell num={kpis.characters} label="关键人物" />
-        <KpiCell num={kpis.keyScenes} label="关键场景" />
+        <KpiCell num={kpis.keyScenes} label="三大看点" />
         <KpiCell num={kpis.beats} label="故事节拍" />
         <KpiCell num={kpis.risks} label="风险标签" tone={kpis.risks > 0 ? 'risk' : 'neutral'} />
       </div>
@@ -1440,14 +1462,14 @@ function CoverageCardSection({
               <span className={styles.spcDot} style={{ background: '#52c41a' }} />
               <Text type="secondary" className={styles.spcColTitle}>亮点 {strengths.length}</Text>
             </div>
-            {strengths.map((p) => renderPoint(p, 'good'))}
+            {strengths.map((p, i) => renderPoint(p, 'good', i))}
           </div>
           <div className={styles.spcCol}>
             <div className={styles.spcColHeader}>
               <span className={styles.spcDot} style={{ background: '#fa8c16' }} />
               <Text type="secondary" className={styles.spcColTitle}>风险 {concerns.length}</Text>
             </div>
-            {concerns.map((p) => renderPoint(p, 'risk'))}
+            {concerns.map((p, i) => renderPoint(p, 'risk', i))}
           </div>
         </div>
       ) : null}
@@ -1568,6 +1590,7 @@ function BeatTimelineSection({
                         sceneId: evi.scene_id,
                         startLine: evi.start_line ?? null,
                         endLine: evi.end_line ?? null,
+                        quote: evi.quote ?? null,
                       })
                     }}
                   />
@@ -1778,6 +1801,7 @@ function CharacterGraphSection({
       sceneId: evi.scene_id,
       startLine: evi.start_line ?? null,
       endLine: evi.end_line ?? null,
+      quote: evi.quote ?? null,
     })
   }, [evidenceBySceneId, onTraceEvidence])
 
@@ -1909,6 +1933,7 @@ function CharacterGraphSection({
                   sceneId: evi.scene_id,
                   startLine: evi.start_line ?? null,
                   endLine: evi.end_line ?? null,
+                  quote: evi.quote ?? null,
                 })
               }}
             >
@@ -2642,6 +2667,7 @@ function DimCard({
                   sceneId: ref.scene_id,
                   startLine: ref.start_line ?? null,
                   endLine: ref.end_line ?? null,
+                  quote: ref.quote ?? null,
                 })
               }
             />
@@ -2710,6 +2736,7 @@ function DimCard({
                         sceneId: ref.scene_id,
                         startLine: ref.start_line ?? null,
                         endLine: ref.end_line ?? null,
+                        quote: ref.quote ?? null,
                       })
                     }
                   />
@@ -2823,6 +2850,7 @@ function ComplianceCard({
                   sceneId: ref.scene_id,
                   startLine: ref.start_line ?? null,
                   endLine: ref.end_line ?? null,
+                  quote: ref.quote ?? null,
                 })
               }
             />
@@ -2875,8 +2903,8 @@ function KeyScenesSection({
   return (
     <section className={styles.mustReadSection}>
       <SectionHeader
-        title="关键场景"
-        hint={`Top ${evidences.length} · 点击跳原文`}
+        title="三大看点"
+        hint={`Top ${evidences.length} · 钩子 / 反转 / 爽点 · 点击跳原文`}
       />
       <Space direction="vertical" size={compact ? 4 : 6} style={{ width: '100%', marginTop: 8 }}>
         {evidences.map((ref) => (
@@ -2891,6 +2919,7 @@ function KeyScenesSection({
                 sceneId: ref.scene_id,
                 startLine: ref.start_line ?? null,
                 endLine: ref.end_line ?? null,
+                quote: ref.quote ?? null,
               })
             }
           />
@@ -2900,7 +2929,7 @@ function KeyScenesSection({
   )
 }
 
-// === 关键场景：点击跳原文 + 双向高亮 ===
+// === 三大看点（钩子 / 反转 / 爽点）：点击跳原文 + 双向高亮 ===
 function MustReadChip({
   evidence,
   active,
@@ -2916,7 +2945,7 @@ function MustReadChip({
   const summary = evidence.scene_summary || evidence.quote || ''
   if (compact) {
     // 业内对照（Linear / Notion 关联条目 / Bloomberg related stories）：
-    // 速览的关键场景应是缩略（一行 = locator + ≤30 字一句话 + → 跳转），不是 mini 详情。
+    // 速览的三大看点应是缩略（一行 = locator + ≤30 字一句话 + → 跳转），不是 mini 详情。
     return (
       <button
         type="button"
@@ -2996,6 +3025,8 @@ function HighlightsSection({
           sceneId: h.scene_id,
           startLine: h.start_line ?? null,
           endLine: h.end_line ?? null,
+          // HighlightDTO 用 evidence 字段（≤ 80 字原文片段，与 EvidenceRefDTO.quote 同语义）
+          quote: h.evidence ?? null,
         })
       }
     />

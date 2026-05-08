@@ -127,15 +127,21 @@ export interface DecisionCardDTO {
 export type RiskFlagDTO = string
 
 // 与 backend.ReportEvidenceRef 严格对齐（id / quote / scene_label 真实字段名）
+// v3.3 line-range anchored citation：start_line/end_line 是主锚点，quote 仅 tooltip
 export interface EvidenceRefDTO {
   id: string
   scene_id: string
   episode_no?: number | null
   scene_no?: string | null
   scene_label?: string | null
+  /** 主锚点：scene 内行号区间起点（1-based） */
   start_line?: number | null
+  /** 主锚点：scene 内行号区间终点（1-based 闭区间） */
   end_line?: number | null
+  /** 该 line_range 对应的原文片段，仅用于 tooltip / preview。前端跳转**不**依赖此字段 */
   quote: string
+  /** quote 来源标记：reward:<event_type> / risk_hit / fallback_first_line */
+  quote_source?: string | null
   /** 对整场戏的摘要，不是 quote 碎片；用于「关键场景」卡片 */
   scene_summary?: string | null
   reason: string
@@ -172,6 +178,7 @@ export type HighlightType =
   | 'scheme_exposed'
   | 'risk'
 
+// v3.3 line-range anchored：start_line/end_line 是主锚点，evidence 仅 tooltip
 export interface HighlightDTO {
   id: string
   type: HighlightType
@@ -179,20 +186,31 @@ export interface HighlightDTO {
   episode_no?: number | null
   scene_no?: string | null
   scene_label?: string | null
+  /** 主锚点：scene 内行号区间起点（1-based） */
   start_line?: number | null
+  /** 主锚点：scene 内行号区间终点（1-based 闭区间） */
   end_line?: number | null
   /** 一句话点题（"宁卓 vs 苏怀瑾摊牌"），≤ 40 字 */
   oneliner: string
-  /** 原文片段（≤ 80 字，给 tooltip / 折叠态用） */
+  /** 原文片段（≤ 80 字），仅 tooltip / 折叠态展示。前端跳转不依赖此字段 */
   evidence?: string | null
 }
 
 export type RecommendationDTO = 'recommend' | 'consider' | 'pass'
 
+// v3.3 line-range anchored：跳转锚点 = (anchor_scene_id, evidence_line_range)
+// evidence_quote 仅 tooltip / preview 展示，不参与跳转计算
 export interface CoveragePointDTO {
   title: string
   detail: string
   anchor_scene_id?: string | null
+  /**
+   * LLM 写卡片时同次给出的 scene 内行号区间 [start_line, end_line]（1-based 闭区间）。
+   * **跳转高亮的主锚点** —— 前端 deltaDecorations 直接高亮这一区间。
+   */
+  evidence_line_range?: [number, number] | null
+  /** evidence_line_range 对应的原文摘要，仅用于 hover tooltip。前端跳转**不**用此字段定位 */
+  evidence_quote?: string | null
 }
 
 export interface CoverageCardDTO {

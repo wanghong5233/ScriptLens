@@ -243,17 +243,21 @@ class TokenBudget:
     # ≈ 180 token × 2.0 = 360 → 384
     DECISION_JUDGE = 384
 
-    # 2 字段（is_real_violation + rationale ≤60 字）
-    # ≈ 130 token × 2.0 = 260 → 256（已对齐 risk 二级判定的实测稳定区间）
-    RISK_CONFIRM = 256
+    # 3 字段（is_real_violation + rationale ≤60 字 + evidence_line_range [int,int]）
+    # ≈ 150 token × 2.0 = 300 → 320（v3.3 line-range anchored，详见 docs/08 §3.8）
+    RISK_CONFIRM = 320
 
     # 4 字段（label + confidence + one_sentence_reason ≤60 字 + summary 3-5 句 ≤300 字）
     # ≈ 600 token × 1.7 = 1020 → 1024
     DECISION_AGGREGATE = 1024
 
-    # logline + recommendation + confidence + genre + core_value + 3 优 + 3 劣（8 段 × ≤80 字）
-    # ≈ 900 token × 1.7 = 1530 → 1536
-    COVERAGE_CARD = 1536
+    # logline + recommendation + confidence + genre + core_value
+    #   + 3 strengths × (title 12 + detail 80 + evidence_quote 80 = 172 字) ≈ 130 token / 条
+    #   + 3 concerns × (title 12 + detail 80 + evidence_quote 80 = 172 字) ≈ 130 token / 条
+    #   + JSON overhead
+    # 总 ≈ (60 + 30 + 30) + 6 × 130 + 200 overhead ≈ 1100 token × 1.7 ≈ 1870 → 2048
+    # v3.2：新增 evidence_quote 字段后从 1536 提升（详见 docs/08 §6.3 推导）
+    COVERAGE_CARD = 2048
 
     # 3 幕 × 6 节拍 × (type + summary ≤50 字 + anchor_scene_id)
     # ≈ 1500 token × 1.7 = 2550 → 2560
