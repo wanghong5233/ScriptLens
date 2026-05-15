@@ -990,7 +990,7 @@ function SelectionActionCard({
  * - 段级精修治标不治本——短剧痛点是结构性，**已整段移除**
  * - 改为维度级全剧改写：A 模式（五维一键）端到端，B 模式（单维度按钮）精细化
  * - 用户点击 → fulltext_rewrite kind / mode='plan' 派 Agent；Agent 调
- *   propose_dimension_rewrite_tool 出 plan tree，由 chat 内 RewritePlanCard 渲染让用户审 / 勾选；
+ *   propose_full_script_plan_tool 出 plan tree，由 chat 内 RewritePlanCard 渲染让用户审 / 勾选；
  *   用户在 plan card 点「执行」→ 派 mode='execute' → Agent 写 DB → file_diffs 给 AgentDiffReview。
  * - 用户消息只发简短意图（一行），800 字 brief 完全后端化，避免 chat 被 prompt 噪声淹没。
  */

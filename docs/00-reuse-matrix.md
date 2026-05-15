@@ -134,7 +134,7 @@ import 改造：所有原本 `from core.config import settings` / `from metrics 
 | `core/config.py` | ✅ 拷 | 删 RL_ / RAG_SERVICE_URL 字段；保留 LLM_ / AGENT_ / WEB_SEARCH_ / SEMANTIC_SEARCH_ |
 | `metrics.py` / `security.py` / `workspace_cache.py` | ✅ 全拷 | — |
 | `schemas/common.py` | ✅ 全拷 | — |
-| `tests/*` | ❌ 不拷 | 断言全部要改，3 天内 ROI 低；D3 用 5 份真实剧本人工验收覆盖 |
+| `tests/*` | ❌ 不拷 | ScholarMind 断言绑定 LaTeX 工作区，全部要改；MVP 阶段优先用 5 份真实剧本人工验收覆盖，迭代期再补单测 |
 
 ## 5. 4 个剧本专属工具
 
@@ -142,9 +142,9 @@ import 改造：所有原本 `from core.config import settings` / `from metrics 
 
 | 工具 | 输入 | 输出 | 预算 | 实现要点 |
 |---|---|---|---|---|
-| `score_dimension_tool` | `dimension ∈ {opening_hook, reward_density, motivation, pacing, risk}` | `{score, level, reason, evidence_ref_ids[]}` | 5 | 薄包装：直接调 `app.service.script_report_service.score_one_dimension(script_id, dim)`（已 D2-4 实装的 5 维流水线，按 dim 路由到 `dimension_scorer` / `motivation_chain` / `risk_screener`）；评分契约保证 `evidence_ref_ids` 非空 |
-| `locate_scenes_tool` | `query`（如「前 5 集钩子」「打脸场景」） | `[{scene_id, scene_label, episode_no, scene_no, text, score}]` | 6 | 直接调 `app.service.script_rag.retrieve_scenes`（D2-5a 实装：embedding + BM25 → RRF → top-k）；script_id 从 agent_state 取 |
-| `extract_characters_tool` | `script_id`（默认从 agent_state 取） | `[{name, role, first_appear_scene_id, scene_count, ...}]` | 1 | LLM 一次性抽取：拉前 N 集 / 全部 scenes 的 `characters[]` 字段聚合 + 首次出现场景 + 出现频次；学术专用的 `characters` 字段已在 D1 segmenter 抽好，工具只做去重统计 + LLM 标注 role |
+| `score_dimension_tool` | `dimension ∈ {opening_hook, reward_density, motivation, pacing, risk}` | `{score, level, reason, evidence_ref_ids[]}` | 5 | 薄包装：直接调 `app.service.script_report_service.score_one_dimension(script_id, dim)`（5 维评分流水线按 dim 路由到 `dimension_scorer` / `motivation_chain` / `risk_screener`）；评分契约保证 `evidence_ref_ids` 非空 |
+| `locate_scenes_tool` | `query`（如「前 5 集钩子」「打脸场景」） | `[{scene_id, scene_label, episode_no, scene_no, text, score}]` | 6 | 直接调 `app.service.script_rag.retrieve_scenes`（embedding + BM25 → RRF → top-k）；script_id 从 agent_state 取 |
+| `extract_characters_tool` | `script_id`（默认从 agent_state 取） | `[{name, role, first_appear_scene_id, scene_count, ...}]` | 1 | LLM 一次性抽取：拉前 N 集 / 全部 scenes 的 `characters[]` 字段聚合 + 首次出现场景 + 出现频次；segmenter 已抽好 `characters` 字段，工具只做去重统计 + LLM 标注 role |
 | `propose_rewrite_tool` | `scene_id, target_dimension, issue` | `{original, rewritten, diff, rationale}` | 3 | 拉对应 scene 的 `text` + 当前维度 reason → LLM 改写 → unified diff；不依赖 `editing_tools` 的工作区文件锁（短剧改写 patch 走 DB 不写 fs，见 architecture rule） |
 
 ### 5.2 ScriptLens Agent 实际工具栈（注册到 ToolRegistry）
@@ -283,44 +283,57 @@ CREATE INDEX ON scriptlens.script_feedback (script_id, created_at DESC);
 | 前端域名 | `scriptlens.wh5233.me`（Vercel） |
 | Demo 入口 | `https://scriptlens.wh5233.me/demo` → 公共 `testuser` |
 
-## 9. 3 天执行清单
+## 9. 实施清单（按特性优先级，不绑定时间）
 
-### D1 —— 物理拷贝 + 解析适配 ✅
+> 优先级语义：**P0 = MVP 必备**（缺它则核心闭环不通），**P1 = 体验完整性**（缺它产品仍可演示但有明显缺口），**P2 = 加分项**（迭代期再做不影响验收）。已完成项标 ✅，进行中项标 ▶。
+
+### P0-A 解析与存储 ✅
 
 - [x] 物理拷贝 ScholarMind 主 API 模块到 `backend/app/`，按 §2-§3 删剪
-- [x] 物理拷贝 ScholarMind `services/doc_studio/` 到 `backend/services/script_studio/`（D2-5b 中按 §0.1 决策再迁移到 `backend/app/agent_runtime/`）
+- [x] 物理拷贝 ScholarMind `services/doc_studio/` 到 `backend/services/script_studio/`（后续按 §0.1 决策再迁移到 `backend/app/agent_runtime/`）
 - [x] 写 6 张表 alembic migration（schema `scriptlens`，含 `script_feedback`）
 - [x] 写短剧专用 segmenter（识别 `第N集` / `X-Y 场号` / `角色：对白` / `角色 os：内心`，5 份真实 docx + 3 份 pdf 已验证）
 - [x] 跑通：上传 docx → 解析 → 分场景 → embedding → pgvector（dry-run E2E 已验证）
 
-### D2 —— RAG + Agent 子包 + 业务端点
+### P0-B 评分流水线 ✅
 
-D2-4 ✅ 已完成：5 维报告流水线（确定性而非 ReAct，原因见 D2-4 备注）+ 7 个评分内部工具 + `script_report_service` + `POST /api/scripts/{id}/reanalyze`。
+5 维报告流水线（确定性而非 ReAct，原因见架构备注）+ 7 个评分内部工具 + `script_report_service` + `POST /api/scripts/{id}/reanalyze`。
 
-D2-5/D2-6 进行中：
+### P0-C RAG + Agent 子包 + 业务端点 ▶
 
-- [x] **D2-5a**：写简化 RAG `app/service/script_rag.py`（embedding+BM25 → RRF → top-k）
-- [ ] **D2-5b**：把 `backend/services/script_studio/` 整体迁移到 `backend/app/agent_runtime/` 子包（详见 §0.1）
+- [x] 简化 RAG `app/service/script_rag.py`（embedding + BM25 → RRF → top-k）
+- [x] `services/script_studio/` 整体迁移到 `backend/app/agent_runtime/` 子包（详见 §0.1）
   - 删 `main.py` / `dependencies.py` / `router/agent_rt.py` / `router/training_rt.py` / `service/reward_calculator.py` / `service/training_data_collector.py` / `service/tools/validation_tools.py` / `latex_utils.py`
   - 改 `service/rag_api_client.py` 与 `service/tools/retrieval_tools.py`：去掉 httpx，直接 import `app.service.script_rag.retrieve_scenes`
   - 删 `editing_tools.py` 中 `InsertCitationTool` / `UpdateBibliographyTool`
   - 批量改 import 为相对导入（`from core.X` → `from .core.X` 等）
   - 删 `core/config.py` 中 `RL_*` / `RAG_SERVICE_URL` 字段
-- [ ] **D2-5c**：实现 §5 的 4 个剧本专属 ReAct 工具（继承 BaseTool），与 `web_search_tool` / `analysis_tools` / 改写工具一起注册到 ToolRegistry
-- [ ] **D2-5d**：重写 `agent_runtime/prompts/zh.yaml` 为短剧场景 prompt（含 §5.1 web_search 触发条件）
-- [ ] **D2-6a**：`POST /api/scripts/{id}/chat` SSE，in-process 调 `agent_runtime.service.agent_service`，复用 `sessions` / `messages` 表，`surface='script'`
-- [ ] **D2-6b**：`POST /api/scripts/{id}/rewrite`，单步调 `propose_rewrite_tool`
-- [ ] **D2-6c**：`POST /api/scripts/{id}/feedback` + `feedback_service` + chat prompt 注入
-- [ ] **D2-6d**：`GET /api/scripts/{id}/view`（无 `?role=`，返回 ReportPayload 全字段，前端「行动」segment 派生 Persona Action Card）
+- [x] §5 剧本专属 ReAct 工具（继承 BaseTool），与 `web_search_tool` / `analysis_tools` / 改写工具一起注册到 ToolRegistry
+- [x] 编写 `agent_runtime/prompts/zh.yaml` 短剧场景 prompt（含 §5.1 web_search 触发条件）
+- [x] `POST /api/scripts/{id}/chat` SSE，in-process 调 `agent_runtime.service.agent_service`，复用 `sessions` / `messages` 表，`surface='script'`
+- [x] `POST /api/scripts/{id}/rewrite`，单步调 `propose_rewrite_tool`
+- [x] `POST /api/scripts/{id}/feedback` + `feedback_service` + chat prompt 注入
+- [x] `GET /api/scripts/{id}/view`（无 `?role=`，返回 ReportPayload 全字段，前端「行动」segment 派生 Persona Action Card）
 
-### D3 —— 前端 + 部署 + README
+### P0-D 前端 MVP ▶
 
-- [ ] 在 `frontend/` 物理拷贝 ScholarMind `frontend/`，按 §7 删剪
-- [ ] 替换 LaTeX 编辑器为 txt + 场景树视图，证据高亮接 `evidence_refs`
-- [ ] 接入 P3 反馈交互：报告 / 维度 / 改写 / 场景上挂「反馈」按钮 → `feedback_rt`
-- [ ] 部署到既有 ECS（独立 schema + Tunnel hostname）
-- [ ] **评估方法（P2）**：写 `eval/run_eval.py`，跑 5 份真实剧本人工标注 → 自动计算证据召回率 + 维度分一致性，输出表格写入 README
-- [ ] 跑 5 份真实剧本端到端，写 README + 录 5 分钟 demo
+- [x] 在 `frontend/` 物理拷贝 ScholarMind `frontend/`，按 §7 删剪
+- [x] 替换 LaTeX 编辑器为 txt + 场景树视图，证据高亮接 `evidence_refs`
+- [x] 反馈交互：报告 / 维度 / 改写 / 场景上挂「反馈」按钮 → `feedback_rt`
+- [x] 部署到既有 ECS（独立 schema + Tunnel hostname）
+
+### P1 改写 Agent 结构化重构
+
+- [ ] **ScriptVFS 虚拟文件契约**：scene 投影成 `scenes/E{ep:02}-S{sc:03}.txt` 路径；session 入口一次性 `snapshot_all` → `original_file_contents`
+- [ ] **改写工具三件套**（read_scene / propose_full_script_plan / rewrite_scene）替换单一 `propose_dimension_rewrite_tool`，让 ReAct 真正成立
+- [ ] **Prompt 解耦 UI**：`zh.yaml` 只描述工具能力 + TASK_META 协议；前端 `handleAgentResponse` 按 data shape 自动渲染
+- [ ] **统一 LLMRuntime**：合并 `agent_runtime/llm_client` 与 `script_tools/llm_caller` 的 candidate / blacklist 配置源；启动期对首位 candidate 发 1-token 探测，全败拒绝启动
+
+### P2 评估、可观测性与扩展
+
+- [ ] `eval/run_eval.py`：跑真实剧本人工标注 → 自动计算证据召回率 + 维度分一致性，结果写入 README
+- [ ] 5 份真实剧本端到端验收，写 README + 录 demo
+- [ ] 报告级 / 维度级反馈上下游全链路埋点 + Grafana 面板
 
 ## 10. 不做的事
 
@@ -328,8 +341,8 @@ D2-5/D2-6 进行中：
 - **不起独立 Agent 微服务**（不复刻 ScholarMind 的 `doc_studio:8003` 独立进程；ReAct 框架作为 `app/agent_runtime/` 子包嵌入主 API 进程，理由见 §0.1。未来若真需要拆，子包语义边界已就位）
 - 不保留 ScriptLens 任何现存 `backend/app/{api,chat,core,evaluation,feedback,ingest,perspectives,reporting,rewrite,segmentation}/` 代码（全部删除重建）
 - 不保留 ScriptLens 现有 `frontend/`（全部删除重建）
-- 不在 D1-D3 内做 DeepResearch / Notebook / Admin / IdeaGen / 学术检索 / 在线导入任何一个
+- 不做 DeepResearch / Notebook / Admin / IdeaGen / 学术检索 / 在线导入任何一个（ScholarMind 学术专用模块，与短剧无关）
 - 不做完整 skill 调度库 / RL training pipeline / reward model（仅 PRD §10 P3 的轻量反馈注入）
 - 不做 6 个用户角色全套视角（仅做 3 个：选品 / 编剧 / 审核）
-- 不做 3 套时间预算分层（30s / 3min / 10min）
+- 不做 3 套时延预算分层（30s / 3min / 10min）—— MVP 默认走单档实时推理，分层等线上压测后再决定
 - 不解析老 `.doc`（5% 边角案例，提示用户另存为 docx）

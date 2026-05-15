@@ -170,12 +170,38 @@ const findFirstFile = (nodes: DocStudioAPI.FileNode[]): string | undefined => {
 
 const getErrorMessage = (error: any) => {
   if (!error) return '未知错误'
+  const detail = error?.response?.data?.detail
+  if (detail && typeof detail === 'object') {
+    return detail?.message || detail?.code || '请求失败'
+  }
   return (
-    error?.response?.data?.detail ||
+    detail ||
     error?.response?.data?.message ||
     error?.message ||
     '请求失败'
   )
+}
+
+const getErrorCode = (error: any): string => {
+  const code = error?.response?.data?.detail?.code
+  return typeof code === 'string' ? code : ''
+}
+
+const getOperationErrorMessage = (error: any, fallbackPrefix = '操作失败') => {
+  const code = getErrorCode(error)
+  if (code === 'SCRIPT_NOT_FOUND') return '当前剧本不存在或你没有访问权限'
+  if (code === 'SCRIPT_NOT_READY') return '剧本尚未就绪，请稍后重试'
+  if (code === 'REPORT_NOT_READY') return '评分报告正在生成，请稍后刷新'
+  if (code === 'SCENE_NOT_FOUND') return '目标场景不存在或你没有访问权限'
+  if (code === 'INVALID_SCENE_CONTENT') return '场景内容不合法，请检查后重试'
+  if (code === 'OPERATION_NOT_FOUND') return '该操作记录不存在，可能已过期'
+  if (code === 'OPERATION_FORBIDDEN') return '你没有权限访问该操作记录'
+  if (code === 'INVALID_OPERATION_REQUEST') return '操作请求格式非法，请刷新后重试'
+  if (code === 'INVALID_FEEDBACK_REQUEST') return '反馈参数不合法，请检查后重试'
+  if (code === 'SCRIPT_FORBIDDEN') return '你没有权限访问该剧本'
+  if (code === 'INVALID_EXPORT_REQUEST') return '导出参数不合法，请检查后重试'
+  if (code === 'REWRITE_FAILED') return '改写失败，请调整指令后重试'
+  return `${fallbackPrefix}: ${getErrorMessage(error)}`
 }
 
 const isCanceledRequestError = (error: any) => {
@@ -381,6 +407,7 @@ const LIVE_TOOL_LABELS: Record<string, string> = {
   score_dimension_tool: '维度评分',
   locate_scenes_tool: '定位场次',
   extract_characters_tool: '抽取人物',
+  rewrite_selection_scene_tool: '改写选区',
   propose_rewrite_tool: '改写建议',
   // 复用 ScholarMind 通用工具：保留可显示，不破坏底层能力
   analyze_context_tool: '上下文分析',
@@ -413,6 +440,14 @@ const formatLiveToolName = (toolName?: string) => {
   if (!normalized) return ''
   if (LIVE_TOOL_LABELS[normalized]) return LIVE_TOOL_LABELS[normalized]
   return normalized.replace(/_tool$/, '').replace(/_/g, ' ')
+}
+
+const formatOperationIdForDisplay = (operationId?: string) => {
+  const raw = String(operationId || '').trim()
+  if (!raw) return ''
+  const colonIndex = raw.indexOf(':')
+  const payload = colonIndex >= 0 ? raw.slice(colonIndex + 1) : raw
+  return payload.slice(0, 8)
 }
 
 const truncateLiveText = (value?: string, maxLength = 88) => {
@@ -501,6 +536,35 @@ const normalizeSelectionPlaceholder = (value: unknown, fallbackIndex: number) =>
   const raw = String(value || '').trim()
   if (/^@selection\d+$/i.test(raw)) return raw
   return `@selection${fallbackIndex + 1}`
+}
+
+const escapeSelectionText = (value: string): string =>
+  String(value || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+
+const wrapSelectionFragment = (fragment: SelectionFragment): string => {
+  const attrs: string[] = [`id="${fragment.placeholder}"`]
+  if (fragment.filePath) attrs.push(`file_path="${fragment.filePath.replace(/"/g, "'")}"`)
+  if (fragment.startLine && fragment.endLine) {
+    attrs.push(`line_range="${fragment.startLine}-${fragment.endLine}"`)
+  }
+  return `<SELECTION ${attrs.join(' ')}>\n${escapeSelectionText(fragment.text)}\n</SELECTION>`
+}
+
+const injectSelectionBlocksIntoPrompt = (
+  promptText: string,
+  selectionFragments: SelectionFragment[],
+): string => {
+  let output = String(promptText || '')
+  for (const fragment of selectionFragments) {
+    const placeholder = String(fragment.placeholder || '').trim()
+    if (!placeholder) continue
+    const pattern = new RegExp(`${escapeRegExp(placeholder)}(?!\\d)`, 'g')
+    output = output.replace(pattern, wrapSelectionFragment(fragment))
+  }
+  return output
 }
 
 const normalizeSelectionFragments = (input: unknown): SelectionFragment[] => {
@@ -850,6 +914,7 @@ const MAX_FILE_MENTION_COUNT = 8
 const MAX_FILE_MENTION_CANDIDATES = 8
 
 const DASHSCOPE_TEXT_MODEL_OPTIONS = [
+  { label: 'qwen3-max-latest', value: 'qwen3-max-latest' },
   { label: 'qwen-max-latest', value: 'qwen-max-latest' },
   { label: 'qwen-max', value: 'qwen-max' },
   { label: 'qwen3-max', value: 'qwen3-max' },
@@ -886,7 +951,7 @@ type LlmModelOption = {
   contextWindow?: number | null
 }
 
-const DEFAULT_DASHSCOPE_MODEL = 'qwen-max-latest'
+const DEFAULT_DASHSCOPE_MODEL = 'qwen3-max-latest'
 const DEFAULT_DASHSCOPE_VISION_MODEL = 'qwen-vl-max'
 const DEFAULT_OPENAI_MODEL = 'gpt-5.2'
 const DEFAULT_OPENAI_VISION_MODEL = 'gpt-4o'
@@ -912,11 +977,13 @@ const LLM_MODEL_OPTIONS: LlmModelOption[] = [
 const LLM_MODEL_OPTION_MAP = new Map<string, LlmModelOption>(
   LLM_MODEL_OPTIONS.map((item) => [item.value, item]),
 )
+const BLOCKED_RUNTIME_LLM_MODELS = new Set(['qwen-plus', 'qwen-turbo', 'qwen2.5-plus'])
 const buildLlmModelOptionsFromCatalog = (
   catalog: LlmModelCatalog | null,
 ): LlmModelOption[] => {
   const remote = (catalog?.models ?? [])
     .filter((item) => item.provider === 'dashscope' || item.provider === 'openai')
+    .filter((item) => !BLOCKED_RUNTIME_LLM_MODELS.has(String(item.model || '').trim().toLowerCase()))
     .map((item) => ({
       label: item.label,
       value: item.model,
@@ -1169,6 +1236,10 @@ const LatexEditorPage = () => {
   )
   const normalizeRuntimeLlmModel = useCallback(
     (value: unknown, providerHint?: unknown): LlmModelValue => {
+      const normalizedValue = typeof value === 'string' ? value.trim().toLowerCase() : ''
+      if (normalizedValue && BLOCKED_RUNTIME_LLM_MODELS.has(normalizedValue)) {
+        return defaultRuntimeModelByProvider('dashscope')
+      }
       if (typeof value === 'string' && llmModelSet.has(value)) {
         const option = llmModelOptionMap.get(value)
         if (option?.available !== false) return value
@@ -1273,6 +1344,13 @@ const LatexEditorPage = () => {
     ((task: AgentTask, options?: { autoSubmit?: boolean }) => Promise<void>) | null
   >(null)
   const asyncRunResolvedRef = useRef(false)
+  // Bug 5 兜底：finish 后 livePreview 已流完但 result 迟迟不来时，
+  // 把 livePreview 提前作为 chat reply 提交并关 spinner；
+  // result 真到达时 handleAgentResponse 通过该 ref 跳过重复 pushChatMessage，
+  // 但仍正常处理 file_diffs / operationId / executionHistory 等副作用。
+  const livePromotedToChatRef = useRef(false)
+  // setTimeout closure 捕获过期 state，用 ref 镜像 livePreview 文本以便兜底读到最新值。
+  const liveAgentPreviewTextRef = useRef('')
   const liveDeltaStartedRef = useRef(false)
   const activeRunIdRef = useRef<string | null>(null)
   const pendingSendRef = useRef<PendingSendDraft | null>(null)
@@ -3809,6 +3887,10 @@ const LatexEditorPage = () => {
   }, [liveAgentPreviewText])
 
   useEffect(() => {
+    liveAgentPreviewTextRef.current = liveAgentPreviewText
+  }, [liveAgentPreviewText])
+
+  useEffect(() => {
     if (typeof window === 'undefined') return
     localStorage.setItem('doc_studio_right_panel_closed', String(rightPanelClosed))
   }, [rightPanelClosed])
@@ -5147,7 +5229,7 @@ const LatexEditorPage = () => {
       }
       setLastOperationId(null)
     } catch (error) {
-      message.error(`回滚失败: ${getErrorMessage(error)}`)
+      message.error(getOperationErrorMessage(error, '回滚失败'))
     } finally {
       setUndoingLastApply(false)
     }
@@ -5166,7 +5248,7 @@ const LatexEditorPage = () => {
       )
       setOperationHistory(Array.isArray(data) ? data : [])
     } catch (error) {
-      message.error('加载历史失败')
+      message.error(getOperationErrorMessage(error, '加载历史失败'))
     } finally {
       setOperationHistoryLoading(false)
     }
@@ -5630,7 +5712,7 @@ const LatexEditorPage = () => {
         )
       }
     } catch (error) {
-      message.error(`回滚失败: ${getErrorMessage(error)}`)
+      message.error(getOperationErrorMessage(error, '回滚失败'))
     } finally {
       setRevertingOperationId(null)
     }
@@ -5735,7 +5817,7 @@ const LatexEditorPage = () => {
       return
     }
     if (!diffOperationId) {
-      message.error('缺少变更 ID')
+      message.error('缺少变更 ID（应为 db:<uuid> 或 history:<id>）')
       return
     }
     if (diffReverting) return
@@ -5772,7 +5854,7 @@ const LatexEditorPage = () => {
         setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
       }
     } catch (error) {
-      message.error(`回滚失败: ${getErrorMessage(error)}`)
+      message.error(getOperationErrorMessage(error, '回滚失败'))
     } finally {
       setDiffReverting(false)
     }
@@ -5827,7 +5909,7 @@ const LatexEditorPage = () => {
       return
     }
     if (!diffOperationId) {
-      message.error('缺少变更 ID')
+      message.error('缺少变更 ID（应为 db:<uuid> 或 history:<id>）')
       return
     }
     const files = allFileDiffs
@@ -5863,7 +5945,7 @@ const LatexEditorPage = () => {
       message.success(affectedCount ? `已回滚 ${affectedCount} 个变更` : '没有需要回滚的变更')
       closeDiffModal(files)
     } catch (error) {
-      message.error(`回滚失败: ${getErrorMessage(error)}`)
+      message.error(getOperationErrorMessage(error, '回滚失败'))
     } finally {
       setDiffReverting(false)
     }
@@ -6107,6 +6189,7 @@ const LatexEditorPage = () => {
     setLiveAgentPreviewText('')
     setLiveDeltaCharCount(0)
     setLiveAgentElapsedSec(0)
+    liveAgentPreviewTextRef.current = ''
     liveDeltaStartedRef.current = false
     seenLiveEventIdsRef.current = new Set()
     handledInteractionIdsRef.current = new Set()
@@ -6311,35 +6394,42 @@ const LatexEditorPage = () => {
       )
       const isFileOpIntent = String(response.intent_type || '').toLowerCase() === 'file_op'
 
-      // docs/10-rewrite-agent.md §5：从 execution_history 提取 plan tree，
-      // 让 RewritePlanCard 在该 agent 消息里渲染（chat 流原地展示，不切 modal）。
-      // 用 reverse 找最新一条 mode='plan' 的工具结果，避免连续 plan 时取到旧的。
+      // 按 data shape 自动提取 rewrite_plan：
+      // 兼容 propose_full_script_plan_tool / 旧 propose_dimension_rewrite_tool。
       let rewritePlan: RewritePlanData | null = null
       const history = response.execution_history || []
       for (let i = history.length - 1; i >= 0; i -= 1) {
         const step = history[i] as any
-        if (step?.tool !== 'propose_dimension_rewrite_tool') continue
-        const data = step?.result?.data
-        if (!data || data.mode !== 'plan') continue
-        const planRaw = data.rewrite_plan
+        const planRaw =
+          step?.result?.data?.rewrite_plan
+          ?? step?.result?.rewrite_plan
+          ?? null
         if (planRaw && Array.isArray(planRaw.steps)) {
           rewritePlan = planRaw as RewritePlanData
           break
         }
       }
 
-      pushChatMessage({
-        role: 'agent',
-        content: response.execution_history?.[response.execution_history.length - 1]?.content
-          ? response.execution_history[response.execution_history.length - 1].content
-          : `已执行变更 ${changeCount} 项`,
-        meta: {
-          changes: response.changes,
-          traceId: response.trace_id || traceId,
-          operationId,
-          rewritePlan,
-        },
-      })
+      // Bug 5 兜底：finish-promote 路径已经把 livePreview 当作 reply 推进 chat 流，
+      // 这里跳过重复 push（但仍执行下方 file_diffs / executionHistory / operationId 等副作用）。
+      // 若有 rewritePlan，需要补 push 一条带 plan 的消息以便 RewritePlanCard 渲染。
+      if (livePromotedToChatRef.current && !rewritePlan) {
+        livePromotedToChatRef.current = false
+      } else {
+        livePromotedToChatRef.current = false
+        pushChatMessage({
+          role: 'agent',
+          content: response.execution_history?.[response.execution_history.length - 1]?.content
+            ? response.execution_history[response.execution_history.length - 1].content
+            : `已执行变更 ${changeCount} 项`,
+          meta: {
+            changes: response.changes,
+            traceId: response.trace_id || traceId,
+            operationId,
+            rewritePlan,
+          },
+        })
+      }
       docStudioActions.setExecutionHistory(response.execution_history)
       docStudioActions.setAgentStatus({
         intentType: response.intent_type,
@@ -6638,6 +6728,9 @@ const LatexEditorPage = () => {
       llm_model: effectiveModel,
     }
     
+    const promptForAgent = linkedSelections.length > 0
+      ? injectSelectionBlocksIntoPrompt(finalPrompt, linkedSelections)
+      : finalPrompt
     const userMessageText =
       sourceImages.length > 0
         ? `${finalPrompt}\n\n[已附带图片 ${sourceImages.length} 张]`
@@ -6693,6 +6786,7 @@ const LatexEditorPage = () => {
       }
     }
     asyncRunResolvedRef.current = false
+    livePromotedToChatRef.current = false
     setLiveAgentStatus('请求已接收，正在准备执行...')
     setLiveAgentTimeline([])
     setLiveAgentPreviewText('')
@@ -6711,7 +6805,7 @@ const LatexEditorPage = () => {
         const asyncResult = await runAgentTaskAsync(
           {
             workspaceId: snap.workspaceId,
-            userIntent: finalPrompt,
+            userIntent: promptForAgent,
             context: Object.keys(contextPayload).length ? contextPayload : undefined,
             knowledgeBaseId,
             knowledgeBaseName,
@@ -6764,7 +6858,7 @@ const LatexEditorPage = () => {
             const mode = String(payload?.mode || '').toLowerCase()
             let text = '任务开始，正在分析需求...'
             if (opId) {
-              text = `任务开始 · Op ${opId.slice(0, 8)}`
+              text = `任务开始 · Op ${formatOperationIdForDisplay(opId)}`
             }
             appendLiveTimelineEvent({
               text,
@@ -6865,6 +6959,10 @@ const LatexEditorPage = () => {
             if (!payload?.fallback_applied) return
             const actualModel = String(payload.actual_model || '').trim()
             if (!actualModel) return
+            if (BLOCKED_RUNTIME_LLM_MODELS.has(actualModel.toLowerCase())) {
+              message.error(`运行时拒绝切换到弱化模型：${actualModel}`)
+              return
+            }
             runtimeModelSwitchHandled = true
             setLlmModel(actualModel)
             const requestedModel = String(payload.requested_model || llmModel || '').trim()
@@ -7230,47 +7328,27 @@ const LatexEditorPage = () => {
                 plan: payload.plan,
               })
             }
-            // Bug 5 兜底（被 LLM 拒答 / 后端拦截后 result 事件不来导致 spinner 永转）：
-            // finish 后 8s 仍未收到 result，主动 status polling 一次取最终态；
-            // 若已经是 succeeded / failed / cancelled 则立即收敛 chatLoading，不再死等。
+            // Bug 5 兜底（被 LLM 拒答 / 后端 finalize 卡住时 result 不来 spinner 永转）：
+            // finish 之后 reply 文本已经在 livePreview 流完，
+            // 5s 内 result 没到就把 livePreview 转成 chat 消息 + 关闭 spinner，
+            // 让用户立刻能继续提问；保留 SSE，result 真到达时 handleAgentResponse
+            // 通过 livePromotedToChatRef 跳过重复 pushChatMessage，但仍处理 file_diffs / op 等副作用。
             window.setTimeout(() => {
               if (asyncRunResolvedRef.current) return
-              void (async () => {
-                try {
-                  const snapshot = await fetchAgentRunStatus(
-                    {
-                      workspaceId: snap.workspaceId,
-                      runId: asyncResult.runId,
-                    },
-                    { loading: false, errorToast: false },
-                  )
-                  if (asyncRunResolvedRef.current) return
-                  if (snapshot?.status === 'succeeded' && snapshot.result) {
-                    asyncRunResolvedRef.current = true
-                    await handleAgentResponse(snapshot.result, traceId)
-                    closeAsyncStream()
-                  } else if (snapshot?.status === 'failed') {
-                    asyncRunResolvedRef.current = true
-                    const errText = snapshot.error || '执行失败'
-                    message.error(errText)
-                    setLiveAgentStatus('任务执行失败')
-                    activeRunIdRef.current = null
-                    pendingSendRef.current = null
-                    setChatLoading(false)
-                    closeAsyncStream()
-                  } else if (snapshot?.status === 'cancelled') {
-                    asyncRunResolvedRef.current = true
-                    setLiveAgentStatus('任务已取消')
-                    activeRunIdRef.current = null
-                    pendingSendRef.current = null
-                    setChatLoading(false)
-                    closeAsyncStream()
-                  }
-                } catch (error) {
-                  console.warn('finish-fallback polling failed', error)
-                }
-              })()
-            }, 8000)
+              if (livePromotedToChatRef.current) return
+              const partial = (liveAgentPreviewTextRef.current || '').trim()
+              if (!partial) return
+              livePromotedToChatRef.current = true
+              pushChatMessage({
+                role: 'agent',
+                content: partial,
+                meta: { traceId, partial: true, source: 'live_preview_promoted' },
+              })
+              resetLiveAgentPreview()
+              activeRunIdRef.current = null
+              pendingSendRef.current = null
+              setChatLoading(false)
+            }, 5000)
           } catch (error) {
             console.warn('Failed to parse finish event', error)
           }
@@ -7291,11 +7369,15 @@ const LatexEditorPage = () => {
               ) {
                 runtimeModelSwitchHandled = true
                 const actualModel = String(runtimeModel.actual_model).trim()
-                setLlmModel(actualModel)
-                const requestedModel = String(runtimeModel.requested_model || llmModel || '').trim()
-                const fromLabel = requestedModel ? resolveRuntimeModelLabel(requestedModel) : '所选模型'
-                const toLabel = resolveRuntimeModelLabel(actualModel)
-                message.warning(`所选模型不可用，已自动切换为真实使用模型：${fromLabel} → ${toLabel}`)
+                if (BLOCKED_RUNTIME_LLM_MODELS.has(actualModel.toLowerCase())) {
+                  message.error(`运行时拒绝切换到弱化模型：${actualModel}`)
+                } else {
+                  setLlmModel(actualModel)
+                  const requestedModel = String(runtimeModel.requested_model || llmModel || '').trim()
+                  const fromLabel = requestedModel ? resolveRuntimeModelLabel(requestedModel) : '所选模型'
+                  const toLabel = resolveRuntimeModelLabel(actualModel)
+                  message.warning(`所选模型不可用，已自动切换为真实使用模型：${fromLabel} → ${toLabel}`)
+                }
               }
               setLiveAgentStatus('结果已生成，正在应用变更...')
               appendLiveTimelineEvent({
@@ -7427,7 +7509,7 @@ const LatexEditorPage = () => {
       const response = await runAgentTask(
         {
           workspaceId: snap.workspaceId,
-          userIntent: finalPrompt,
+          userIntent: promptForAgent,
           context: Object.keys(contextPayload).length ? contextPayload : undefined,
           knowledgeBaseId,
           knowledgeBaseName,
@@ -9502,7 +9584,9 @@ const LatexEditorPage = () => {
                               <Space size="small" wrap>
                                 <Text type="secondary">{timestamp}</Text>
                                 <Text type="secondary">改动文件: {modifiedCount}</Text>
-                                <Text type="secondary">Op: {item.operation_id.slice(0, 8)}</Text>
+                                <Text type="secondary">
+                                  Op: {formatOperationIdForDisplay(item.operation_id)}
+                                </Text>
                               </Space>
                               <div className="doc-studio__timeline-actions">
                                 <Button

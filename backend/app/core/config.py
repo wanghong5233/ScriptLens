@@ -1,7 +1,7 @@
 from pydantic_settings import BaseSettings
 from pydantic import Field
 from functools import lru_cache
-from typing import Literal, Optional
+from typing import Dict, Literal, Optional
 from pydantic import model_validator
 from urllib.parse import quote_plus
 
@@ -102,19 +102,41 @@ class Settings(BaseSettings):
     OPENAI_BASE_URL: Optional[str] = "https://api.openai.com/v1"
 
     # 模型名称
-    # qwen-max-latest = 阿里官方"始终指向最新最强 qwen-max"的别名，避免版本号迁移成本
-    # （详见 docs/08-evaluation-framework.md §6.2）。短剧分析对 reasoning 强度敏感，
-    # 弱化模型（qwen-turbo / qwen-plus）已从 candidate 中移除。
+    # 短剧分析对 reasoning 强度敏感，弱化模型（qwen-turbo / qwen-plus）
+    # 永远不进入 candidate / fallback 链。
     DASHSCOPE_MODEL_NAME: str = "qwen-max-latest"
     OPENAI_MODEL_NAME: str = "gpt-5.2"
-    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-max-latest,qwen-max,qwen3-max"
+    DASHSCOPE_MODEL_CANDIDATES: str = "qwen-max-latest,qwen-max,qwen3-max,qwen3-max-latest"
     OPENAI_MODEL_CANDIDATES: str = "gpt-5.2,gpt-5,gpt-5-mini,gpt-4.1,gpt-4o"
+    OPENAI_MINI_MODEL_NAME: Optional[str] = None  # MINI 档优先模型；空 → 用 gpt-5-mini
     # 按任务拆分模型（为空时回退到 DASHSCOPE_MODEL_NAME / OPENAI_MODEL_NAME）
     SM_LLM_MODEL_ANSWER: Optional[str] = None
     SM_LLM_MODEL_AUX: Optional[str] = None
     SM_LLM_MODEL_GRAPH: Optional[str] = None
     SM_LLM_MODEL_SUMMARY: Optional[str] = None
     SM_LLM_REQUEST_TIMEOUT_SECS: int = 60
+
+    # ============================================================
+    # LLMRuntime（service.core.llm.runtime）需要的运行时字段
+    # ============================================================
+    # 这套字段以前散在 agent_runtime/core/config.py，现集中到主 settings
+    # 让 LLMRuntime / LlmCaller / LLMClient 三方共享同一份配置源。
+    LLM_TEMPERATURE: float = 0.2
+    LLM_MAX_TOKENS: int = 3072
+    LLM_REQUEST_TIMEOUT: int = 75
+    LLM_FALLBACK_ENABLED: bool = True
+    LLM_FALLBACK_ALLOW_EXPLICIT_PROVIDER: bool = True
+    LLM_HEALTH_FAILURE_THRESHOLD: int = 3
+    LLM_HEALTH_COOLDOWN_SECONDS: int = 90
+    # LLM 成本统计（默认 0，按需在环境变量配置）
+    # 形如 {"openai": {"gpt-5.2": {"input": 0.005, "output": 0.015}}, ...}
+    LLM_COST_CONFIG: Dict[str, Dict[str, Dict[str, float]]] = {}
+    LLM_COST_PER_1K_INPUT_TOKENS: float = 0.0
+    LLM_COST_PER_1K_OUTPUT_TOKENS: float = 0.0
+    # 启动期 LLM 可用性探测（service.core.llm.runtime.LLMRuntime.boot_check）
+    # 默认开启；离线开发可设 LLM_BOOT_CHECK_ENABLED=false 跳过
+    LLM_BOOT_CHECK_ENABLED: bool = True
+    LLM_BOOT_CHECK_PROBE_TOKENS: int = 4
 
     # 组件选择
     SM_EMBEDDER_TYPE: Literal["local", "dashscope"] = "dashscope"

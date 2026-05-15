@@ -11,6 +11,8 @@ import httpx
 from core.config import settings
 from service.core.rag.nlp.rag_tokenizer import RagTokenizer
 
+FORBIDDEN_LLM_MODELS = {"qwen-plus", "qwen-turbo", "qwen2.5-plus"}
+
 try:
     from nltk import word_tokenize as _wt
 except Exception:  # pragma: no cover
@@ -249,7 +251,7 @@ class ConfigService:
         seen: set[str] = set()
         for raw in str(value or "").split(","):
             item = raw.strip().strip('"').strip("'")
-            if not item or item in seen:
+            if not item or item in seen or item.lower() in FORBIDDEN_LLM_MODELS:
                 continue
             seen.add(item)
             result.append(item)
@@ -286,7 +288,7 @@ class ConfigService:
         seen: set[str] = set()
         for value in values:
             item = str(value or "").strip()
-            if not item or item in seen:
+            if not item or item in seen or item.lower() in FORBIDDEN_LLM_MODELS:
                 continue
             seen.add(item)
             result.append(item)
@@ -326,10 +328,9 @@ class ConfigService:
     def _context_window_hint(model_name: str) -> int | None:
         hints = {
             "qwen-max-latest": 200000,
-            "qwen-plus": 200000,
+            "qwen3-max-latest": 200000,
             "qwen3-max": 200000,
             "qwen-max": 200000,
-            "qwen-turbo": 100000,
             "qwen-vl-max": 32000,
             "qwen-vl-plus": 32000,
             "gpt-4o": 128000,

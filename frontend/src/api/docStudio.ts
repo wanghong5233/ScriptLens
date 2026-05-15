@@ -13,9 +13,9 @@
  * 不能对齐的功能（场不可变 / 无编译 / 无 operations / 无 PDF 等）一律 fail
  * aloud：直接抛 `Error('ScriptLens 不支持: ...')`，由 UI 上层弹 toast。
  *
- * chat 链路（EventSource GET 协议）当前与 ScriptLens 的 `POST /chat → SSE`
- * 不对齐，runAgentTaskAsync / events / cancel 暂时抛错；后续改造
- * doc-studio/index.tsx 的 chat 触发点为 fetch+ReadableStream。
+ * chat 链路（EventSource GET 协议）与 ScriptLens 的 `POST /chat → SSE`
+ * 通过 `sseClient` 做桥接：runAgentTaskAsync 保存请求快照，events 阶段再发起
+ * 实际 fetch+ReadableStream，并把后端事件转发给 doc-studio/index.tsx。
  */
 
 import { AxiosRequestConfig } from 'axios'
@@ -395,6 +395,47 @@ function sceneFileName(s: SceneItemDTO): string {
   return `${ep}${s.scene_no}场${label ? ` ${label}` : ''}`
 }
 
+const VFS_SCENE_PATH_RE = /^scenes\/E(\d{2,})-S(\d{3})\.txt$/i
+
+function parseSceneIndex(sceneNo: string | number | null | undefined): number | null {
+  const raw = String(sceneNo ?? '').trim()
+  if (!raw) return null
+  if (/^\d+$/.test(raw)) return Number(raw)
+  const m = raw.match(/(\d+)\s*$/)
+  if (!m) return null
+  return Number(m[1])
+}
+
+function normalizeScenePath(path: string): string {
+  return String(path || '').trim().replace(/\\/g, '/')
+}
+
+function findSceneByPathInCache(
+  scenes: SceneItemDTO[],
+  rawPath: string,
+): SceneItemDTO | null {
+  const path = normalizeScenePath(rawPath)
+  if (!path) return null
+
+  // 兼容旧路径：path 直接是 scene_id
+  const byId = scenes.find((s) => String(s.id) === path)
+  if (byId) return byId
+
+  // 新路径：scenes/E03-S005.txt
+  const m = path.match(VFS_SCENE_PATH_RE)
+  if (!m) return null
+  const ep = Number(m[1])
+  const sc = Number(m[2])
+  if (!Number.isFinite(ep) || !Number.isFinite(sc)) return null
+  return (
+    scenes.find(
+      (s) =>
+        Number(s.episode_no ?? 0) === ep &&
+        Number(parseSceneIndex(s.scene_no) ?? -1) === sc,
+    ) || null
+  )
+}
+
 /**
  * 把 LLM 输出里的引用（"5-3"、"5-3 场"、"第 5 集第 3 场"）解析为 sceneId。
  *
@@ -445,18 +486,23 @@ export function findSceneByRef(
   const m = trimmed.match(/^(\d+)\s*-\s*(\d+)$/)
   if (m) {
     const ep = Number(m[1])
-    const sn = m[2]
+    const sn = Number(m[2])
     const exact = scenes.find(
-      (s) => (s.episode_no ?? 0) === ep && String(s.scene_no) === sn,
+      (s) =>
+        (s.episode_no ?? 0) === ep &&
+        Number(parseSceneIndex(s.scene_no) ?? -1) === sn,
     )
     if (exact) return exact
   }
 
   // 仅 {scene_no}：单集时唯一匹配
   if (/^\d+$/.test(trimmed)) {
+    const targetSceneNo = Number(trimmed)
     const onlyEp = new Set(scenes.map((s) => s.episode_no ?? 0))
     if (onlyEp.size === 1) {
-      const hit = scenes.find((s) => String(s.scene_no) === trimmed)
+      const hit = scenes.find(
+        (s) => Number(parseSceneIndex(s.scene_no) ?? -1) === targetSceneNo,
+      )
       if (hit) return hit
     }
   }
@@ -670,18 +716,24 @@ export async function fetchFileContent(
   params: { workspaceId: string; path: string },
   options?: AxiosRequestConfig,
 ) {
-  // path 在我们的映射下就是 scene_id；先查 cache，cache miss 时重 fetch
+  // path 兼容两种形态：
+  // 1) 旧：scene_id
+  // 2) 新：scenes/E03-S005.txt（ScriptVFS 虚拟路径）
+  const normalizedPath = normalizeScenePath(params.path)
+  if (!normalizedPath) {
+    throw new Error('场景路径不能为空')
+  }
   let scenes = sceneCache.get(params.workspaceId)
   if (!scenes) {
     await fetchWorkspaceFiles({ workspaceId: params.workspaceId }, options)
     scenes = sceneCache.get(params.workspaceId) || []
   }
-  const scene = scenes.find((s) => s.id === params.path)
+  const scene = findSceneByPathInCache(scenes, normalizedPath)
   if (!scene) {
-    throw new Error(`场景不存在: scene_id=${params.path}`)
+    throw new Error(`场景不存在: path=${normalizedPath}`)
   }
   const result: DocStudioAPI.FileContentResponse = {
-    path: scene.id,
+    path: normalizedPath,
     content: scene.text || '',
     encoding: 'utf-8',
   }
@@ -697,30 +749,42 @@ export async function updateFileContent(
   },
   options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.SaveFileResponse> {
-  // path == scene_id（与 fetchFileContent 对齐）。AgentDiffReview reject hunk 路径会调本接口
-  // 把 reverted text 写回 DB；与 LaTeX 工作区写磁盘对称（docs/10-rewrite-agent.md §6）。
-  const { workspaceId, path: sceneId, content } = params
-  if (!sceneId) {
-    throw new Error('updateFileContent: path（scene_id）不能为空')
+  // path 兼容 scene_id / ScriptVFS path。最终都映射到 scene_id 写 DB。
+  const { workspaceId, content } = params
+  const normalizedPath = normalizeScenePath(params.path)
+  if (!normalizedPath) {
+    throw new Error('updateFileContent: path 不能为空')
   }
+
+  let scenes = sceneCache.get(workspaceId)
+  if (!scenes) {
+    await fetchWorkspaceFiles({ workspaceId }, options)
+    scenes = sceneCache.get(workspaceId) || []
+  }
+  const scene = findSceneByPathInCache(scenes, normalizedPath)
+  if (!scene) {
+    throw new Error(`updateFileContent: 场景不存在 path=${normalizedPath}`)
+  }
+  const sceneId = String(scene.id)
   const url = `${SCRIPTS_BASE}/${encodeURIComponent(workspaceId)}/scenes/${encodeURIComponent(sceneId)}/content`
-  await request<{ scene_id: string; char_count: number }>(
+  await request<{ scene_id: string; char_count: number }>({
+    ...(options || {}),
     url,
-    { method: 'put', data: { content } },
-    options,
-  )
+    method: 'put',
+    data: { content },
+  })
 
   // 同步刷新 sceneCache，避免下次 fetchFileContent 取到旧文本
-  const cached = sceneCache.get(workspaceId)
-  if (cached) {
-    const idx = cached.findIndex((s) => s.id === sceneId)
+  scenes = sceneCache.get(workspaceId)
+  if (scenes) {
+    const idx = scenes.findIndex((s) => String(s.id) === sceneId)
     if (idx >= 0) {
-      cached[idx] = { ...cached[idx], text: content }
+      scenes[idx] = { ...scenes[idx], text: content }
     }
   }
 
   return {
-    path: sceneId,
+    path: normalizedPath,
     size: content.length,
     modified_at: Math.floor(Date.now() / 1000),
     encoding: 'utf-8',
@@ -919,6 +983,7 @@ export async function runAgentTaskAsync(
     question: params.userIntent,
     history: [],
     role,
+    context: params.context,
   })
   return { runId, status: 'queued' }
 }
@@ -1016,6 +1081,7 @@ export async function revertOperation(
   },
   options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.RevertOperationResponse> {
+  const encodedOperationId = encodeURIComponent(params.operationId)
   // ScriptLens 后端目前 no-op（不真改 scenes.text，避免覆盖原始上传）。
   // 但端点存在并会做权限校验：op 不存在 / 越权时会 404 / 403。
   const { data } = await request.post<{
@@ -1024,7 +1090,7 @@ export async function revertOperation(
     deleted_files: string[]
     skipped_files: string[]
   }>(
-    `/${params.workspaceId}/operations/${params.operationId}/revert`,
+    `/${params.workspaceId}/operations/${encodedOperationId}/revert`,
     {},
     withScripts(options),
   )
@@ -1068,9 +1134,10 @@ export async function fetchOperationSnapshotFile(
   },
   options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.FileContentResponse> {
+  const encodedOperationId = encodeURIComponent(params.operationId)
   const version = params.version || 'before'
   const { data } = await request.get<DocStudioAPI.FileContentResponse>(
-    `/${params.workspaceId}/operations/${params.operationId}/snapshot`,
+    `/${params.workspaceId}/operations/${encodedOperationId}/snapshot`,
     withScripts({
       ...(options ?? {}),
       params: {

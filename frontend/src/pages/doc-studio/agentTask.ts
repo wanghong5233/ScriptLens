@@ -53,7 +53,7 @@ export interface DimInquiryTask {
 /**
  * 全剧维度改写任务（plan / execute 两阶段，docs/10-rewrite-agent.md §5）。
  *
- * - mode='plan'：触发后端 propose_dimension_rewrite_tool 出 plan tree，前端 RewritePlanCard 渲染
+ * - mode='plan'：触发后端 propose_full_script_plan_tool 出 plan tree，前端 RewritePlanCard 渲染
  * - mode='execute'：plan_steps 来自用户在 RewritePlanCard 勾选过的 step 子集
  *
  * 用户消息只发简短意图（一行），800 字 brief 完全后端化（不再前端拼 prompt）。
@@ -224,9 +224,18 @@ export function buildPromptFromTask(task: AgentTask): string {
 
   if (task.kind === 'evidence_lookup') {
     const sceneLabel = task.scene_label || '当前场'
+    const quoteBlock = (task.quote || '').trim()
+      ? [
+          '',
+          '<SELECTION>',
+          String(task.quote || '').trim(),
+          '</SELECTION>',
+        ]
+      : []
     return [
       `我在《${sceneLabel}》看到一条被算法挂为证据的片段（编辑器已高亮）。`,
       `用一两句话告诉我：它对应的是哪个维度？为什么它是这个维度的支撑？`,
+      ...quoteBlock,
       '',
       metaBlock,
     ].join('\n')
@@ -250,7 +259,7 @@ export function buildPromptFromTask(task: AgentTask): string {
 
   if (task.kind === 'fulltext_rewrite') {
     // 用户消息只发一行简短意图，800 字 brief 完全后端化（docs/10-rewrite-agent.md §5）。
-    // Agent 收到 TASK_META 后直调 propose_dimension_rewrite_tool。
+    // Agent 收到 TASK_META 后按 mode 调 propose_full_script_plan_tool / rewrite_scene_tool。
     const dimsLabel = task.dimensions.map((d) => DIM_LABEL[d] || d).join(' / ')
     if (task.mode === 'plan') {
       return [`按「${dimsLabel}」全剧出一份改写计划。`, '', metaBlock].join('\n')

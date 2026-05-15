@@ -31,6 +31,7 @@ export interface ChatStreamArgs {
   // 这里直接透传 question；history/role 暂用默认值。
   history?: Array<{ role: 'user' | 'assistant'; content: string }>
   role?: string
+  context?: Record<string, any>
 }
 
 const pendingArgs = new Map<string, ChatStreamArgs>()
@@ -139,6 +140,7 @@ export class ScriptLensAgentStream {
       question: args.question,
       history: args.history ?? [],
       role: args.role ?? 'general',
+      context: args.context ?? undefined,
     }
 
     let response: Response

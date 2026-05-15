@@ -1,4 +1,4 @@
-"""ScriptLens 4 个剧本专属 ReAct 工具。
+"""ScriptLens 剧本专属 ReAct 工具。
 
 来源：reuse-matrix §5 / §5.2。继承 doc_studio `BaseTool` 自动获得：
 - 预算守卫（agent_service ReAct 主循环里的 `tool_budget`）
@@ -21,11 +21,13 @@ from __future__ import annotations
 import asyncio
 import difflib
 import logging
+import re
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
 from .base_tool import BaseTool, ToolResult
+from ..script_vfs import ScriptVFS, ScriptVFSError
 
 logger = logging.getLogger(__name__)
 
@@ -725,64 +727,805 @@ def _scene_title(s: Dict[str, Any]) -> str:
 
 
 # ============================================================
-# 5. PropDimensionRewriteTool —— 全剧维度改写（plan-then-execute）
+# 5. ReadScene / ProposeFullScriptPlan / RewriteScene（改写三件套）
 # ============================================================
-#
-# docs/10-rewrite-agent.md §5 实装。两阶段工具：
-#
-#   mode='plan'    → 调 rewrite_chain.propose_plan 输出全剧 plan tree（不写 DB），
-#                    交给前端 RewritePlanCard 渲染让用户审 / 勾选；
-#   mode='execute' → 拿 plan_steps（用户勾选过的子集）调 rewrite_chain.execute_plan_step
-#                    逐场改写，UPDATE scriptlens.scenes.text + mutate
-#                    state.modified_files / state.original_file_contents，
-#                    Agent 收尾时 _generate_file_diffs 自动产 file_diffs 给
-#                    AgentDiffReview（剧本场景透明走 LaTeX 同款 diff 链路）。
-#
-# 「LaTeX 工具直接写磁盘 → accept all 关闭 modal」语义在剧本下统一为
-# 「改写工具直接 UPDATE DB → accept all 关闭 modal」。reject 路径走前端
-# updateFileContent → PUT scenes/{id}/content 写 DB（与 LaTeX 写磁盘对称）。
+
+_REWRITE_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing")
 
 
-class PropDimensionRewriteTool(BaseTool):
-    """全剧维度级改写：plan / execute 双模式。"""
+def _normalize_rewrite_dimensions(raw_dimensions: Any) -> List[str]:
+    out: List[str] = []
+    if not isinstance(raw_dimensions, list):
+        return out
+    for dim in raw_dimensions:
+        key = str(dim or "").strip()
+        if key in _REWRITE_DIMENSIONS and key not in out:
+            out.append(key)
+    return out
+
+
+def _normalize_plan_steps(
+    raw_steps: Any,
+    *,
+    allowed_dimensions: Optional[List[str]] = None,
+) -> List[Dict[str, Any]]:
+    if not isinstance(raw_steps, list):
+        return []
+    allowed = set(allowed_dimensions or list(_REWRITE_DIMENSIONS))
+    steps: List[Dict[str, Any]] = []
+    for raw in raw_steps:
+        if not isinstance(raw, dict):
+            continue
+        scene_id = str(raw.get("scene_id") or "").strip()
+        if not scene_id:
+            continue
+        step_dims = _normalize_rewrite_dimensions(raw.get("target_dimensions"))
+        step_dims = [dim for dim in step_dims if dim in allowed]
+        if not step_dims:
+            continue
+        steps.append(
+            {
+                "scene_id": scene_id,
+                "target_dimensions": step_dims,
+                "expected_changes": str(raw.get("expected_changes") or "").strip(),
+            }
+        )
+    return steps
+
+
+def _load_scene_meta(*, scene_id: str, expected_script_id: str) -> Dict[str, Any]:
+    from utils.database import engine
+
+    with engine.connect() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT s.id::text AS scene_id,
+                       s.episode_no,
+                       s.scene_no::text AS scene_no,
+                       s.scene_label
+                FROM scriptlens.scenes s
+                WHERE s.id::text = :scene_id
+                  AND s.script_id::text = :script_id
+                """
+            ),
+            {"scene_id": scene_id, "script_id": expected_script_id},
+        ).mappings().first()
+    if row is None:
+        raise ValueError(
+            f"scene {scene_id} not found in script {expected_script_id}"
+        )
+    return dict(row)
+
+
+def _mutate_agent_state_for_scene(
+    *,
+    agent_state: Any,
+    scene_path: str,
+    scene_id: str,
+    original_text: str,
+) -> None:
+    modified_files = getattr(agent_state, "modified_files", None)
+    if modified_files is None:
+        modified_files = set()
+        setattr(agent_state, "modified_files", modified_files)
+    modified_files.add(scene_path)
+
+    originals = getattr(agent_state, "original_file_contents", None)
+    if originals is None:
+        originals = {}
+        setattr(agent_state, "original_file_contents", originals)
+    if scene_path not in originals:
+        originals[scene_path] = original_text
+    if scene_id not in originals:
+        originals[scene_id] = original_text
+
+
+class ReadSceneTool(BaseTool):
+    """读取单场原文（支持 scene_id 或 ScriptVFS file_path）。"""
 
     def __init__(self) -> None:
         super().__init__(
-            name="propose_dimension_rewrite_tool",
+            name="read_scene_tool",
             description=(
-                "对当前剧本做全剧改写。两阶段调用：\n"
-                "  1. mode='plan'：基于五力评分，输出全剧改写计划（plan tree，每条含 "
-                "scene_id / target_dimensions / rationale / expected_changes）。**不修改任何场**，"
-                "供用户审阅与勾选。返回 data.rewrite_plan。\n"
-                "  2. mode='execute'：拿前一步 plan_steps（用户勾选过的子集），逐场调 LLM "
-                "改写 → UPDATE scriptlens.scenes.text → 触发 file_diffs 给 AgentDiffReview。"
-                "返回 data.executed_scenes / data.failed_scenes。\n"
-                "用户消息含 <TASK_META>{kind:'fulltext_rewrite', dimensions, mode}</TASK_META> 时直调。"
+                "读取单场剧本原文。支持 scene_id 或 ScriptVFS 路径（scenes/E03-S005.txt）。"
+                "返回 scene_id/file_path/集场信息/场景标题/全文。"
             ),
         )
         self.parameters_schema = {
             "type": "object",
             "properties": {
-                "mode": {
+                "scene_id": {"type": "string", "description": "目标场景 UUID"},
+                "file_path": {
                     "type": "string",
-                    "enum": ["plan", "execute"],
-                    "description": "plan = 出 plan tree 不改文；execute = 按 plan_steps 改写写库",
+                    "description": "ScriptVFS 路径，如 scenes/E03-S005.txt",
                 },
+                "script_id": {
+                    "type": "string",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本",
+                },
+            },
+            "required": [],
+        }
+
+    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+        params = parameters or {}
+        raw_scene_id = str(params.get("scene_id") or "").strip()
+        raw_file_path = str(params.get("file_path") or "").strip()
+        if not raw_scene_id and not raw_file_path:
+            return ToolResult(
+                success=False,
+                error="either scene_id or file_path is required",
+                summary="缺 scene_id/file_path",
+            )
+        try:
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+
+        try:
+            vfs = ScriptVFS(script_id=script_id)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="ScriptVFS 初始化失败")
+
+        try:
+            if raw_scene_id and raw_file_path:
+                sid_from_path = vfs.resolve_scene_id(raw_file_path)
+                if sid_from_path != raw_scene_id:
+                    return ToolResult(
+                        success=False,
+                        error="scene_id does not match file_path in current script scope",
+                        summary="scene_id/file_path 不一致",
+                    )
+                scene_id = raw_scene_id
+                file_path = vfs.resolve_file_path(scene_id)
+            elif raw_scene_id:
+                scene_id = raw_scene_id
+                file_path = vfs.resolve_file_path(scene_id)
+            else:
+                scene_id = vfs.resolve_scene_id(raw_file_path)
+                file_path = vfs.coerce_file_path(raw_file_path)
+            scene_text = vfs.read(scene_id)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="场景读取失败")
+
+        try:
+            meta = _load_scene_meta(scene_id=scene_id, expected_script_id=script_id)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="场景不存在")
+
+        return ToolResult(
+            success=True,
+            data={
+                "scene_id": scene_id,
+                "file_path": file_path,
+                "episode_no": meta.get("episode_no"),
+                "scene_no": meta.get("scene_no"),
+                "scene_label": meta.get("scene_label"),
+                "text": scene_text,
+                "char_count": len(scene_text),
+            },
+            summary=f"读取场景成功：{file_path}（{len(scene_text)} 字）",
+        )
+
+
+_SELECTION_REWRITE_SYSTEM_PROMPT = (
+    "你是短剧文本改写器。"
+    "你只能输出 JSON 对象，不要输出 markdown、不要输出解释段落。"
+    "JSON 结构固定为 {\"rewritten_text\": string, \"rationale\": string}。"
+)
+_selection_rewrite_runtime: Optional[Any] = None
+
+
+def _get_selection_rewrite_runtime() -> Any:
+    """懒加载 Selection 改写运行时，复用统一 LLMRuntime 配置。"""
+    global _selection_rewrite_runtime
+    if _selection_rewrite_runtime is None:
+        from core.config import settings
+        from service.core.llm.runtime import LLMRuntime
+
+        _selection_rewrite_runtime = LLMRuntime(settings_obj=settings)
+    return _selection_rewrite_runtime
+
+
+def _coerce_optional_int(raw: Any) -> Optional[int]:
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _pick_selection_from_context(
+    *,
+    agent_state: Any,
+    selection_id: Optional[int],
+    selection_placeholder: str,
+) -> Optional[Dict[str, Any]]:
+    context = getattr(agent_state, "request_context", None)
+    if not isinstance(context, dict):
+        return None
+
+    selections = context.get("selections")
+    if isinstance(selections, list) and selections:
+        if selection_id is not None:
+            for item in selections:
+                if not isinstance(item, dict):
+                    continue
+                item_id = _coerce_optional_int(item.get("id"))
+                if item_id == selection_id:
+                    return item
+        if selection_placeholder:
+            target = selection_placeholder.strip().lower()
+            for item in selections:
+                if not isinstance(item, dict):
+                    continue
+                placeholder = str(item.get("placeholder") or "").strip().lower()
+                if placeholder == target:
+                    return item
+        if len(selections) == 1 and isinstance(selections[0], dict):
+            return selections[0]
+
+    selection = context.get("selection")
+    if isinstance(selection, dict):
+        return selection
+    return None
+
+
+def _resolve_selection_span(
+    *,
+    scene_text: str,
+    selection_start: Optional[int],
+    selection_end: Optional[int],
+    selection_text: str,
+) -> tuple[int, int]:
+    if selection_start is not None or selection_end is not None:
+        if selection_start is None or selection_end is None:
+            raise ValueError("selection_start / selection_end 必须同时提供")
+        if selection_start < 0 or selection_end < 0:
+            raise ValueError("selection_start / selection_end 不能为负数")
+        if selection_end <= selection_start:
+            raise ValueError("selection_end 必须大于 selection_start")
+        if selection_end > len(scene_text):
+            raise ValueError(
+                f"selection_end 超出场景长度（end={selection_end}, len={len(scene_text)}）"
+            )
+        return selection_start, selection_end
+
+    if not selection_text:
+        raise ValueError("缺少可定位选区：请提供 selection_text 或 selection_start/selection_end")
+
+    matches = list(re.finditer(re.escape(selection_text), scene_text))
+    if not matches:
+        raise ValueError("selection_text 在目标场景中未命中")
+    if len(matches) > 1:
+        raise ValueError(
+            "selection_text 在目标场景中命中多处，需补充 selection_start/selection_end 消歧"
+        )
+    match = matches[0]
+    return match.start(), match.end()
+
+
+class RewriteSelectionSceneTool(BaseTool):
+    """按选区改写场景并写回 DB。"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="rewrite_selection_scene_tool",
+            description=(
+                "按选区改写场景文本并写回数据库。"
+                "适用于“把这段改成英语/润色/重写”等选区级编辑；"
+                "执行后会更新 AgentState 的 modified_files/original_file_contents 以产出 diff。"
+            ),
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "instruction": {
+                    "type": "string",
+                    "description": "改写指令，例如：改成英语 / 更口语化 / 更有压迫感",
+                },
+                "scene_id": {"type": "string", "description": "目标场景 UUID（可选）"},
+                "file_path": {
+                    "type": "string",
+                    "description": "ScriptVFS 路径，如 scenes/E03-S005.txt（可选）",
+                },
+                "selection_text": {
+                    "type": "string",
+                    "description": "选区原文（可选；缺省时从上下文 selections 读取）",
+                },
+                "selection_start": {
+                    "type": "integer",
+                    "description": "选区起始偏移（0-based，含）",
+                },
+                "selection_end": {
+                    "type": "integer",
+                    "description": "选区结束偏移（0-based，不含）",
+                },
+                "selection_id": {
+                    "type": "integer",
+                    "description": "上下文 selections 的 id（可选）",
+                },
+                "selection_placeholder": {
+                    "type": "string",
+                    "description": "上下文 selections 的占位符（如 @selection1，可选）",
+                },
+                "script_id": {
+                    "type": "string",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本",
+                },
+            },
+            "required": ["instruction"],
+        }
+
+    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+        params = parameters or {}
+        instruction = str(params.get("instruction") or "").strip()
+        if not instruction:
+            return ToolResult(
+                success=False,
+                error="instruction is required",
+                summary="缺 instruction",
+            )
+
+        try:
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+
+        try:
+            vfs = ScriptVFS(script_id=script_id)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="ScriptVFS 初始化失败")
+
+        selection_id = _coerce_optional_int(params.get("selection_id"))
+        selection_placeholder = str(params.get("selection_placeholder") or "").strip()
+        context_selection = _pick_selection_from_context(
+            agent_state=agent_state,
+            selection_id=selection_id,
+            selection_placeholder=selection_placeholder,
+        )
+
+        raw_scene_id = str(params.get("scene_id") or "").strip()
+        raw_file_path = str(params.get("file_path") or "").strip()
+        if not raw_scene_id and isinstance(context_selection, dict):
+            raw_scene_id = str(context_selection.get("scene_id") or "").strip()
+        if not raw_file_path and isinstance(context_selection, dict):
+            raw_file_path = str(context_selection.get("file_path") or "").strip()
+
+        request_context = getattr(agent_state, "request_context", None)
+        if not raw_file_path and isinstance(request_context, dict):
+            raw_file_path = str(request_context.get("file_path") or "").strip()
+
+        if not raw_scene_id and not raw_file_path:
+            return ToolResult(
+                success=False,
+                error="either scene_id or file_path is required (or inferable from request context)",
+                summary="缺 scene_id/file_path",
+            )
+
+        try:
+            if raw_scene_id and raw_file_path:
+                sid_from_path = vfs.resolve_scene_id(raw_file_path)
+                if sid_from_path != raw_scene_id:
+                    return ToolResult(
+                        success=False,
+                        error="scene_id does not match file_path in current script scope",
+                        summary="scene_id/file_path 不一致",
+                    )
+                scene_id = raw_scene_id
+                scene_path = vfs.resolve_file_path(scene_id)
+            elif raw_scene_id:
+                scene_id = raw_scene_id
+                scene_path = vfs.resolve_file_path(scene_id)
+            else:
+                scene_id = vfs.resolve_scene_id(raw_file_path)
+                scene_path = vfs.coerce_file_path(raw_file_path)
+            scene_text = vfs.read(scene_id)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="目标场景定位失败")
+
+        selection_text = str(params.get("selection_text") or "").strip()
+        selection_start = _coerce_optional_int(params.get("selection_start"))
+        selection_end = _coerce_optional_int(params.get("selection_end"))
+        if isinstance(context_selection, dict):
+            if not selection_text:
+                selection_text = str(
+                    context_selection.get("text") or context_selection.get("preview") or ""
+                ).strip()
+            if selection_start is None:
+                selection_start = _coerce_optional_int(context_selection.get("start"))
+            if selection_end is None:
+                selection_end = _coerce_optional_int(context_selection.get("end"))
+
+        try:
+            start, end = _resolve_selection_span(
+                scene_text=scene_text,
+                selection_start=selection_start,
+                selection_end=selection_end,
+                selection_text=selection_text,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="选区定位失败")
+
+        original_fragment = scene_text[start:end]
+        if not original_fragment:
+            return ToolResult(
+                success=False,
+                error="selection is empty after span resolution",
+                summary="空选区",
+            )
+
+        left_context = scene_text[max(0, start - 240):start]
+        right_context = scene_text[end:min(len(scene_text), end + 240)]
+        prompt = (
+            "请根据 instruction 只改写“选区原文”并返回 JSON。\n\n"
+            f"instruction:\n{instruction}\n\n"
+            "约束：\n"
+            "- rewritten_text 只能是替换选区的文本，不要包含前后文。\n"
+            "- 保持人物名、事实关系与剧情时序，不要杜撰新事件。\n"
+            "- 若 instruction 是翻译，保持舞台提示/对白格式与语气。\n\n"
+            "选区前文（仅供语境，不可原样重复输出）：\n"
+            f"{left_context}\n\n"
+            "选区原文（必须围绕它改写）：\n"
+            f"{original_fragment}\n\n"
+            "选区后文（仅供语境，不可原样重复输出）：\n"
+            f"{right_context}\n\n"
+            "输出 JSON：{\"rewritten_text\": \"...\", \"rationale\": \"...\"}"
+        )
+
+        try:
+            runtime = _get_selection_rewrite_runtime()
+            runtime_result = await runtime.generate_json(
+                prompt=prompt,
+                system_message=_SELECTION_REWRITE_SYSTEM_PROMPT,
+                temperature=0.2,
+                max_tokens=1536,
+                llm_options=getattr(agent_state, "llm_options", None),
+            )
+        except (RuntimeError, ValueError, TypeError) as exc:
+            logger.warning("rewrite_selection_scene_tool LLM failed: %s", exc)
+            return ToolResult(
+                success=False,
+                error=f"LLM error: {exc}",
+                summary="选区改写失败",
+            )
+
+        parsed = runtime_result.get("parsed")
+        if not isinstance(parsed, dict):
+            return ToolResult(
+                success=False,
+                error="LLM response parsed payload is not an object",
+                summary="选区改写解析失败",
+            )
+
+        rewritten_fragment = str(parsed.get("rewritten_text") or "").strip()
+        rationale = str(parsed.get("rationale") or "").strip()
+        if not rewritten_fragment:
+            return ToolResult(
+                success=False,
+                error="rewritten_text is empty",
+                summary="选区改写为空",
+            )
+        if rewritten_fragment == original_fragment:
+            return ToolResult(
+                success=False,
+                error="rewritten_text is identical to original selection",
+                summary="选区无改动",
+            )
+
+        rewritten_scene_text = scene_text[:start] + rewritten_fragment + scene_text[end:]
+        try:
+            _persist_scene_text(
+                scene_id=scene_id,
+                new_text=rewritten_scene_text,
+                expected_script_id=script_id,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="改写持久化失败")
+
+        _mutate_agent_state_for_scene(
+            agent_state=agent_state,
+            scene_path=scene_path,
+            scene_id=scene_id,
+            original_text=scene_text,
+        )
+
+        return ToolResult(
+            success=True,
+            data={
+                "scene_id": scene_id,
+                "file_path": scene_path,
+                "selection_start": start,
+                "selection_end": end,
+                "original_fragment": original_fragment,
+                "rewritten_fragment": rewritten_fragment,
+                "instruction": instruction,
+                "rationale": rationale,
+                "original_scene_chars": len(scene_text),
+                "rewritten_scene_chars": len(rewritten_scene_text),
+            },
+            summary=(
+                f"选区改写完成：{scene_path} [{start}:{end}] "
+                f"{len(original_fragment)}→{len(rewritten_fragment)} 字"
+            ),
+        )
+
+
+class ProposeFullScriptPlanTool(BaseTool):
+    """生成全剧维度改写计划（只出 plan，不写库）。"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="propose_full_script_plan_tool",
+            description=(
+                "基于维度子集生成全剧改写计划（plan tree）。"
+                "输出 rewrite_plan（steps 含 scene_id/target_dimensions/rationale/expected_changes），"
+                "不会改写场景文本。"
+            ),
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
                 "dimensions": {
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": ["story", "character", "concept", "emotion", "pacing"],
+                        "enum": list(_REWRITE_DIMENSIONS),
                     },
-                    "description": "目标维度（1-5 个，阅文五力子集；compliance 不参与改写）",
+                    "description": "目标维度（1-5 个）",
+                },
+                "max_steps": {
+                    "type": "integer",
+                    "description": "计划最大场次数（默认 12）",
+                    "default": 12,
+                },
+                "script_id": {
+                    "type": "string",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本",
+                },
+            },
+            "required": ["dimensions"],
+        }
+
+    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+        params = parameters or {}
+        dims = _normalize_rewrite_dimensions(params.get("dimensions"))
+        if not dims:
+            return ToolResult(
+                success=False,
+                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing",
+                summary="缺 dimensions",
+            )
+        try:
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+
+        try:
+            max_steps_raw = int(params.get("max_steps") or 12)
+        except (TypeError, ValueError):
+            return ToolResult(
+                success=False,
+                error="max_steps must be an integer",
+                summary="max_steps 参数错误",
+            )
+        max_steps = max(1, min(max_steps_raw, 30))
+
+        from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
+        from service.script_tools.rewrite_chain import propose_plan, select_target_scenes
+
+        caller = LlmCaller()
+        try:
+            scenes = await asyncio.to_thread(
+                select_target_scenes,
+                script_id=script_id,
+                dimensions=dims,
+                max_scenes=max_steps,
+            )
+            plan = await propose_plan(
+                script_id=script_id,
+                dimensions=dims,
+                scenes=scenes,
+                caller=caller,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="plan 参数错误")
+        except ScoreLLMError as exc:
+            logger.warning("propose_full_script_plan_tool failed: %s", exc)
+            return ToolResult(success=False, error=f"LLM error: {exc}", summary="plan LLM 失败")
+
+        plan_dict = plan.to_dict()
+        step_count = len(plan_dict.get("steps") or [])
+        summary = (
+            "全剧改写计划：当前维度无明显短板场"
+            if step_count == 0
+            else f"全剧改写计划完成：共 {step_count} 场（dims={'/'.join(dims)}）"
+        )
+        return ToolResult(
+            success=True,
+            data={
+                "mode": "plan",
+                "dimensions": dims,
+                "rewrite_plan": plan_dict,
+                "script_id": script_id,
+            },
+            summary=summary,
+        )
+
+
+class RewriteSceneTool(BaseTool):
+    """按目标维度改写单场并写回 DB。"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="rewrite_scene_tool",
+            description=(
+                "按目标维度改写单场并写回数据库。"
+                "输入 scene_id（或 file_path）+ target_dimensions + expected_changes，"
+                "执行后会更新 AgentState 的 modified_files/original_file_contents，"
+                "供后续统一 diff 生成。"
+            ),
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "scene_id": {"type": "string", "description": "目标场景 UUID"},
+                "file_path": {
+                    "type": "string",
+                    "description": "ScriptVFS 路径，如 scenes/E03-S005.txt",
+                },
+                "target_dimensions": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(_REWRITE_DIMENSIONS)},
+                    "description": "本场改写目标维度（1-5）",
+                },
+                "expected_changes": {
+                    "type": "string",
+                    "description": "本场预期改写方向（可选）",
+                },
+                "script_id": {
+                    "type": "string",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本",
+                },
+            },
+            "required": ["target_dimensions"],
+        }
+
+    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+        params = parameters or {}
+        dims = _normalize_rewrite_dimensions(params.get("target_dimensions"))
+        if not dims:
+            return ToolResult(
+                success=False,
+                error="target_dimensions must be a non-empty subset of story/character/concept/emotion/pacing",
+                summary="缺 target_dimensions",
+            )
+
+        raw_scene_id = str(params.get("scene_id") or "").strip()
+        raw_file_path = str(params.get("file_path") or "").strip()
+        if not raw_scene_id and not raw_file_path:
+            return ToolResult(
+                success=False,
+                error="either scene_id or file_path is required",
+                summary="缺 scene_id/file_path",
+            )
+
+        try:
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+
+        try:
+            vfs = ScriptVFS(script_id=script_id)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="ScriptVFS 初始化失败")
+
+        try:
+            if raw_scene_id and raw_file_path:
+                sid_from_path = vfs.resolve_scene_id(raw_file_path)
+                if sid_from_path != raw_scene_id:
+                    return ToolResult(
+                        success=False,
+                        error="scene_id does not match file_path in current script scope",
+                        summary="scene_id/file_path 不一致",
+                    )
+                scene_id = raw_scene_id
+                scene_path = vfs.resolve_file_path(scene_id)
+            elif raw_scene_id:
+                scene_id = raw_scene_id
+                scene_path = vfs.resolve_file_path(scene_id)
+            else:
+                scene_id = vfs.resolve_scene_id(raw_file_path)
+                scene_path = vfs.coerce_file_path(raw_file_path)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="目标场景定位失败")
+
+        expected_changes = str(params.get("expected_changes") or "").strip()
+
+        from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
+        from service.script_tools.rewrite_chain import execute_plan_step
+
+        caller = LlmCaller()
+        try:
+            result = await execute_plan_step(
+                script_id=script_id,
+                scene_id=scene_id,
+                target_dimensions=dims,
+                expected_changes=expected_changes,
+                caller=caller,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="改写参数错误")
+        except ScoreLLMError as exc:
+            logger.warning("rewrite_scene_tool failed for scene %s: %s", scene_id, exc)
+            return ToolResult(success=False, error=f"LLM error: {exc}", summary="改写 LLM 失败")
+
+        try:
+            _persist_scene_text(
+                scene_id=scene_id,
+                new_text=result.rewritten_text,
+                expected_script_id=script_id,
+            )
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="改写持久化失败")
+
+        _mutate_agent_state_for_scene(
+            agent_state=agent_state,
+            scene_path=scene_path,
+            scene_id=scene_id,
+            original_text=result.original_text,
+        )
+
+        return ToolResult(
+            success=True,
+            data={
+                "scene_id": scene_id,
+                "file_path": scene_path,
+                "scene_label": result.scene_label,
+                "target_dimensions": list(result.target_dimensions),
+                "rationale": result.rationale,
+                "expected_changes": expected_changes,
+                "original_chars": len(result.original_text),
+                "rewritten_chars": len(result.rewritten_text),
+            },
+            summary=(
+                f"改写完成：{scene_path}（dims={'/'.join(result.target_dimensions)}）"
+                f" {len(result.original_text)}→{len(result.rewritten_text)} 字"
+            ),
+        )
+
+
+class PropDimensionRewriteTool(BaseTool):
+    """兼容旧入口：propose_dimension_rewrite_tool 转发到改写三件套。"""
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="propose_dimension_rewrite_tool",
+            description=(
+                "兼容旧入口。内部转发到 read_scene_tool / propose_full_script_plan_tool / rewrite_scene_tool。"
+                "建议新会话直接使用三件套。"
+            ),
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "mode": {"type": "string", "enum": ["plan", "execute"]},
+                "dimensions": {
+                    "type": "array",
+                    "items": {"type": "string", "enum": list(_REWRITE_DIMENSIONS)},
                 },
                 "plan_steps": {
                     "type": "array",
-                    "description": (
-                        "execute 模式必传：前端从 plan tree 勾选后传回。"
-                        "每条形如 {scene_id, target_dimensions, expected_changes}。"
-                        "缺省时 execute 模式会重跑 propose_plan 取全部 step。"
-                    ),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -796,26 +1539,23 @@ class PropDimensionRewriteTool(BaseTool):
                         "required": ["scene_id", "target_dimensions"],
                     },
                 },
-                "script_id": {
-                    "type": "string",
-                    "description": "剧本 UUID；缺省时使用当前会话绑定的剧本",
-                },
+                "script_id": {"type": "string"},
             },
             "required": ["mode", "dimensions"],
         }
+        self._plan_tool = ProposeFullScriptPlanTool()
+        self._rewrite_tool = RewriteSceneTool()
 
     async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
         params = parameters or {}
-        mode = str(params.get("mode") or "").strip()
-        if mode not in ("plan", "execute"):
+        mode = str(params.get("mode") or "").strip().lower()
+        if mode not in {"plan", "execute"}:
             return ToolResult(
                 success=False,
                 error=f"mode must be 'plan' or 'execute', got {mode!r}",
                 summary="非法 mode",
             )
-
-        dims_raw = params.get("dimensions") or []
-        dims = [d for d in dims_raw if isinstance(d, str) and d in _DIMENSIONS and d != "compliance"]
+        dims = _normalize_rewrite_dimensions(params.get("dimensions"))
         if not dims:
             return ToolResult(
                 success=False,
@@ -823,171 +1563,81 @@ class PropDimensionRewriteTool(BaseTool):
                 summary="缺 dimensions",
             )
 
-        try:
-            script_id = _resolve_script_id(agent_state, params)
-        except ValueError as e:
-            return ToolResult(success=False, error=str(e), summary="剧本作用域不一致")
-        if not script_id:
-            return _missing_script_id()
-
-        from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
-        from service.script_tools.rewrite_chain import (
-            execute_plan_step,
-            propose_plan,
-            select_target_scenes,
-        )
-
-        caller = LlmCaller()
-
         if mode == "plan":
-            try:
-                scenes = await asyncio.to_thread(
-                    select_target_scenes,
-                    script_id=script_id,
-                    dimensions=dims,
-                )
-                plan = await propose_plan(
-                    script_id=script_id,
-                    dimensions=dims,
-                    scenes=scenes,
-                    caller=caller,
-                )
-            except ValueError as e:
-                return ToolResult(success=False, error=str(e), summary="plan 参数错误")
-            except ScoreLLMError as e:
-                logger.warning("propose_dimension_rewrite_tool plan failed: %s", e)
-                return ToolResult(success=False, error=f"LLM error: {e}", summary="plan LLM 失败")
-            except Exception as e:
-                logger.error("propose_dimension_rewrite_tool plan unexpected: %s", e, exc_info=True)
-                return ToolResult(success=False, error=str(e), summary="plan 异常")
-
-            plan_dict = plan.to_dict()
-            step_count = len(plan_dict["steps"])
-            if step_count == 0:
-                summary = "全剧 plan：所选维度无 score<7 的明显短板场，无须改写"
-            else:
-                summary = f"全剧 plan 完成：共 {step_count} 场建议改写（dims={'/'.join(dims)}）"
-            return ToolResult(
-                success=True,
-                data={
-                    "mode": "plan",
-                    "rewrite_plan": plan_dict,
-                    "script_id": script_id,
+            return await self._plan_tool.execute(
+                agent_state,
+                {
+                    "dimensions": dims,
+                    "script_id": params.get("script_id"),
+                    "max_steps": params.get("max_steps"),
                 },
-                summary=summary,
             )
 
-        # mode == 'execute'
-        plan_steps_raw = params.get("plan_steps") or []
-        plan_steps: List[Dict[str, Any]] = []
-        if isinstance(plan_steps_raw, list) and plan_steps_raw:
-            for raw in plan_steps_raw:
-                if not isinstance(raw, dict):
-                    continue
-                sid = str(raw.get("scene_id") or "").strip()
-                tdims = [
-                    d for d in (raw.get("target_dimensions") or [])
-                    if isinstance(d, str) and d in dims
-                ]
-                if not sid or not tdims:
-                    continue
-                plan_steps.append(
-                    {
-                        "scene_id": sid,
-                        "target_dimensions": tdims,
-                        "expected_changes": str(raw.get("expected_changes") or ""),
-                    }
-                )
-
+        plan_steps = _normalize_plan_steps(
+            params.get("plan_steps"),
+            allowed_dimensions=dims,
+        )
         if not plan_steps:
-            # 兜底：用户没传 plan_steps（例如 chat 直接说"全剧改写吧"），重跑 plan 取全部
-            try:
-                plan = await propose_plan(
-                    script_id=script_id,
-                    dimensions=dims,
-                    caller=caller,
+            plan_result = await self._plan_tool.execute(
+                agent_state,
+                {
+                    "dimensions": dims,
+                    "script_id": params.get("script_id"),
+                },
+            )
+            if not plan_result.success:
+                return ToolResult(
+                    success=False,
+                    error=plan_result.error or "fallback plan failed",
+                    summary="兜底 plan 失败",
                 )
-            except ScoreLLMError as e:
-                return ToolResult(success=False, error=f"LLM error: {e}", summary="plan 兜底失败")
-            for step in plan.steps:
-                plan_steps.append(
-                    {
-                        "scene_id": step.scene_id,
-                        "target_dimensions": list(step.target_dimensions),
-                        "expected_changes": step.expected_changes,
-                    }
-                )
+            plan_dict = (
+                (plan_result.data or {}).get("rewrite_plan")
+                if isinstance(plan_result.data, dict)
+                else {}
+            ) or {}
+            plan_steps = _normalize_plan_steps(
+                plan_dict.get("steps"),
+                allowed_dimensions=dims,
+            )
 
         if not plan_steps:
             return ToolResult(
                 success=False,
-                error="execute 阶段没有可改写的场（plan_steps 空且兜底 plan 也无短板场）",
+                error="execute 阶段没有可改写的场（plan_steps 为空）",
                 summary="无可改写场",
             )
 
         executed: List[Dict[str, Any]] = []
         failed: List[Dict[str, Any]] = []
-
         for step in plan_steps:
-            sid = step["scene_id"]
-            tdims = step["target_dimensions"]
-            expected = step.get("expected_changes") or ""
-            try:
-                result = await execute_plan_step(
-                    script_id=script_id,
-                    scene_id=sid,
-                    target_dimensions=tdims,
-                    expected_changes=expected,
-                    caller=caller,
+            rewrite_result = await self._rewrite_tool.execute(
+                agent_state,
+                {
+                    "scene_id": step["scene_id"],
+                    "target_dimensions": step["target_dimensions"],
+                    "expected_changes": step.get("expected_changes") or "",
+                    "script_id": params.get("script_id"),
+                },
+            )
+            if not rewrite_result.success:
+                failed.append(
+                    {
+                        "scene_id": step["scene_id"],
+                        "error": rewrite_result.error or "rewrite failed",
+                    }
                 )
-            except (ValueError, ScoreLLMError) as e:
-                logger.warning("execute_plan_step failed for scene %s: %s", sid, e)
-                failed.append({"scene_id": sid, "error": str(e)})
                 continue
-            except Exception as e:
-                logger.error("execute_plan_step unexpected for scene %s: %s", sid, e, exc_info=True)
-                failed.append({"scene_id": sid, "error": str(e)})
-                continue
-
-            try:
-                _persist_scene_text(
-                    scene_id=sid,
-                    new_text=result.rewritten_text,
-                    expected_script_id=script_id,
-                )
-            except Exception as e:
-                logger.error("persist scene %s failed: %s", sid, e, exc_info=True)
-                failed.append({"scene_id": sid, "error": f"persist failed: {e}"})
-                continue
-
-            # mutate agent_state：让 _generate_file_diffs 走透明 diff 链路
-            # state.modified_files 装 scene_id（UUID 形态），state.original_file_contents
-            # 装改写前文本——后端 _generate_file_diffs 会做剧本工作区分支识别
-            try:
-                modified_files = getattr(agent_state, "modified_files", None)
-                if modified_files is None:
-                    modified_files = set()
-                    setattr(agent_state, "modified_files", modified_files)
-                modified_files.add(sid)
-
-                originals = getattr(agent_state, "original_file_contents", None)
-                if originals is None:
-                    originals = {}
-                    setattr(agent_state, "original_file_contents", originals)
-                # 只在第一次见到该 scene 时记 original，后续累积改写不能覆盖
-                if sid not in originals:
-                    originals[sid] = result.original_text
-            except Exception as e:
-                logger.warning("mutate agent_state failed for %s: %s (continuing)", sid, e)
-
+            payload = rewrite_result.data if isinstance(rewrite_result.data, dict) else {}
             executed.append(
                 {
-                    "scene_id": sid,
-                    "scene_label": result.scene_label,
-                    "target_dimensions": list(result.target_dimensions),
-                    "rationale": result.rationale,
-                    "original_chars": len(result.original_text),
-                    "rewritten_chars": len(result.rewritten_text),
+                    "scene_id": payload.get("scene_id") or step["scene_id"],
+                    "scene_label": payload.get("scene_label"),
+                    "target_dimensions": payload.get("target_dimensions") or step["target_dimensions"],
+                    "rationale": payload.get("rationale"),
+                    "file_path": payload.get("file_path"),
+                    "original_chars": payload.get("original_chars"),
+                    "rewritten_chars": payload.get("rewritten_chars"),
                 }
             )
 
@@ -997,14 +1647,14 @@ class PropDimensionRewriteTool(BaseTool):
             return ToolResult(
                 success=False,
                 error=f"全部 {bad} 场改写均失败",
-                data={"mode": "execute", "executed_scenes": [], "failed_scenes": failed},
+                data={
+                    "mode": "execute",
+                    "dimensions": dims,
+                    "executed_scenes": [],
+                    "failed_scenes": failed,
+                },
                 summary="全剧改写失败",
             )
-        summary = (
-            f"改写完成：成功 {ok} 场"
-            + (f" / 失败 {bad} 场" if bad else "")
-            + f"（dims={'/'.join(dims)}）"
-        )
         return ToolResult(
             success=True,
             data={
@@ -1012,9 +1662,12 @@ class PropDimensionRewriteTool(BaseTool):
                 "dimensions": dims,
                 "executed_scenes": executed,
                 "failed_scenes": failed,
-                "script_id": script_id,
             },
-            summary=summary,
+            summary=(
+                f"改写完成：成功 {ok} 场"
+                + (f" / 失败 {bad} 场" if bad else "")
+                + f"（dims={'/'.join(dims)}）"
+            ),
         )
 
 

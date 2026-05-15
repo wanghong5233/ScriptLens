@@ -26,11 +26,26 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import httpx
-from openai import AsyncOpenAI, APIConnectionError, APIError, APITimeoutError, RateLimitError
+from openai import (
+    AsyncOpenAI,
+    APIConnectionError,
+    APIError,
+    APITimeoutError,
+    NotFoundError,
+    RateLimitError,
+)
 
 from core.config import settings
+from service.core.llm.runtime import (
+    FORBIDDEN_LLM_MODELS as _RUNTIME_FORBIDDEN,
+    LLMRuntime,
+)
 
 logger = logging.getLogger(__name__)
+
+
+# 与 LLMRuntime 共享同一份黑名单（单一配置源；保留这层 alias 不破坏既有 import）。
+FORBIDDEN_LLM_MODELS: frozenset[str] = _RUNTIME_FORBIDDEN
 
 
 class ScoreLLMError(RuntimeError):
@@ -188,23 +203,72 @@ def _resolve_capability(model: str) -> ModelCapability:
 class ModelTier:
     """逻辑档位 → 真实 model name 解析；env 改一次到处生效。
 
-    DashScope 兜底统一用 `qwen-max-latest` 别名（阿里官方"始终指向最新最强 qwen-max"），
-    避免版本号在升级时迁移成本。短剧分析对 reasoning 强度敏感，
-    弱化模型（qwen-turbo / qwen-plus）已从 fallback 中移除（详见 docs/08-evaluation-framework.md §6.2）。
+    DashScope 兜底使用账号实际开通的 `qwen-max-latest`（阿里官方"始终最新最强 qwen-max"别名）；
+    `qwen3-max-latest` 在多数账号下 404 不存在，因此仅放在 candidate 链末尾，
+    遇到 NotFoundError 时自动切下一个候选模型（详见 docs/08-evaluation-framework.md §6.2）。
+    弱化模型（qwen-turbo / qwen-plus / qwen2.5-plus）由 FORBIDDEN_LLM_MODELS 全局拦截。
     """
 
     PRIMARY = "primary"
     MINI = "mini"
 
+    # 进程级共享 runtime，避免每次 resolve_candidates 都新建实例
+    _runtime_singleton: LLMRuntime | None = None
+
+    @staticmethod
+    def _runtime() -> LLMRuntime:
+        if ModelTier._runtime_singleton is None:
+            ModelTier._runtime_singleton = LLMRuntime(settings_obj=settings)
+        return ModelTier._runtime_singleton
+
+    @staticmethod
+    def _filter_forbidden(models: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for m in models:
+            name = (m or "").strip()
+            if not name or name in seen or name in FORBIDDEN_LLM_MODELS:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
+
     @staticmethod
     def resolve(tier: str, provider: str) -> str:
-        if provider == "openai":
-            if tier == ModelTier.MINI:
-                return getattr(settings, "OPENAI_MINI_MODEL_NAME", None) or "gpt-5-mini"
-            return settings.OPENAI_MODEL_NAME or "gpt-5.2"
+        """单 model 解析（保留给外部诊断 / 日志使用）。"""
+        candidates = ModelTier.resolve_candidates(tier, provider)
+        return candidates[0] if candidates else ""
+
+    @staticmethod
+    def resolve_candidates(tier: str, provider: str) -> list[str]:
+        """按 tier × provider 解析 model 候选链，**首位为主选**，后续为 fallback。
+
+        实现与 LLMRuntime 共享：调用 ``runtime._configured_models_for_provider``
+        来解析 ``settings.{OPENAI,DASHSCOPE}_MODEL_CANDIDATES``，意味着评分链路
+        与 ReAct 主循环共享同一份候选解析逻辑、同一份 FORBIDDEN_LLM_MODELS。
+        env 里只要改一次（OPENAI_MODEL_CANDIDATES / DASHSCOPE_MODEL_CANDIDATES），
+        两边行为同步切换，不会再出现"对话能跑、工具失败"的不对称
+        （详见 docs/08-evaluation-framework.md §6.2）。
+
+        MINI 档在 LLMRuntime 候选链前补一个 mini 优先项；后续 model 级 fallback
+        命中 404 / model_not_found / model_not_supported 时自动切下一个，由
+        LlmCaller._call_provider_with_fallback 负责。
+        """
+        runtime = ModelTier._runtime()
+        base = runtime._configured_models_for_provider(provider)
+
         if tier == ModelTier.MINI:
-            return getattr(settings, "SM_LLM_MODEL_AUX", None) or "qwen-max-latest"
-        return settings.DASHSCOPE_MODEL_NAME or "qwen-max-latest"
+            if provider == "openai":
+                mini_pref = getattr(settings, "OPENAI_MINI_MODEL_NAME", None) or "gpt-5-mini"
+            else:
+                mini_pref = (
+                    getattr(settings, "SM_LLM_MODEL_AUX", None)
+                    or settings.DASHSCOPE_MODEL_NAME
+                    or "qwen-max-latest"
+                )
+            return ModelTier._filter_forbidden([mini_pref, *base])
+
+        return ModelTier._filter_forbidden(list(base))
 
 
 # ============================================================
@@ -335,9 +399,9 @@ class LlmCaller:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": prompt})
 
-        # 1. OpenAI 主路径
+        # 1. OpenAI 主路径（model 级 fallback：candidate 列表逐个试，命中 404/model_not_found 切下一个）
         try:
-            return await self._call_with_provider(
+            return await self._call_provider_with_fallback(
                 provider="openai",
                 client=self._openai,
                 tier=tier,
@@ -348,19 +412,21 @@ class LlmCaller:
         except self._RETRYABLE_EXC as e:
             logger.warning("OpenAI 调用失败，切 DashScope 兜底：%s: %s", type(e).__name__, e)
         except APIError as e:
-            # 5xx / quota 类错误也兜底；4xx 业务错误（如 invalid prompt）直接抛
-            if e.status_code and 500 <= e.status_code < 600:
-                logger.warning("OpenAI 5xx 错误兜底：%s", e)
+            # 5xx / quota / 整 provider 不可用 → 切 DashScope；4xx 业务错误直接抛
+            if e.status_code and (500 <= e.status_code < 600 or e.status_code == 429):
+                logger.warning("OpenAI %s 兜底：%s", e.status_code, _short(e))
+            elif isinstance(e, NotFoundError):
+                logger.warning("OpenAI 全部候选模型均 404，切 DashScope 兜底：%s", _short(e))
             else:
                 raise ScoreLLMError(f"OpenAI 业务错误不兜底：{e}") from e
         except ScoreLLMJSONError as e:
             logger.warning("OpenAI JSON 解析失败，切 DashScope 重试：%s", e)
 
-        # 2. DashScope 兜底
+        # 2. DashScope 兜底（同样走 model 级 fallback）
         if not settings.DASHSCOPE_API_KEY:
             raise ScoreLLMError("OpenAI 失败且未配置 DASHSCOPE_API_KEY 兜底")
         try:
-            return await self._call_with_provider(
+            return await self._call_provider_with_fallback(
                 provider="dashscope",
                 client=self._dashscope,
                 tier=tier,
@@ -372,7 +438,7 @@ class LlmCaller:
             logger.error("DashScope 兜底也失败：%s: %s", type(e).__name__, e)
             raise ScoreLLMError(f"OpenAI 与 DashScope 都失败：{e}") from e
 
-    async def _call_with_provider(
+    async def _call_provider_with_fallback(
         self,
         *,
         provider: str,
@@ -382,12 +448,78 @@ class LlmCaller:
         temperature: float,
         max_tokens: int,
     ) -> LLMResponse:
-        """单次 provider 调用 + reasoning model 自适应翻倍重试。
+        """同一 provider 内按 candidate 列表逐个 model 尝试。
+
+        切下一个 model 的触发条件（仅 model 不可用相关，不吞业务错误）：
+          - openai.NotFoundError（404）
+          - APIError 中 code in {model_not_found, model_not_supported, invalid_model}
+        其它异常一律向上抛，由 call_json 决定是否切 provider。
+        """
+        candidates = ModelTier.resolve_candidates(tier, provider)
+        if not candidates:
+            raise ScoreLLMError(f"provider={provider} tier={tier} 没有可用模型")
+
+        last_err: Exception | None = None
+        tried: list[str] = []
+        for model in candidates:
+            tried.append(model)
+            try:
+                resp = await self._call_with_provider(
+                    provider=provider,
+                    client=client,
+                    model=model,
+                    messages=messages,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                )
+                if len(tried) > 1:
+                    logger.warning(
+                        "LlmCaller fallback applied: %s/%s -> %s/%s (tried=%s)",
+                        provider,
+                        candidates[0],
+                        provider,
+                        model,
+                        tried,
+                    )
+                return resp
+            except NotFoundError as e:
+                logger.warning(
+                    "LlmCaller candidate %s/%s NotFound，切下一个：%s",
+                    provider, model, _short(e),
+                )
+                last_err = e
+                continue
+            except APIError as e:
+                _, code = _classify_400(e)
+                if code in {"model_not_found", "model_not_supported", "invalid_model"}:
+                    logger.warning(
+                        "LlmCaller candidate %s/%s code=%s，切下一个：%s",
+                        provider, model, code, _short(e),
+                    )
+                    last_err = e
+                    continue
+                raise
+        # 全部 candidate 都失败 → 抛最后一个错（外层 call_json 会判定要不要切 provider）
+        raise last_err if last_err is not None else ScoreLLMError(
+            f"provider={provider} 所有候选模型均不可用：{tried}"
+        )
+
+    async def _call_with_provider(
+        self,
+        *,
+        provider: str,
+        client: AsyncOpenAI,
+        model: str,
+        messages: list,
+        temperature: float,
+        max_tokens: int,
+    ) -> LLMResponse:
+        """单次 (provider, model) 调用 + reasoning model 自适应翻倍重试。
 
         参数 max_tokens 的语义：调用方想要的 content tokens 预算。
         capability 表负责把它换算成 provider 实际可接受的 effective budget。
+        model 由上层 _call_provider_with_fallback 从 candidate 列表选定。
         """
-        model = ModelTier.resolve(tier, provider)
         cap = _resolve_capability(model)
         loop = asyncio.get_event_loop()
         t0 = loop.time()

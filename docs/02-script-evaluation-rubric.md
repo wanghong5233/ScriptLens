@@ -115,7 +115,7 @@ LLM 评分时必须挑选最匹配的一档，并产出 `evidence_ref_ids` 锁�
 
 ---
 
-## 4. 评分 prompt 锚点（D2-4 实装基础）
+## 4. 评分 prompt 锚点（评分 Agent 实装基础）
 
 ### 4.1 通用骨架（5 维共用）
 
@@ -152,7 +152,7 @@ LLM 评分时必须挑选最匹配的一档，并产出 `evidence_ref_ids` 锁�
 | `score_motivation_chain`（5 场上下文回扫） | `gpt-5.2` | 推理链长，需大模型 |
 | `risk_screening`（关键词层 + LLM 二级） | 关键词层无 LLM；二级用 `gpt-5-mini` | 关键词命中只是召回，召回精度由小模型确认 |
 
-### 4.3 工具签名（D2-4 落地）
+### 4.3 工具签名（评分 Agent 落地契约）
 
 ```text
 score_dimension(script_id, dimension) -> {score, level, reason, evidence_ref_ids}
@@ -170,7 +170,7 @@ ReAct 主循环编排：`opening_hook` / `reward_density` / `pacing` / `risk` 4 
 
 ## 5. ScriptLens 自身评估方法（meta-eval）
 
-PRD §10 P2 要求"提供解析效果评估方法"，对应 D3 任务。
+PRD §10 P2 要求"提供解析效果评估方法"，对应 P2 优先级任务。
 
 ### 5.1 三层评估
 
@@ -217,7 +217,7 @@ PRD §10 P2 要求"提供解析效果评估方法"，对应 D3 任务。
 
 - 本文不替换 PRD §6，而是**为 PRD §6 提供工业判据补全**。
 - PRD §6 的 5 维命名（`opening_hook` / `reward_density` / `motivation` / `pacing` / `risk`）保持不变。
-- D2-4 实装时，prompt 模板从本文 §4 取，档位描述从本文 §3 取，PRD §6 的 `失败模式` 表与本文 §6 同步。
+- 评分 Agent 实装时，prompt 模板从本文 §4 取，档位描述从本文 §3 取，PRD §6 的 `失败模式` 表与本文 §6 同步。
 
 ---
 

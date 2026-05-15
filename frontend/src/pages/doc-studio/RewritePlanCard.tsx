@@ -1,5 +1,5 @@
 /**
- * RewritePlanCard —— chat 流里渲染 propose_dimension_rewrite_tool（mode='plan'）输出的
+ * RewritePlanCard —— chat 流里渲染全剧改写 plan 输出的
  * 全剧改写计划。
  *
  * 数据契约（与后端 rewrite_chain.RewritePlan.to_dict 对齐）：
@@ -247,7 +247,6 @@ export function RewritePlanCard({
           {executed ? '已执行' : `执行选中（${selected.size} 场）`}
         </Button>
         <Text type="secondary" className="rewrite-plan-card__actions-hint">
-          执行后 Agent 会逐场改写 → diff 面板审阅 → 接受后自动重评所选维度
         </Text>
       </div>
     </div>

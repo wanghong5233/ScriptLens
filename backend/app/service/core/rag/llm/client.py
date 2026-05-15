@@ -7,6 +7,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+FORBIDDEN_LLM_MODELS = {"qwen-plus", "qwen-turbo", "qwen2.5-plus"}
+
 
 class LLMClient:
     """
@@ -118,7 +120,7 @@ class LLMClient:
         default_model = (
             getattr(settings, "OPENAI_MODEL_NAME", "gpt-5.2")
             if provider == "openai"
-            else getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen-max-latest")
+            else getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen3-max-latest")
         )
         answer = getattr(settings, "SM_LLM_MODEL_ANSWER", None)
         aux = getattr(settings, "SM_LLM_MODEL_AUX", None)
@@ -146,7 +148,7 @@ class LLMClient:
         seen: set[str] = set()
         for raw in str(value or "").split(","):
             item = raw.strip().strip('"').strip("'")
-            if not item or item in seen:
+            if not item or item in seen or item.lower() in FORBIDDEN_LLM_MODELS:
                 continue
             seen.add(item)
             items.append(item)
@@ -158,7 +160,7 @@ class LLMClient:
             default_model = str(getattr(settings, "OPENAI_MODEL_NAME", "gpt-5.2") or "")
         elif provider == "dashscope":
             raw_candidates = self._split_csv(getattr(settings, "DASHSCOPE_MODEL_CANDIDATES", ""))
-            default_model = str(getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen-max-latest") or "")
+            default_model = str(getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen3-max-latest") or "")
         else:
             return []
 
@@ -182,7 +184,7 @@ class LLMClient:
         seen: set[str] = set()
         for candidate in candidates:
             model_name = str(candidate or "").strip()
-            if not model_name or model_name in seen:
+            if not model_name or model_name in seen or model_name.lower() in FORBIDDEN_LLM_MODELS:
                 continue
             seen.add(model_name)
             result.append(model_name)

@@ -77,7 +77,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 
 不做 8-9 维。维度多 = 模型瞎打分。
 
-**工业判据 / 档位锚点 / prompt 模板 / 失败模式细则见 [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md)。** 该文档基于抖音 / 快手 / 广电 / 短剧反转工业指标做了第一性原理推导，是 D2-4 评分 Agent 实装的 prompt 来源。
+**工业判据 / 档位锚点 / prompt 模板 / 失败模式细则见 [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md)。** 该文档基于抖音 / 快手 / 广电 / 短剧反转工业指标做了第一性原理推导，是评分 Agent 实装的 prompt 来源。
 
 ## 7. Agent 输出契约
 
@@ -204,4 +204,4 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 - [ ] 公网可访问 demo（一键 Demo 入口 → 公共 `testuser`）
 - [ ] 前端双栏布局，证据高亮联动
 - [ ] 5 份真实剧本跑过，scorecard 维度齐全
-- [ ] README 说明：为什么不是普通摘要、5 维依据、失效场景、3 天取舍
+- [ ] README 说明：为什么不是普通摘要、5 维依据、失效场景、MVP 范围取舍

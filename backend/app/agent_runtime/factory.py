@@ -9,7 +9,7 @@
      越权 → raise ScriptPermissionError；status != 'ready' → raise ScriptNotReadyError）
    - 把元数据塞进 `state.workspace_config`，4 个剧本工具通过 `_resolve_script_id`
      直接拿 `script_id` 用
-2. 重写 `tool_call_limits` 为短剧 6 工具的预算（doc_studio 默认包含一堆我们
+2. 重写 `tool_call_limits` 为短剧工具预算（doc_studio 默认包含一堆我们
    不注册的 LaTeX/SearchPapers 工具名，留着无害但匹配不到）
 
 LLMClient / ToolRegistry 是无状态可复用的，做成模块级单例。
@@ -77,7 +77,7 @@ def get_llm_client() -> LLMClient:
 
 
 def get_tool_registry() -> ToolRegistry:
-    """ToolRegistry 单例（短剧 6 工具）。"""
+    """ToolRegistry 单例（短剧工具集）。"""
     global _tool_registry
     if _tool_registry is None:
         _tool_registry = create_tool_registry()
@@ -96,7 +96,7 @@ class ScriptChatAgent(LaTeXEditAgent):
         全部 raise，不做静默降级
     - 把剧本元数据（id / title / status / total_episodes / total_scenes）
       注入 state.workspace_config，4 个剧本工具用 `_resolve_script_id` 取 script_id
-    - tool_call_limits 改为短剧 6 工具的预算
+    - tool_call_limits 改为短剧工具预算
     """
 
     def __init__(self, llm_client: LLMClient, tool_registry: ToolRegistry, *, script_id: str) -> None:
@@ -106,8 +106,12 @@ class ScriptChatAgent(LaTeXEditAgent):
             "score_dimension_tool": 6,            # 5 维 + compliance；rescore 闭环至少跑 1 次
             "locate_scenes_tool": 6,              # 多场景定位允许多次但有上限
             "extract_characters_tool": 1,         # 全剧人物 1 次足矣
+            "read_scene_tool": 8,                 # 单会话多次读取局部场景
+            "rewrite_selection_scene_tool": 8,    # 选区级改写（翻译/润色/局部重写）
+            "propose_full_script_plan_tool": 2,   # 计划生成 + 一次兜底
+            "rewrite_scene_tool": 12,             # execute 阶段逐场改写（默认上限 12 场）
             "propose_rewrite_tool": 3,            # 单场临时改写兜底入口（chat 自然指令）
-            "propose_dimension_rewrite_tool": 2,  # plan + execute 各 1 次，足够一次会话闭环
+            "propose_dimension_rewrite_tool": 2,  # 兼容旧入口：内部转发到三件套
             "web_search_tool": 3,                 # reuse-matrix §5.1 规定上限
             "reply_to_user_tool": 1,              # ReAct 强制收尾
         }

@@ -15,8 +15,9 @@
         摘要 + 人物表 + 整剧概要），但维度参数改为 list 支持「一场为多维度同时改」。
 
 业内对照（docs/10 §3）：Cursor Composer / Copilot Workspace / 抖音文心剧本助手
-全部走 Plan-then-Execute；本文件只承担「文本生成」，调用方（PropDimensionRewriteTool）
-负责把改写结果落到 scriptlens.scenes.text + mutate state.modified_files。
+全部走 Plan-then-Execute；本文件只承担「文本生成」，调用方（rewrite_scene_tool /
+兼容别名 propose_dimension_rewrite_tool）负责把改写结果落到 scriptlens.scenes.text
+并更新 state.modified_files。
 """
 
 from __future__ import annotations

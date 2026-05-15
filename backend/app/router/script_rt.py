@@ -126,9 +126,10 @@ async def upload_script(
     raw_name = file.filename or "untitled"
     suffix = Path(raw_name).suffix.lower()
     if suffix not in _ALLOWED_SUFFIXES:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "UNSUPPORTED_SCRIPT_FORMAT",
+            (
                 f"不支持的文件格式：{suffix}；"
                 f"仅支持 {', '.join(sorted(_ALLOWED_SUFFIXES))}（.doc 请先转 .docx）"
             ),
@@ -151,9 +152,10 @@ async def upload_script(
                     break
                 written += len(chunk)
                 if written > max_bytes:
-                    raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"文件超过 {settings.MAX_UPLOAD_SIZE_MB} MB 限制",
+                    _raise_api_error(
+                        status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        "UPLOAD_TOO_LARGE",
+                        f"文件超过 {settings.MAX_UPLOAD_SIZE_MB} MB 限制",
                     )
                 f.write(chunk)
     except HTTPException:
@@ -166,9 +168,7 @@ async def upload_script(
     if written == 0:
         if storage_path.exists():
             os.remove(storage_path)
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST, detail="上传文件为空"
-        )
+        _raise_api_error(status.HTTP_400_BAD_REQUEST, "EMPTY_UPLOAD", "上传文件为空")
 
     title = Path(raw_name).stem or "未命名剧本"
     logger.info(
@@ -187,7 +187,11 @@ async def upload_script(
     except UnsupportedScriptFormatError as e:
         if storage_path.exists():
             os.remove(storage_path)
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "UNSUPPORTED_SCRIPT_FORMAT",
+            str(e),
+        )
 
     # 3. 注册 BackgroundTask 跑完整链路：ingest（切场入库）→ 自动评分（5 维报告）
     #    用户上传剧本的产品语义就是「分析这个剧本」，不应让用户上传完再手动点一次。
@@ -258,7 +262,11 @@ def get_script(
     try:
         row = get_script_detail(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     return ScriptDetail(**row)
 
 
@@ -278,7 +286,11 @@ def delete_script(
     try:
         result = delete_script_cascade(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     return ScriptDeleteResponse(
         deleted=True,
         script_id=result.script_id,
@@ -301,7 +313,11 @@ def get_script_scenes(
     try:
         rows = list_scenes(script_id=script_id, user_id=current_user.id, limit=limit)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     return ScriptScenesResponse(
         script_id=script_id,
         total=len(rows),
@@ -333,9 +349,17 @@ def put_scene_content(
             content=payload.content,
         )
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本或场景不存在")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCENE_NOT_FOUND",
+            "剧本或场景不存在",
+        )
     except ValueError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "INVALID_SCENE_CONTENT",
+            str(e),
+        )
     return SceneContentUpdateResponse(**result)
 
 
@@ -377,11 +401,23 @@ def export_script_full_text(
             script_id=script_id, user_id=current_user.id, fmt=format.lower()
         )
     except ExportScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在",
+        )
     except ExportScriptPermissionError:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="无权导出该剧本")
+        _raise_api_error(
+            status.HTTP_403_FORBIDDEN,
+            "SCRIPT_FORBIDDEN",
+            "无权导出该剧本",
+        )
     except ExportError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "INVALID_EXPORT_REQUEST",
+            str(exc),
+        )
 
     encoded_name = quote(filename)
     return Response(
@@ -419,7 +455,11 @@ def get_script_report(
             script_id=script_id, user_id=current_user.id
         )
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
 
     if s_status != "ready":
         return ReportNotReadyResponse(
@@ -463,11 +503,16 @@ def reanalyze_script(
     try:
         s_status, _ = get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     if s_status != "ready":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"剧本当前 status={s_status}，需先等解析完成（status=ready）才能触发评分",
+        _raise_api_error(
+            status.HTTP_409_CONFLICT,
+            "SCRIPT_NOT_READY",
+            f"剧本当前 status={s_status}，需先等解析完成（status=ready）才能触发评分",
         )
     background_tasks.add_task(_run_report_task, script_id)
     return {"script_id": script_id, "status": "analyzing"}
@@ -499,7 +544,10 @@ def get_script_progress(
     try:
         get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_op_error_detail("SCRIPT_NOT_FOUND", "剧本不存在或无权限访问"),
+        )
 
     snap_dict = report_progress_tracker.to_dict(script_id)
     if snap_dict is None:
@@ -562,12 +610,38 @@ def _sse_format(event_type: str, payload: Dict[str, Any]) -> bytes:
     return f"event: {event_type}\ndata: {data}\n\n".encode("utf-8")
 
 
+def _op_error_detail(code: str, message: str) -> Dict[str, str]:
+    return {"code": code, "message": message}
+
+
+def _raise_api_error(status_code: int, code: str, message: str) -> None:
+    raise HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def _raise_operation_http_error(msg: str) -> None:
+    text = str(msg or "").strip()
+    if "不存在" in text:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_op_error_detail("OPERATION_NOT_FOUND", text),
+        )
+    if "无权" in text:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=_op_error_detail("OPERATION_FORBIDDEN", text),
+        )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=_op_error_detail("INVALID_OPERATION_REQUEST", text or "操作请求非法"),
+    )
+
+
 @router.post(
     "/{script_id}/chat",
     summary="多轮追问 ReAct Agent（SSE 流）",
     description=(
         "in-process 调 agent_runtime（doc_studio 派生），返回 SSE 流。"
-        "事件类型：start / step / delta / status / runtime_model / finish / complete / error。"
+        "事件类型：start / step / delta / status / runtime_model / finish / result / run_error / complete / error。"
         "前端按 EventSource 协议解析；reply 文本通过 delta 事件流式拼接，"
         "完整 execution_history 在 finish 事件里。"
     ),
@@ -580,11 +654,16 @@ async def chat_with_script(
     try:
         s_status, _ = get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     if s_status != "ready":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"剧本当前 status={s_status}，需 ready 后才能 chat",
+        _raise_api_error(
+            status.HTTP_409_CONFLICT,
+            "SCRIPT_NOT_READY",
+            f"剧本当前 status={s_status}，需 ready 后才能 chat",
         )
 
     # 注入用户既往反馈到 prompt 头部（PRD §10 P3 轻量 skill 机制）
@@ -597,6 +676,12 @@ async def chat_with_script(
     user_intent = _format_history_into_intent(
         body.question, body.history, body.role, feedback_block=feedback_block
     )
+    context_payload: Dict[str, Any] = (
+        dict(body.context) if isinstance(body.context, dict) else {}
+    )
+    # script_id / role 由路由层强约束，禁止被客户端 context 覆盖。
+    context_payload["script_id"] = script_id
+    context_payload["role"] = body.role
     agent = build_chat_agent(script_id=script_id)
     queue: asyncio.Queue = asyncio.Queue()
     sentinel: Tuple[str, Dict[str, Any]] = ("__END__", {})
@@ -605,42 +690,62 @@ async def chat_with_script(
         await queue.put((event_type, dict(payload) if isinstance(payload, dict) else {"data": payload}))
 
     async def _runner() -> None:
+        async def _emit_error_events(payload: Dict[str, Any]) -> None:
+            err_payload = dict(payload) if isinstance(payload, dict) else {"message": str(payload)}
+            error_text = str(err_payload.get("message") or "执行失败")
+            # 兼容 doc-studio async 事件名（run_error）。
+            await queue.put(("run_error", {"error": error_text, **err_payload}))
+            # 保留 ScriptLens 原始事件名（error）。
+            await queue.put(("error", err_payload))
+
         try:
-            result = await agent.execute(
+            raw_result = await agent.execute(
                 user_intent=user_intent,
                 workspace_id=script_id,  # ScriptChatAgent 把它直接当 script_id 用
                 user_id=current_user.id,
-                context={"script_id": script_id, "role": body.role},
+                context=context_payload,
                 progress_callback=_progress_callback,
             )
-            # 把最终结果（execution_history / warnings / runtime_model）作为单独事件发送
+            result_payload = {
+                "success": bool(raw_result.get("success")),
+                "changes": raw_result.get("changes") or [],
+                "file_diffs": raw_result.get("file_diffs") or [],
+                "bibliography_updates": raw_result.get("bibliography_updates"),
+                "execution_history": raw_result.get("execution_history") or [],
+                "episode_id": raw_result.get("episode_id"),
+                "intent_type": raw_result.get("intent_type"),
+                "plan": raw_result.get("plan"),
+                "warnings": raw_result.get("warnings") or [],
+                "trace_id": raw_result.get("trace_id"),
+                "operation_id": raw_result.get("operation_id"),
+                "history_path": raw_result.get("history_path"),
+                "intent_confidence": raw_result.get("intent_confidence"),
+                "runtime_model": raw_result.get("runtime_model"),
+            }
+            # 兼容 doc-studio async 事件名（result），payload 结构与其一致：{ result: {...} }。
+            await queue.put(("result", {"result": result_payload}))
+            # 保留 ScriptLens 现有 complete 事件，避免破坏旧客户端。
             await queue.put((
                 "complete",
-                {
-                    "success": bool(result.get("success")),
-                    "execution_history": result.get("execution_history") or [],
-                    "warnings": result.get("warnings") or [],
-                    "runtime_model": result.get("runtime_model"),
-                    "operation_id": result.get("operation_id"),
-                },
+                result_payload,
             ))
         except AgentScriptNotFoundError as exc:
             logger.warning("chat: script not found script_id=%s", script_id)
-            await queue.put(("error", {"message": str(exc), "type": "ScriptNotFoundError", "http_status": 404}))
+            await _emit_error_events({"message": str(exc), "type": "ScriptNotFoundError", "http_status": 404})
         except AgentScriptPermissionError as exc:
             logger.warning("chat: permission denied script_id=%s user_id=%s", script_id, current_user.id)
-            await queue.put(("error", {"message": str(exc), "type": "ScriptPermissionError", "http_status": 403}))
+            await _emit_error_events({"message": str(exc), "type": "ScriptPermissionError", "http_status": 403})
         except AgentScriptNotReadyError as exc:
             logger.warning("chat: script not ready script_id=%s", script_id)
-            await queue.put(("error", {"message": str(exc), "type": "ScriptNotReadyError", "http_status": 409}))
+            await _emit_error_events({"message": str(exc), "type": "ScriptNotReadyError", "http_status": 409})
         except Exception as exc:
             # 其他未预期异常：明确发 error 事件并写完整堆栈日志，绝不吞掉
             logger.exception("chat agent execute failed script_id=%s", script_id)
-            await queue.put(("error", {
+            await _emit_error_events({
                 "message": str(exc),
                 "type": exc.__class__.__name__,
                 "http_status": 500,
-            }))
+            })
         finally:
             await queue.put(sentinel)
 
@@ -696,11 +801,16 @@ async def rewrite_scene(
     try:
         s_status, _ = get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     if s_status != "ready":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"剧本当前 status={s_status}，需 ready 后才能 rewrite",
+        _raise_api_error(
+            status.HTTP_409_CONFLICT,
+            "SCRIPT_NOT_READY",
+            f"剧本当前 status={s_status}，需 ready 后才能 rewrite",
         )
 
     # 直接调底层（避开 ReAct 套娃；ProposeRewriteTool.execute 是 async，内部即纯函数）
@@ -717,9 +827,10 @@ async def rewrite_scene(
         agent_state=None,
     )
     if not result.success:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=result.error or "改写失败",
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "REWRITE_FAILED",
+            result.error or "改写失败",
         )
     data = result.data or {}
 
@@ -787,14 +898,11 @@ def submit_feedback(
         )
     except FeedbackError as e:
         msg = str(e)
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if "不存在" in msg
-            else status.HTTP_403_FORBIDDEN
-            if "无权" in msg
-            else status.HTTP_400_BAD_REQUEST
-        )
-        raise HTTPException(status_code=code, detail=msg)
+        if "不存在" in msg:
+            _raise_api_error(status.HTTP_404_NOT_FOUND, "SCRIPT_NOT_FOUND", msg)
+        if "无权" in msg:
+            _raise_api_error(status.HTTP_403_FORBIDDEN, "SCRIPT_FORBIDDEN", msg)
+        _raise_api_error(status.HTTP_400_BAD_REQUEST, "INVALID_FEEDBACK_REQUEST", msg)
     return record
 
 
@@ -812,7 +920,10 @@ def list_feedback(
     try:
         get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_op_error_detail("SCRIPT_NOT_FOUND", "剧本不存在或无权限访问"),
+        )
 
     rows = list_recent_feedback(script_id=script_id, user_id=current_user.id, limit=limit)
     return FeedbackListResponse(
@@ -856,7 +967,10 @@ def list_script_operations(
     try:
         get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_op_error_detail("SCRIPT_NOT_FOUND", "剧本不存在或无权限访问"),
+        )
 
     try:
         rows = script_operation_service.list_operations(
@@ -865,7 +979,7 @@ def list_script_operations(
             limit=max(1, min(int(limit), 200)),
         )
     except script_operation_service.OperationError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+        _raise_operation_http_error(str(exc))
 
     return OperationListResponse(
         script_id=script_id,
@@ -878,7 +992,8 @@ def list_script_operations(
     response_model=OperationSnapshotResponse,
     summary="取某 op 在某场景的 before/after 文本快照",
     description=(
-        "对齐前端 `fetchOperationSnapshotFile` 协议（`file_path` 在 ScriptLens 里就是 scene_id）。"
+        "对齐前端 `fetchOperationSnapshotFile` 协议。"
+        "operation_id 使用显式来源协议：db:<uuid> 或 history:<operation_id>。"
         "version=before 表示改写之前的原文；version=after 表示改写后的版本。"
     ),
 )
@@ -894,7 +1009,11 @@ def get_script_operation_snapshot(
     try:
         get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
 
     try:
         snapshot = script_operation_service.get_operation_snapshot(
@@ -905,15 +1024,7 @@ def get_script_operation_snapshot(
             version=version,
         )
     except script_operation_service.OperationError as exc:
-        msg = str(exc)
-        code = (
-            status.HTTP_404_NOT_FOUND
-            if "不存在" in msg
-            else status.HTTP_403_FORBIDDEN
-            if "无权" in msg
-            else status.HTTP_400_BAD_REQUEST
-        )
-        raise HTTPException(status_code=code, detail=msg)
+        _raise_operation_http_error(str(exc))
 
     return OperationSnapshotResponse(**snapshot)
 
@@ -939,24 +1050,20 @@ def revert_script_operation(
     try:
         get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_op_error_detail("SCRIPT_NOT_FOUND", "剧本不存在或无权限访问"),
+        )
 
     # 仅校验 op 归属（让"操作不存在 / 无权"的报错走真实路径）
     try:
-        script_operation_service.get_operation_snapshot(
+        script_operation_service.validate_operation_access(
             script_id=script_id,
             operation_id=operation_id,
             user_id=current_user.id,
-            file_path="__validate_owner_only__",
-            version="before",
         )
     except script_operation_service.OperationError as exc:
-        msg = str(exc)
-        if "不存在" in msg:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
-        if "无权" in msg:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=msg)
-        # 其他校验错误（如 version 非法）这里走不到
+        _raise_operation_http_error(str(exc))
 
     return RevertOperationResponse(
         operation_id=operation_id,
@@ -993,18 +1100,24 @@ def get_script_view(
     try:
         s_status, _ = get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="剧本不存在或无权限访问")
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "剧本不存在或无权限访问",
+        )
     if s_status != "ready":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"剧本当前 status={s_status}，需 ready 后才有报告可看",
+        _raise_api_error(
+            status.HTTP_409_CONFLICT,
+            "SCRIPT_NOT_READY",
+            f"剧本当前 status={s_status}，需 ready 后才有报告可看",
         )
 
     payload = get_report(script_id=script_id, user_id=current_user.id)
     if payload is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="评分报告正在自动生成中，请稍候",
+        _raise_api_error(
+            status.HTTP_409_CONFLICT,
+            "REPORT_NOT_READY",
+            "评分报告正在自动生成中，请稍候",
         )
     report_json, _ = payload
     report = ReportPayload.model_validate(report_json)

@@ -139,6 +139,36 @@ async def health_check():
         "uptime_secs": int(time.time() - service_started_at),
     }
 
+
+@app.on_event("startup")
+async def llm_runtime_boot_check() -> None:
+    """启动期对 LLM 可用性做 1-token 探测（详见 service.core.llm.runtime.boot_check）。
+
+    任一 available provider 至少首位 candidate 通就放行；全部失败 → 直接抛
+    LLMUnavailableError 让 startup 失败，避免运行期才发现"账号没开 qwen3-max-latest"
+    这种事故再走完整 5 维报告流水线。
+
+    设 ``LLM_BOOT_CHECK_ENABLED=false`` 可跳过（离线开发）。
+    """
+    if not getattr(settings, "LLM_BOOT_CHECK_ENABLED", True):
+        log.info("LLMRuntime boot_check 已被 LLM_BOOT_CHECK_ENABLED=false 跳过")
+        return
+    try:
+        from service.core.llm.runtime import LLMRuntime, LLMUnavailableError
+
+        runtime = LLMRuntime(settings_obj=settings)
+        results = await runtime.boot_check(
+            probe_max_tokens=int(getattr(settings, "LLM_BOOT_CHECK_PROBE_TOKENS", 4)),
+        )
+        log.info(f"LLMRuntime boot_check passed: {results}")
+    except Exception as e:
+        if e.__class__.__name__ == "LLMUnavailableError":
+            log.error(f"LLMRuntime boot_check FAILED, refusing to start: {e}")
+            raise
+        # 其它异常（如 settings 字段缺失）也直接抛，让启动失败比上线后才暴露好
+        log.error(f"LLMRuntime boot_check unexpected error, refusing to start: {e}")
+        raise
+
 # 包含各个模块的路由，并为它们设置统一的前缀和标签
 # 这有助于API文档的组织和URL的结构化
 app.include_router(user_rt.router, prefix="/api/users", tags=["Users"])

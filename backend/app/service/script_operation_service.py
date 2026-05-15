@@ -17,10 +17,13 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Dict, List, Literal, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from utils.database import engine as default_engine
 
@@ -32,6 +35,186 @@ _VALID_INTENT_TYPES = {"rewrite", "upload", "manual_edit"}
 
 class OperationError(Exception):
     """op 写入或查询失败（参数非法 / 剧本不存在 / 越权 / op 不存在）。"""
+
+
+OperationSource = Literal["db", "history"]
+
+
+@dataclass(frozen=True)
+class OperationLocator:
+    source: OperationSource
+    raw_id: str
+
+
+def _build_operation_ref(source: OperationSource, raw_id: str) -> str:
+    return f"{source}:{raw_id}"
+
+
+def _parse_operation_uuid(raw_id: str) -> Optional[uuid.UUID]:
+    value = str(raw_id or "").strip()
+    if not value:
+        return None
+    try:
+        return uuid.UUID(value)
+    except ValueError:
+        return None
+
+
+def _parse_operation_locator(operation_id: str) -> OperationLocator:
+    raw = str(operation_id or "").strip()
+    if not raw:
+        raise OperationError("operation_id 不能为空")
+
+    source, sep, payload = raw.partition(":")
+    source = source.strip().lower()
+    payload = payload.strip()
+    if not sep or source not in {"db", "history"} or not payload:
+        raise OperationError("operation_id 格式非法：必须是 db:<uuid> 或 history:<id>")
+    if source == "db":
+        parsed = _parse_operation_uuid(payload)
+        if parsed is None:
+            raise OperationError("db operation_id 非法：必须是 UUID")
+        return OperationLocator(source="db", raw_id=str(parsed))
+    return OperationLocator(source="history", raw_id=payload)
+
+
+def _resolve_agent_history_root(script_id: str, user_id: int) -> Path:
+    from agent_runtime.core.config import settings as agent_settings
+
+    return (
+        Path(agent_settings.WORKSPACES_ROOT)
+        / str(int(user_id))
+        / str(script_id)
+        / ".agent_history"
+    )
+
+
+def _load_agent_history_operation_payload(
+    *,
+    script_id: str,
+    operation_id: str,
+    user_id: int,
+) -> tuple[Path, Dict[str, Any]]:
+    history_root = _resolve_agent_history_root(script_id, user_id)
+    op_payload_path = history_root / "operations" / f"{operation_id}.json"
+    if not op_payload_path.exists():
+        raise OperationError("操作记录不存在")
+
+    try:
+        op_payload = json.loads(op_payload_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OperationError(f"读取操作记录失败: {exc}") from exc
+    if not isinstance(op_payload, dict):
+        raise OperationError("操作记录格式非法")
+
+    payload_user = op_payload.get("user_id")
+    payload_workspace = op_payload.get("workspace_id")
+    if str(payload_workspace or "") != str(script_id):
+        raise OperationError("操作记录不属于当前剧本")
+    try:
+        if int(payload_user) != int(user_id):
+            raise OperationError("无权查看该操作的快照")
+    except (TypeError, ValueError) as exc:
+        raise OperationError(f"操作记录 user_id 非法: {exc}") from exc
+    return history_root, op_payload
+
+
+def _resolve_agent_snapshot_manifest_path(
+    *,
+    history_root: Path,
+    op_payload: Dict[str, Any],
+) -> Path:
+    snapshot_meta = op_payload.get("snapshot")
+    if not isinstance(snapshot_meta, dict):
+        raise OperationError("该操作未持久化快照")
+    snapshot_rel = str(snapshot_meta.get("path") or "").strip()
+    if not snapshot_rel:
+        raise OperationError("该操作未持久化快照")
+
+    snapshot_path = history_root / snapshot_rel
+    try:
+        resolved_snapshot_path = snapshot_path.resolve()
+    except OSError as exc:
+        raise OperationError(f"快照路径非法: {exc}") from exc
+    if not str(resolved_snapshot_path).startswith(str(history_root.resolve())):
+        raise OperationError("快照路径越界")
+    if not resolved_snapshot_path.exists():
+        raise OperationError("快照文件不存在")
+    return resolved_snapshot_path
+
+
+def _read_snapshot_blob(history_root: Path, digest: str) -> str:
+    safe_digest = str(digest or "").strip().lower()
+    if len(safe_digest) != 64 or any(ch not in "0123456789abcdef" for ch in safe_digest):
+        raise OperationError("快照 blob 校验失败")
+    blob_path = history_root / "blobs" / safe_digest[:2] / f"{safe_digest}.txt"
+    if not blob_path.exists():
+        raise OperationError("快照 blob 不存在")
+    try:
+        return blob_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise OperationError(f"读取快照 blob 失败: {exc}") from exc
+
+
+def _load_agent_history_snapshot(
+    *,
+    script_id: str,
+    operation_id: str,
+    user_id: int,
+    file_path: str,
+    version: str,
+) -> Dict[str, Any]:
+    history_root, op_payload = _load_agent_history_operation_payload(
+        script_id=script_id,
+        operation_id=operation_id,
+        user_id=user_id,
+    )
+    resolved_snapshot_path = _resolve_agent_snapshot_manifest_path(
+        history_root=history_root,
+        op_payload=op_payload,
+    )
+
+    try:
+        manifest = json.loads(resolved_snapshot_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise OperationError(f"读取快照文件失败: {exc}") from exc
+    files = manifest.get("files") if isinstance(manifest, dict) else None
+    if not isinstance(files, list):
+        raise OperationError("快照文件格式非法")
+
+    matched_entry: Optional[Dict[str, Any]] = None
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("path") or "").strip() == file_path:
+            matched_entry = item
+            break
+    if matched_entry is None:
+        raise OperationError("该操作不包含目标文件快照")
+
+    blob_key = "before_blob" if version == "before" else "after_blob"
+    blob_digest = str(matched_entry.get(blob_key) or "").strip()
+    if blob_digest:
+        content = _read_snapshot_blob(history_root, blob_digest)
+    elif version == "before":
+        # before 没有 blob 时，通常表示该文件是新建；返回空串给前端兜底逻辑。
+        content = ""
+    else:
+        # after blob 默认关闭持久化（AGENT_HISTORY_PERSIST_AFTER_SNAPSHOT=false）。
+        # 这里做 best-effort：按当前 ScriptVFS 内容返回，避免直接报错。
+        try:
+            from agent_runtime.service.script_vfs import ScriptVFS, ScriptVFSError
+
+            vfs = ScriptVFS(script_id=script_id)
+            content = vfs.read(file_path)
+        except (ScriptVFSError, ValueError):
+            content = ""
+
+    return {
+        "path": file_path,
+        "content": str(content),
+        "encoding": "utf-8",
+    }
 
 
 def record_rewrite_op(
@@ -108,7 +291,7 @@ def record_rewrite_op(
         op_id, script_id, user_id, scene_id, target_dimension,
     )
     return {
-        "operation_id": op_id,
+        "operation_id": _build_operation_ref("db", op_id),
         "script_id": script_id,
         "intent_type": "rewrite",
         "user_intent": user_intent,
@@ -132,6 +315,8 @@ def list_operations(
     返回字段对齐 `DocStudioAPI.OperationSummary`：
         operation_id / workspace_id / user_id / timestamp / success
         intent_type / user_intent / modified_files / snapshot
+
+    operation_id 对外统一为显式来源协议：`db:<uuid>`。
 
     其中 `snapshot` 这里返回紧凑摘要（target_dimension / rationale / issue），
     避免把整段 before/after 文本塞进列表响应里——doc-studio UI 拿摘要够用，
@@ -174,6 +359,10 @@ def list_operations(
     rows: List[Dict[str, Any]] = []
     for r in result:
         d = dict(r)
+        raw_operation_id = str(d.get("operation_id") or "").strip()
+        d["operation_id"] = (
+            _build_operation_ref("db", raw_operation_id) if raw_operation_id else ""
+        )
         # modified_files 是 JSONB 数组，psycopg 返回 list[str]，原样透传
         mf = d.get("modified_files")
         if not isinstance(mf, list):
@@ -256,11 +445,58 @@ def get_rewrite_task_status_map(
         last_at = r.get("last_at")
         out[f"{scene_id}:{dimension}"] = {
             "attempts": int(r.get("attempts") or 0),
-            "last_op_id": r.get("last_op_id"),
+            "last_op_id": (
+                _build_operation_ref("db", str(r.get("last_op_id")))
+                if r.get("last_op_id")
+                else None
+            ),
             "last_status": "accepted" if r.get("last_success") else "rejected",
             "last_at": last_at.isoformat() if last_at is not None and not isinstance(last_at, str) else last_at,
         }
     return out
+
+
+def validate_operation_access(
+    *,
+    script_id: str,
+    operation_id: str,
+    user_id: int,
+    engine: Engine = default_engine,
+) -> OperationLocator:
+    """校验 operation 归属并返回解析后的 locator。"""
+    locator = _parse_operation_locator(operation_id)
+    if locator.source == "history":
+        _load_agent_history_operation_payload(
+            script_id=script_id,
+            operation_id=locator.raw_id,
+            user_id=user_id,
+        )
+        return locator
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        op.user_id AS owner_id,
+                        op.script_id::text AS script_id
+                    FROM scriptlens.script_operations op
+                    WHERE op.id = :op
+                    """
+                ),
+                {"op": locator.raw_id},
+            ).mappings().first()
+    except SQLAlchemyError as exc:
+        raise OperationError(f"查询操作记录失败: {exc}") from exc
+
+    if row is None:
+        raise OperationError("操作记录不存在")
+    if int(row["owner_id"]) != int(user_id):
+        raise OperationError("无权查看该操作的快照")
+    if str(row["script_id"]) != str(script_id):
+        raise OperationError("操作记录不属于当前剧本")
+    return locator
 
 
 def get_operation_snapshot(
@@ -277,7 +513,8 @@ def get_operation_snapshot(
     返回结构对齐 `DocStudioAPI.FileContentResponse`：
         { path, content, encoding }
 
-    `file_path` 在 ScriptLens 里就是 scene_id（前端 fileTree 把 scene_id 当 path）。
+    `file_path` 在 ScriptLens 里使用 ScriptVFS 路径（如 scenes/E03-S005.txt）。
+    兼容历史 op：若 snapshot 仍以 scene_id 作为 key，会自动映射。
     `version='before'|'after'`，默认 before。
     """
     if version not in ("before", "after"):
@@ -285,33 +522,64 @@ def get_operation_snapshot(
     if not script_id or not operation_id or not file_path:
         raise OperationError("script_id / operation_id / file_path 必填")
 
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    op.user_id AS owner_id,
-                    op.script_id::text AS script_id,
-                    op.snapshot_before,
-                    op.snapshot_after
-                FROM scriptlens.script_operations op
-                WHERE op.id = :op
-                """
-            ),
-            {"op": operation_id},
-        ).mappings().first()
+    locator = validate_operation_access(
+        script_id=script_id,
+        operation_id=operation_id,
+        user_id=user_id,
+        engine=engine,
+    )
+    if locator.source == "history":
+        return _load_agent_history_snapshot(
+            script_id=script_id,
+            operation_id=locator.raw_id,
+            user_id=user_id,
+            file_path=file_path,
+            version=version,
+        )
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT
+                        op.snapshot_before,
+                        op.snapshot_after
+                    FROM scriptlens.script_operations op
+                    WHERE op.id = :op
+                    """
+                ),
+                {"op": locator.raw_id},
+            ).mappings().first()
+    except SQLAlchemyError as exc:
+        raise OperationError(f"查询操作快照失败: {exc}") from exc
 
     if row is None:
         raise OperationError("操作记录不存在")
-    if int(row["owner_id"]) != int(user_id):
-        raise OperationError("无权查看该操作的快照")
-    if str(row["script_id"]) != str(script_id):
-        raise OperationError("操作记录不属于当前剧本")
 
     snapshot = row["snapshot_before"] if version == "before" else row["snapshot_after"]
     if not isinstance(snapshot, dict):
         snapshot = {}
     content = snapshot.get(file_path)
+
+    if content is None:
+        # 兼容 ScriptVFS 路径：历史 op 里可能存 scene_id，前端请求传 scenes/E03-S005.txt。
+        try:
+            from agent_runtime.service.script_vfs import ScriptVFS, ScriptVFSError
+
+            vfs = ScriptVFS(script_id=script_id)
+            if file_path.startswith("scenes/"):
+                scene_id = vfs.resolve_scene_id(file_path)
+                content = snapshot.get(scene_id)
+            else:
+                normalized_path = vfs.coerce_file_path(file_path)
+                content = snapshot.get(normalized_path)
+                if content is None:
+                    scene_id = vfs.resolve_scene_id(normalized_path)
+                    content = snapshot.get(scene_id)
+        except (ScriptVFSError, ValueError):
+            content = None
+
     if content is None:
         # 这个 op 没有改这个 scene，返回空内容（前端会 fallback 到 fallbackOriginal）
         content = ""

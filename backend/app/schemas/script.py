@@ -532,6 +532,13 @@ class ScriptChatRequest(BaseModel):
         "general",
         description="用户角色（影响 prompt 注入）：selection/writer/review/rewrite/general",
     )
+    context: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "可选上下文（如 file_path、selections、file_mentions、image_attachments）。"
+            "用于 Agent 工具链定位选区与文件，不参与问题正文 question 的长度限制。"
+        ),
+    )
 
 
 class RewriteRequest(BaseModel):
@@ -622,7 +629,10 @@ class RewriteTaskStatus(BaseModel):
     """
 
     attempts: int = Field(0, description="该 (scene, dim) 上的改写次数")
-    last_op_id: Optional[str] = Field(None, description="最近一次改写 op，前端可跳 timeline")
+    last_op_id: Optional[str] = Field(
+        None,
+        description="最近一次改写 op（显式来源协议：db:<uuid> 或 history:<id>）",
+    )
     last_status: Optional[Literal["proposed", "accepted", "rejected"]] = None
     last_at: Optional[datetime] = None
 
@@ -695,7 +705,10 @@ OperationVersion = Literal["before", "after"]
 class OperationSummary(BaseModel):
     """字段对齐前端 `DocStudioAPI.OperationSummary`，doc-studio timeline 直接消费。"""
 
-    operation_id: str
+    operation_id: str = Field(
+        ...,
+        description="操作引用 ID（显式来源协议）：db:<uuid> 或 history:<operation_id>",
+    )
     workspace_id: str = Field(..., description="即 script_id（doc-studio 协议命名）")
     user_id: int
     timestamp: datetime
@@ -732,7 +745,10 @@ class RevertOperationResponse(BaseModel):
     判断"是否生效"，因此空数组等价于"无变更"，不会触发 file refetch。
     """
 
-    operation_id: str
+    operation_id: str = Field(
+        ...,
+        description="操作引用 ID（显式来源协议）：db:<uuid> 或 history:<operation_id>",
+    )
     reverted_files: List[str] = Field(default_factory=list)
     deleted_files: List[str] = Field(default_factory=list)
     skipped_files: List[str] = Field(default_factory=list)

@@ -41,6 +41,7 @@ from .diff_generator import compute_line_change_stats, generate_diff_preview
 from .base_agent import BaseAgent
 from .tools.workspace_utils import get_workspace_path
 from .rag_api_client import get_rag_api_client
+from .script_vfs import ScriptVFS, ScriptVFSError, ScriptVFSNotFoundError
 
 
 class AgentStepType(str, Enum):
@@ -81,6 +82,7 @@ class AgentState:
     modified_files: set = field(default_factory=set)  # 被修改的文件列表
     workspace_files: List[str] = field(default_factory=list)  # 工作区文件列表
     workspace_config: Dict[str, Any] = field(default_factory=dict)  # 工作区配置
+    request_context: Dict[str, Any] = field(default_factory=dict)  # 当前请求上下文（selections/file_mentions 等）
     intent_type: Optional[IntentType] = None
     plan_steps: List[str] = field(default_factory=list)
     plan_index: int = 0
@@ -160,6 +162,13 @@ class LaTeXEditAgent(BaseAgent):
         trace_id = get_trace_id() or uuid.uuid4().hex
         stamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         return f"{stamp}_{trace_id.replace('-', '')}"
+
+    @staticmethod
+    def _build_operation_ref(operation_id: Optional[str]) -> Optional[str]:
+        raw = str(operation_id or "").strip()
+        if not raw:
+            return None
+        return f"history:{raw}"
 
     @staticmethod
     def _sanitize_filename(value: str) -> str:
@@ -969,6 +978,7 @@ class LaTeXEditAgent(BaseAgent):
         interaction_mode = self._extract_interaction_mode(options)
         state.llm_options = self._extract_llm_options(options)
         state.operation_id = self._build_operation_id()
+        operation_ref = self._build_operation_ref(state.operation_id)
         state.trace_id = get_trace_id()
         context_payload = dict(context) if context else {}
         if knowledge_base_id is not None:
@@ -985,12 +995,13 @@ class LaTeXEditAgent(BaseAgent):
                 }
                 for item in state.image_attachments
             ]
+        state.request_context = dict(context_payload)
 
         await self._emit_progress(
             progress_callback,
             "start",
             {
-                "operation_id": state.operation_id,
+                "operation_id": operation_ref,
                 "trace_id": state.trace_id,
                 "mode": interaction_mode,
             },
@@ -1064,7 +1075,7 @@ class LaTeXEditAgent(BaseAgent):
                 "plan": None,
                 "warnings": final_state.warnings,
                 "trace_id": final_state.trace_id or get_trace_id(),
-                "operation_id": final_state.operation_id,
+                "operation_id": self._build_operation_ref(final_state.operation_id),
                 "history_path": history_path,
                 "intent_confidence": final_state.intent_confidence,
             }
@@ -1074,7 +1085,7 @@ class LaTeXEditAgent(BaseAgent):
                 {
                     "success": task_completed,
                     "plan": None,
-                    "operation_id": final_state.operation_id,
+                    "operation_id": self._build_operation_ref(final_state.operation_id),
                 },
             )
             return result_payload
@@ -1157,7 +1168,7 @@ class LaTeXEditAgent(BaseAgent):
             "plan": plan_info,
             "warnings": final_state.warnings,
             "trace_id": final_state.trace_id or get_trace_id(),
-            "operation_id": final_state.operation_id,
+            "operation_id": self._build_operation_ref(final_state.operation_id),
             "history_path": history_path,
             "intent_confidence": final_state.intent_confidence,
             "runtime_model": self.llm.get_last_runtime_model()
@@ -1170,7 +1181,7 @@ class LaTeXEditAgent(BaseAgent):
             {
                 "success": task_completed,
                 "plan": plan_info,
-                "operation_id": final_state.operation_id,
+                "operation_id": self._build_operation_ref(final_state.operation_id),
             },
         )
         return result_payload
@@ -2164,7 +2175,6 @@ class LaTeXEditAgent(BaseAgent):
             return (
                 f"已完成文件修改，触发了运行收敛保护（{reason}）。\n\n"
                 f"已修改文件：{modified_preview}\n"
-                "请在右侧 Diff 面板确认 Keep/Undo；如需我继续，我可以按你的约束继续修改。"
             )
         intent_line = f"原始请求：{user_intent}\n" if user_intent else ""
         return (
@@ -2981,19 +2991,28 @@ class LaTeXEditAgent(BaseAgent):
             cache_key = (user_id, workspace_id)
             cached_snapshot = self.workspace_cache.get(cache_key, workspace_signature)
             if cached_snapshot:
-                state.workspace_files = cached_snapshot.file_list
-                state.workspace_config = cached_snapshot.workspace_config
-                if include_edit_state:
-                    state.citation_mappings = cached_snapshot.citation_mappings
-                    state.original_file_contents = cached_snapshot.original_file_contents
-                else:
-                    state.citation_mappings = {}
-                    state.original_file_contents = {}
+                cached_cfg = cached_snapshot.workspace_config or {}
+                cached_script_id = str(cached_cfg.get("script_id") or "").strip()
+                # 剧本工作区原文快照来自 DB，不能依赖磁盘签名 cache 命中结果。
+                # 否则会出现跨会话复用旧 snapshot，导致 diff 基线漂移。
+                if not (include_edit_state and cached_script_id):
+                    state.workspace_files = cached_snapshot.file_list
+                    state.workspace_config = cached_cfg
+                    if include_edit_state:
+                        state.citation_mappings = cached_snapshot.citation_mappings
+                        state.original_file_contents = cached_snapshot.original_file_contents
+                    else:
+                        state.citation_mappings = {}
+                        state.original_file_contents = {}
+                    logger.info(
+                        "Loaded workspace context from cache: %s files",
+                        len(state.workspace_files),
+                    )
+                    return
                 logger.info(
-                    "Loaded workspace context from cache: %s files",
-                    len(state.workspace_files),
+                    "Bypass cached original snapshots for script workspace %s; refresh from ScriptVFS",
+                    cached_script_id,
                 )
-                return
 
             if include_edit_state:
                 # 加载引用映射（从数据库或文件）
@@ -3012,7 +3031,11 @@ class LaTeXEditAgent(BaseAgent):
                 state.original_file_contents = await self._load_original_file_contents(
                     workspace_path,
                     file_list,
+                    state.workspace_config,
                 )
+                if str((state.workspace_config or {}).get("script_id") or "").strip():
+                    # 剧本工作区改为虚拟文件列表（scenes/E03-S005.txt）
+                    state.workspace_files = sorted(state.original_file_contents.keys())
             else:
                 state.original_file_contents = {}
 
@@ -3289,17 +3312,33 @@ class LaTeXEditAgent(BaseAgent):
         self,
         workspace_path: str,
         file_list: List[str],
+        workspace_config: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, str]:
         """
         加载所有文件的原始内容（用于生成 diff）
         
         Args:
-            state: Agent 状态
             workspace_path: 工作区路径
             file_list: 文件列表
+            workspace_config: 工作区配置（script_id 存在时走 ScriptVFS）
         """
         import os
-        
+
+        cfg = workspace_config or {}
+        script_id = str(cfg.get("script_id") or "").strip()
+        if script_id:
+            try:
+                snapshot = ScriptVFS(script_id=script_id).snapshot_all()
+            except ScriptVFSError as exc:
+                logger.warning(
+                    "Failed to load ScriptVFS snapshot for script %s: %s",
+                    script_id,
+                    exc,
+                )
+                return {}
+            logger.debug("Loaded %s virtual files for script diff", len(snapshot))
+            return snapshot
+
         contents: Dict[str, str] = {}
         for file_path in file_list:
             full_path = os.path.join(workspace_path, file_path)
@@ -3411,14 +3450,16 @@ class LaTeXEditAgent(BaseAgent):
         """
         生成文件 diff（用于前端预览）
 
-        对比原始文件和修改后的文件，生成完整的 diff 数据
+        对比原始文件和修改后的文件，生成完整的 diff 数据。
 
-        剧本场景透明迁移（docs/10-rewrite-agent.md §6）：
-            当 workspace_config.script_id 存在时，state.modified_files 装的是
-            scene_id（UUID），改写后的内容在 scriptlens.scenes.text。直接走 DB 读，
-            不再尝试在 LaTeX 工作区目录下找虚拟文件——剧本场景本来就不写盘。
-            前端 file_path 用 scene_id（与 fetchFileContent / sceneCache 对齐），
-            AgentDiffReview 不需要任何改动。
+        单一路径实现（LaTeX / ScriptVFS 对称）：
+        - original: 永远来自 state.original_file_contents
+        - modified:
+            - LaTeX 工作区：从磁盘读取
+            - 剧本工作区：从 ScriptVFS.read(file_path) 读取（DB）
+
+        兼容历史 state：modified_files 若仍是 scene_id，ScriptVFS 会自动归一化为
+        `scenes/E03-S005.txt`，保证前端最终看到的是稳定 file_path。
 
         Args:
             state: Agent 状态
@@ -3426,33 +3467,60 @@ class LaTeXEditAgent(BaseAgent):
         Returns:
             文件 diff 列表，每个元素包含 file_path, original_content, modified_content
         """
+        import os
+
         if not state.modified_files:
             return []
 
         workspace_config = getattr(state, "workspace_config", None) or {}
         bound_script_id = str(workspace_config.get("script_id") or "").strip()
-
+        vfs: Optional[ScriptVFS] = None
         if bound_script_id:
-            return self._generate_script_scene_diffs(state, bound_script_id)
-
-        # LaTeX 工作区原有路径（保持不动）
-        import os
-
+            try:
+                vfs = ScriptVFS(script_id=bound_script_id)
+            except ScriptVFSError as exc:
+                logger.warning(
+                    "Init ScriptVFS failed for script %s; fallback to filesystem diff only: %s",
+                    bound_script_id,
+                    exc,
+                )
         file_diffs: List[Dict[str, Any]] = []
-        workspace_path = self._get_workspace_path(state.user_id, state.workspace_id)
+        workspace_path = (
+            self._get_workspace_path(state.user_id, state.workspace_id) if vfs is None else ""
+        )
 
-        for file_path in state.modified_files:
-            original_content = state.original_file_contents.get(file_path, "")
-            full_path = os.path.join(workspace_path, file_path)
-            modified_content = ""
+        for raw_path in state.modified_files:
+            raw_key = str(raw_path or "").strip()
+            if not raw_key:
+                continue
+            file_path = raw_key
 
             try:
-                if os.path.exists(full_path):
+                if vfs is not None:
+                    file_path = vfs.coerce_file_path(raw_key)
+                    modified_content = vfs.read(file_path)
+                else:
+                    full_path = os.path.join(workspace_path, file_path)
+                    if not os.path.exists(full_path):
+                        continue
                     with open(full_path, 'r', encoding='utf-8') as f:
                         modified_content = f.read()
-            except Exception as e:
-                logger.warning(f"Failed to read modified file {file_path}: {e}")
+            except ScriptVFSNotFoundError as exc:
+                logger.warning("ScriptVFS path not found for diff %s: %s", raw_key, exc)
                 continue
+            except ScriptVFSError as exc:
+                logger.warning("ScriptVFS read failed for diff %s: %s", raw_key, exc)
+                continue
+            except OSError as exc:
+                logger.warning("Failed to read modified file %s: %s", file_path, exc)
+                continue
+
+            original_content = state.original_file_contents.get(file_path)
+            if original_content is None and vfs is not None:
+                # 向后兼容历史会话：旧版本可能把 scene_id 作为 key 存在 originals。
+                original_content = state.original_file_contents.get(raw_key, "")
+            if original_content is None:
+                original_content = ""
 
             if original_content == modified_content:
                 continue
@@ -3472,72 +3540,7 @@ class LaTeXEditAgent(BaseAgent):
                 "removed_lines": line_stats.get("removed_lines", 0),
             })
 
-        logger.debug(f"Generated {len(file_diffs)} file diffs (latex)")
-        return file_diffs
-
-    def _generate_script_scene_diffs(
-        self, state: AgentState, script_id: str,
-    ) -> List[Dict[str, Any]]:
-        """剧本场景版的 file_diffs：modified_files 是 scene_id，从 DB 读改后内容。
-
-        与 LaTeX 路径对称：
-            LaTeX  → state.modified_files 是相对路径，从工作区磁盘读 modified
-            剧本   → state.modified_files 是 scene_id（UUID），从 scriptlens.scenes.text 读
-
-        original 走 state.original_file_contents 镜像（PropDimensionRewriteTool
-        在写库前已把改前内容存进去），与 LaTeX 一致。
-        """
-        from sqlalchemy import text as _sql_text
-        from utils.database import engine
-
-        scene_ids = [str(p) for p in state.modified_files if p]
-        if not scene_ids:
-            return []
-
-        with engine.connect() as conn:
-            rows = conn.execute(
-                _sql_text(
-                    """
-                    SELECT id::text AS id, text
-                    FROM scriptlens.scenes
-                    WHERE script_id = :sid AND id::text = ANY(:ids)
-                    """
-                ),
-                {"sid": script_id, "ids": scene_ids},
-            ).mappings().all()
-
-        text_by_id = {row["id"]: row["text"] or "" for row in rows}
-        file_diffs: List[Dict[str, Any]] = []
-
-        for sid in scene_ids:
-            modified_content = text_by_id.get(sid)
-            if modified_content is None:
-                logger.warning(
-                    "script scene diff: scene %s missing in DB (script %s); skip",
-                    sid, script_id,
-                )
-                continue
-
-            original_content = state.original_file_contents.get(sid, "")
-            if original_content == modified_content:
-                continue
-
-            preview_original, preview_modified, truncated = generate_diff_preview(
-                original_content,
-                modified_content,
-            )
-            line_stats = compute_line_change_stats(original_content, modified_content)
-
-            file_diffs.append({
-                "file_path": sid,
-                "original_content": preview_original,
-                "modified_content": preview_modified,
-                "is_truncated": truncated,
-                "added_lines": line_stats.get("added_lines", 0),
-                "removed_lines": line_stats.get("removed_lines", 0),
-            })
-
-        logger.debug("Generated %d file diffs (script scenes)", len(file_diffs))
+        logger.debug("Generated %d file diffs", len(file_diffs))
         return file_diffs
     
     def _is_task_completed(self, state: AgentState, user_intent: str) -> bool:
