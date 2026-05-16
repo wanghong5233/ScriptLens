@@ -1,10 +1,12 @@
 {
   "version": 1,
   "hooks": {
-    "beforeShellExecution": [
+    "preToolUse": [
       {
-        "command": ".cursor/hooks/block-dangerous-git.sh",
-        "matcher": "git"
+        "command": "python .cursor/hooks/block-dangerous-shell.py",
+        "matcher": "Shell",
+        "timeout": 5,
+        "failClosed": true
       }
     ]
   }

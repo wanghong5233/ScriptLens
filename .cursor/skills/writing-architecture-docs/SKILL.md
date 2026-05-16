@@ -1,14 +1,9 @@
 ---
 name: writing-architecture-docs
-description: >-
-  Enforces ScriptLens architecture-document style: current-state statements,
-  first-principles tables, contracts. Use when editing files under `docs/`
-  matching `*设计*` / `*架构*` / `*Architecture*` / `*ADR*` / `*RFC*`, or when
-  the user asks to write/修改 architecture / 设计 / ADR docs, or complains a
-  doc is 啰嗦 / has 口水 / 对话记录.
+description: Write or refactor architecture/design/ADR docs (current-state + first-principles form). Use when editing `docs/*设计*`/`*架构*`/`*ADR*`/`*RFC*`, or user asks to write/修改 architecture/设计/ADR docs, or complains a doc is 啰嗦/口水/对话记录/辩证过程. Do NOT use for README or pitfall.
 ---
 
-# Writing ScriptLens Architecture Docs
+# Writing Architecture Docs
 
 ## 一句话准则
 
@@ -18,71 +13,46 @@ description: >-
 
 | 反模式 | 判断特征 | 归宿 |
 |---|---|---|
-| 结论先行 / TL;DR / 摘要 | 用 `**xxx**` 开头总结全文 | 删除，每节都是结论无需元结构 |
-| 辩证过程 / 四轮反应 / 讨论记录 | 有序列表"第一反应→反驳→第二反应" | `agent-transcripts/` |
-| 外部证据 / 产品对比 / 调研表 | 列举 ChatGPT / Claude / Letta 等做法 | 删除，至多一句泛指 |
+| 结论先行 / TL;DR / 摘要 | 用 `**xxx**` 开头总结全文 | 删，每节都是结论无需元结构 |
+| 辩证过程 / 四轮反应 / 讨论记录 | "第一反应→反驳→第二反应"序列 | `agent-transcripts/` |
+| 外部证据 / 产品对比 / 调研表 | 列举 ChatGPT / Claude / Letta 等做法 | 删，至多一句泛指 |
 | 已删除/不再维护工件清单 | 列出被移除的文件、env、字段 | git log / CHANGELOG |
-| 运维现象 | "启动失败 / wheel 冲突 / ABI 问题 / Windows-WSL 下 xxx" | issue tracker |
+| 运维现象 | "启动失败 / wheel 冲突 / ABI 问题 / Windows-WSL 下 xxx" | issue tracker / pitfall |
 | 过程时态 | "之前草案……落地阶段……这次决定……" | 改现在时 |
 | 对话/汇报语气 | "这里我思考 / 可见 / 迫使我们 / 就 / 说白了 / 其实" | 直接删 |
 | 散文堆叠 | 连续 3 段超 5 行 | 改表格 / mermaid / 签名代码块 |
 
-## 必要结构
+## 必要章节
 
-章节缺哪一块不强求，**出现即必须是这种形态**：
+每节缺哪一块不强求，**出现即必须是这种形态**（完整示例见 `references/examples.md`）：
 
 ### 1. 现状陈述（一句 + 一图）
 
-现在时，直接说当前实现是什么：
-
-> ScriptLens 采用分段抽取、证据索引、结构化报告、问答改写的链路理解长剧本。
-
-配一张 mermaid 或分层职责表。
+现在时陈述"当前实现是什么"，配 mermaid 或分层职责表。
 
 ### 2. 分层职责表
 
 三列 `层 / 负责 / 不负责`，一层一行，无解释段落。
 
-| 层 | 负责 | 不负责 |
-|---|---|---|
-| API Backend | 数据契约、任务编排、错误边界 | 页面布局 |
-| Segmenter | 稳定切分、source line 映射 | 剧情判断 |
-| Extractor / Reporter | 结构化抽取、证据聚合、报告生成 | UI 状态管理 |
-
 ### 3. 第一性原理分析（为什么是这个形态）
 
 维度表，不用散文。维度名从以下挑选：
 
-- **数据规模**（量化：行数、QPS、体积）
-- **能力归属**（哪个角色负责这件事）
-- **写入/读取成本**（延迟、token、依赖体积）
-- **故障域**（失败面、传染性）
-- **可逆性**（未来换方案的迁移成本）
+- 数据规模（量化：行数、QPS、体积）
+- 能力归属（哪个角色负责这件事）
+- 写入/读取成本（延迟、token、依赖体积）
+- 故障域（失败面、传染性）
+- 可逆性（未来换方案的迁移成本）
 
-示例：
-
-| 维度 | 分析 | 结论 |
-|---|---|---|
-| 数据规模 | 单个剧本可达数万字 | 先分段再聚合 |
-| 能力归属 | LLM 负责语义判断，代码负责契约和证据 | 抽取结果必须可验证 |
+三列 `维度 / 分析 / 结论`，无散文。
 
 ### 4. 接口契约（签名 + 不变式）
 
-```text
-POST /api/scripts/{script_id}/analyze -> BasicReport
-```
-
-**不变式**：
-- 返回结构必须符合 Pydantic schema
-- 报告结论必须能回到原文 segment
-- 无法解析模型输出时失败，不返回伪报告
+接口签名用 `text` 块；不变式编号列出。**失败时必须失败，不返回伪成功**。
 
 ### 5. 可逆性 / 重评触发条件（如适用）
 
-"当前选 A，未来可能换 B" 类决策给量化门槛：
-
-1. 单剧本上下文超过主模型稳定窗口
-2. 证据定位失败 case ≥ 5 起
+"当前选 A，未来可能换 B"类决策必须给**量化门槛**：
 
 **触发判断以运行时指标为准，不在无数据时提前决策。**
 
@@ -95,7 +65,7 @@ POST /api/scripts/{script_id}/analyze -> BasicReport
 - 表格 > 列表 > 段落；段落不超过 3 行
 - 章节引用用 `§X.Y` 或 `[附录 B](#...)`，不写"上文提到过"
 
-## 自检清单（提交前必过）
+## 自检（提交前必过）
 
 对每一行自问：
 
@@ -105,52 +75,11 @@ POST /api/scripts/{script_id}/analyze -> BasicReport
 - [ ] "为什么"是否走了第一性原理维度表？口水论证→改表
 - [ ] 出现被禁止章节了吗？命中→删
 
-## 反例 → 正例
-
-### 反例：结论先行 + 辩证过程 + 工件清单
-
-```markdown
-### B.1 结论先行
-当前阶段，ScriptLens 不引入向量数据库……
-
-### B.2 决策背景
-之前的草案把向量数据库和复杂任务队列写成标配。落地阶段连续遇到三类问题：
-1. 依赖体量与启动失败：重型基础设施拖慢 MVP……
-2. 运行成本与质量：无标注数据时检索质量不可验证……
-
-### B.4 我们的辩证过程
-1. 第一反应（错）：向量库太重 → "那就换另一个向量库"
-   - 反驳：换了底层实现，根本耦合没变……
-
-### B.7 已删除/不再维护的工件
-- backend/app/vector_store.py
-- ScriptSegment.embedding 字段
-- .env 中的 VECTOR_DB_* 变量
-```
-
-### 正例：现状陈述 + 维度表
-
-```markdown
-## B.1 架构
-
-ScriptLens 采用 segment-first 管线：先生成稳定段落，
-再抽取人物、冲突、看点、风险和改写点。
-
-[mermaid 图]
-
-## B.2 第一性原理
-
-| 维度 | 分析 | 结论 |
-|---|---|---|
-| 数据规模 | 剧本长但单项目数据量小 | SQLite + 文件样本足够 |
-| 能力归属 | LLM 负责理解，代码负责证据和契约 | 不把判断散落在 UI |
-| 写入成本 | 评测和演示优先 | 先不引入重型基础设施 |
-| 可逆性 | API schema 稳定 | 后续可替换模型和存储 |
-```
-
-（工件清单归 git log / CHANGELOG，不进架构文档。）
-
 ## 链路
 
+- 反例 → 正例完整对照：`references/examples.md`
 - 工程约束基线：`.cursor/rules/core-principles.mdc`
 - 架构约束基线：`.cursor/rules/scriptlens-architecture.mdc`
+- README 撰写：`writing-readme`
+- 部署 / 坑点档案撰写：`writing-pitfall-archive`
+- 跨项目工程经验：`writing-engineering-playbook`

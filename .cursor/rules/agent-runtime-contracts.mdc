@@ -1,0 +1,32 @@
+---
+description: Production runtime contracts for LLM, tool, ingest, evidence, and async Agent flows in ScriptLens
+globs:
+  - "backend/**/*.py"
+  - "frontend/**/*.{ts,tsx}"
+alwaysApply: false
+---
+
+# Agent Runtime Contracts
+
+## Durability
+
+- Persist user-visible intent before starting expensive or failure-prone generation, parsing, retrieval, or tool execution.
+- Any async or long-running Agent path needs explicit states such as `accepted`, `running`, `failed`, `timed_out`, and `completed`.
+- Failed requests must preserve enough state for retry, audit, and user trust: provider, model/tool, error code, retryability, and attempt id.
+
+## External dependency semantics
+
+- Do not convert provider auth, quota, parser billing, index, network, schema, or MCP failures into empty success values.
+- Classify provider-level failures separately from model-level failures; do not serially exhaust the same failed provider.
+- Every fallback must record why it happened and whether output quality changed.
+
+## Evidence and tool grounding
+
+- Script report, chat, rewrite, and skill-feedback answers must be traceable to source segments, `EvidenceRef`, fixture/golden labels, explicit user feedback, or tool traces.
+- Frontend loading text must match the actual backend stage; never show ingest, PDF extraction, analysis, retrieval, rewrite, or evaluation states that did not occur.
+- LLM output consumed by code must use structured schemas and fail loudly on invalid shape.
+
+## User-facing failure contract
+
+- Prefer visible failed/retryable states over generic empty screens, `Network Error`, or silent disappearance.
+- A retry should create a new attempt unless the backend guarantees idempotent resume semantics.

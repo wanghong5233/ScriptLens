@@ -1,5 +1,5 @@
 ---
-description: Core engineering constraints for all Agent/Python projects in this workspace
+description: Core engineering constraints for production Agent projects in this workspace
 alwaysApply: true
 ---
 
