@@ -1,4 +1,6 @@
 # ============================================================
+name: scriptlens
+
 # ScriptLens 生产 compose —— 完全独立栈
 #
 # 与本机其他项目（ScholarMind、个人主页等）无任何 service / network / volume 耦合，

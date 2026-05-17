@@ -1,4 +1,6 @@
 # ============================================================
+name: scriptlens
+
 # ScriptLens 本地开发 compose（自包含、独立栈）
 #
 # 设计原则：
@@ -68,6 +70,7 @@ services:
     build:
       context: .
       dockerfile: ./app/Dockerfile
+    image: scriptlens_api_dev:latest
     container_name: scriptlens_api_dev
     hostname: scriptlens_api
     env_file:

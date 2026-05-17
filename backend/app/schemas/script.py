@@ -738,12 +738,15 @@ class OperationSnapshotResponse(BaseModel):
     encoding: str = "utf-8"
 
 
-class RevertOperationResponse(BaseModel):
-    """ScriptLens 不真改 scenes.text，所以回退是 no-op：始终返回三份空数组。
+class RevertOperationRequest(BaseModel):
+    files: List[str] = Field(
+        default_factory=list,
+        description="可选：仅回滚这些文件；为空表示按该操作快照可恢复的全部文件回滚。",
+    )
 
-    前端复用 ScholarMind 协议会照常显示 toast；调用方会根据 reverted_files 长度
-    判断"是否生效"，因此空数组等价于"无变更"，不会触发 file refetch。
-    """
+
+class RevertOperationResponse(BaseModel):
+    """回退某次操作的快照到 scenes.text。"""
 
     operation_id: str = Field(
         ...,

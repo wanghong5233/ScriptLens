@@ -232,13 +232,26 @@ def record_rewrite_op(
 ) -> Dict[str, Any]:
     """rewrite 端点调用：把一次改写完整写入 timeline。
 
-    snapshot_before / snapshot_after 用 `{scene_id: text}` 结构，对齐前端
-    `fetchOperationSnapshotFile(version='before'|'after')` 的查询。
+    snapshot_before / snapshot_after 统一用 `{file_path: text}` 结构，
+    与前端 `fetchOperationSnapshotFile(version='before'|'after')` 的 file_path
+    查询保持一致。
     """
     if not script_id or not scene_id:
         raise OperationError("script_id / scene_id 必填")
 
     op_id = str(uuid.uuid4())
+    file_path = scene_id
+    try:
+        from agent_runtime.service.script_vfs import ScriptVFS, ScriptVFSError
+
+        file_path = ScriptVFS(script_id=script_id).resolve_file_path(scene_id)
+    except (ScriptVFSError, ValueError) as exc:
+        logger.warning(
+            "resolve scene path failed, fallback to scene_id: script=%s scene=%s err=%s",
+            script_id,
+            scene_id,
+            exc,
+        )
     user_intent = f"AI 改写：{target_dimension} - {issue.strip()[:80]}"
     with engine.begin() as conn:
         owner = conn.execute(
@@ -277,9 +290,9 @@ def record_rewrite_op(
                 "uid": user_id,
                 "ui": user_intent,
                 "ok": bool(success),
-                "mf": json.dumps([scene_id]),
-                "sb": json.dumps({scene_id: original_text or ""}),
-                "sa": json.dumps({scene_id: rewritten_text or ""}),
+                "mf": json.dumps([file_path]),
+                "sb": json.dumps({file_path: original_text or ""}),
+                "sa": json.dumps({file_path: rewritten_text or ""}),
                 "dim": target_dimension,
                 "rat": rationale,
                 "issue": issue,
@@ -287,8 +300,13 @@ def record_rewrite_op(
         )
 
     logger.info(
-        "rewrite op recorded: op_id=%s script=%s user=%s scene=%s dim=%s",
-        op_id, script_id, user_id, scene_id, target_dimension,
+        "rewrite op recorded: op_id=%s script=%s user=%s scene=%s path=%s dim=%s",
+        op_id,
+        script_id,
+        user_id,
+        scene_id,
+        file_path,
+        target_dimension,
     )
     return {
         "operation_id": _build_operation_ref("db", op_id),
@@ -296,10 +314,71 @@ def record_rewrite_op(
         "intent_type": "rewrite",
         "user_intent": user_intent,
         "success": success,
-        "modified_files": [scene_id],
+        "modified_files": [file_path],
         "target_dimension": target_dimension,
         "rationale": rationale,
         "issue": issue,
+    }
+
+
+def record_manual_edit_op(
+    *,
+    script_id: str,
+    user_id: int,
+    scene_id: str,
+    original_text: str,
+    edited_text: str,
+    user_intent: str = "手动编辑场景内容",
+    engine: Engine = default_engine,
+) -> Dict[str, Any]:
+    """Keep File / 手动编辑后落一条 manual_edit op 到 timeline。"""
+    if not script_id or not scene_id:
+        raise OperationError("script_id / scene_id 必填")
+
+    op_id = str(uuid.uuid4())
+    with engine.begin() as conn:
+        owner = conn.execute(
+            text("SELECT user_id FROM scriptlens.scripts WHERE id = :sid"),
+            {"sid": script_id},
+        ).scalar()
+        if owner is None:
+            raise OperationError("剧本不存在")
+        if int(owner) != int(user_id):
+            raise OperationError("无权对该剧本写入 op 记录")
+
+        conn.execute(
+            text(
+                """
+                INSERT INTO scriptlens.script_operations
+                    (id, script_id, user_id, intent_type, user_intent, success,
+                     modified_files, snapshot_before, snapshot_after, created_at)
+                VALUES
+                    (:id, :sid, :uid, 'manual_edit', :ui, TRUE,
+                     CAST(:mf AS JSONB), CAST(:sb AS JSONB), CAST(:sa AS JSONB), NOW())
+                """
+            ),
+            {
+                "id": op_id,
+                "sid": script_id,
+                "uid": user_id,
+                "ui": user_intent,
+                "mf": json.dumps([scene_id]),
+                "sb": json.dumps({scene_id: original_text or ""}),
+                "sa": json.dumps({scene_id: edited_text or ""}),
+            },
+        )
+
+    logger.info(
+        "manual_edit op recorded: op_id=%s script=%s scene=%s",
+        op_id, script_id, scene_id,
+    )
+    return {
+        "operation_id": _build_operation_ref("db", op_id),
+        "script_id": script_id,
+        "intent_type": "manual_edit",
+        "user_intent": user_intent,
+        "success": True,
+        "modified_files": [scene_id],
     }
 
 

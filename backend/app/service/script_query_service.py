@@ -153,16 +153,25 @@ def update_scene_text(
     权限：先按 (script_id, user_id) 校验剧本归属（统一走 ScriptNotFoundError）。
 
     Returns:
-        dict {"scene_id": str, "char_count": int}
+        dict {"scene_id": str, "char_count": int, "previous_text": str}
     """
     if not isinstance(content, str):
         raise ValueError("content must be a string")
 
-    # 权限：剧本属于当前用户（间接也校验剧本存在）
     get_script_status(script_id=script_id, user_id=user_id, engine=engine)
 
     with engine.begin() as conn:
-        result = conn.execute(
+        previous_text = conn.execute(
+            text(
+                "SELECT text FROM scriptlens.scenes"
+                " WHERE id = :sid AND script_id = :script_id"
+            ),
+            {"sid": scene_id, "script_id": script_id},
+        ).scalar()
+        if previous_text is None:
+            raise ScriptNotFoundError(f"scene {scene_id} not found in script {script_id}")
+
+        conn.execute(
             text(
                 """
                 UPDATE scriptlens.scenes
@@ -173,7 +182,5 @@ def update_scene_text(
             ),
             {"txt": content, "sid": scene_id, "script_id": script_id},
         )
-        if result.rowcount == 0:
-            raise ScriptNotFoundError(f"scene {scene_id} not found in script {script_id}")
 
-    return {"scene_id": scene_id, "char_count": len(content)}
+    return {"scene_id": scene_id, "char_count": len(content), "previous_text": previous_text}

@@ -170,6 +170,25 @@ class LaTeXEditAgent(BaseAgent):
             return None
         return f"history:{raw}"
 
+    @classmethod
+    def _pick_response_operation_id(cls, state: AgentState) -> Optional[str]:
+        rewrite_tool_names = {"rewrite_selection_scene_tool", "rewrite_scene_tool"}
+        for step in reversed(state.execution_history):
+            if step.type != AgentStepType.RESULT:
+                continue
+            if step.tool_name not in rewrite_tool_names:
+                continue
+            result_payload = step.result if isinstance(step.result, dict) else {}
+            if not bool(result_payload.get("success")):
+                continue
+            data_payload = result_payload.get("data")
+            if not isinstance(data_payload, dict):
+                continue
+            operation_id = str(data_payload.get("operation_id") or "").strip()
+            if operation_id.startswith("db:"):
+                return operation_id
+        return cls._build_operation_ref(state.operation_id)
+
     @staticmethod
     def _sanitize_filename(value: str) -> str:
         """Sanitize a string to a safe filename segment."""
@@ -1064,6 +1083,7 @@ class LaTeXEditAgent(BaseAgent):
                 execution_history=execution_history_payload,
                 plan_info=None,
             )
+            response_operation_id = self._pick_response_operation_id(final_state)
             result_payload = {
                 "success": task_completed,
                 "changes": [],
@@ -1075,7 +1095,7 @@ class LaTeXEditAgent(BaseAgent):
                 "plan": None,
                 "warnings": final_state.warnings,
                 "trace_id": final_state.trace_id or get_trace_id(),
-                "operation_id": self._build_operation_ref(final_state.operation_id),
+                "operation_id": response_operation_id,
                 "history_path": history_path,
                 "intent_confidence": final_state.intent_confidence,
             }
@@ -1085,7 +1105,7 @@ class LaTeXEditAgent(BaseAgent):
                 {
                     "success": task_completed,
                     "plan": None,
-                    "operation_id": self._build_operation_ref(final_state.operation_id),
+                    "operation_id": response_operation_id,
                 },
             )
             return result_payload
@@ -1156,6 +1176,7 @@ class LaTeXEditAgent(BaseAgent):
             execution_history=execution_history_payload,
             plan_info=plan_info,
         )
+        response_operation_id = self._pick_response_operation_id(final_state)
 
         result_payload = {
             "success": task_completed,
@@ -1168,7 +1189,7 @@ class LaTeXEditAgent(BaseAgent):
             "plan": plan_info,
             "warnings": final_state.warnings,
             "trace_id": final_state.trace_id or get_trace_id(),
-            "operation_id": self._build_operation_ref(final_state.operation_id),
+            "operation_id": response_operation_id,
             "history_path": history_path,
             "intent_confidence": final_state.intent_confidence,
             "runtime_model": self.llm.get_last_runtime_model()
@@ -1181,7 +1202,7 @@ class LaTeXEditAgent(BaseAgent):
             {
                 "success": task_completed,
                 "plan": plan_info,
-                "operation_id": self._build_operation_ref(final_state.operation_id),
+                "operation_id": response_operation_id,
             },
         )
         return result_payload

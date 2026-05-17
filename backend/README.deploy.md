@@ -7,7 +7,7 @@
 | 本地 dev | `docker-compose.dev.yml` | 自包含独立栈（自带 PG / Redis） | `scriptlens_db_dev` | 8005 / 25432 / 26379 |
 | 云端 prod | `docker-compose.prod.yml` | 自包含独立栈（自带 PG / Redis / cloudflared） | `scriptlens_db` | 仅容器内（公网走 cloudflared） |
 
-ScriptLens 与同主机其他项目（ScholarMind 等）**完全独立**：独立 docker network、独立 volume、独立 cloudflared tunnel、独立 project name = `scriptlens`。两者之间不共享任何 service。
+ScriptLens 与同主机其他项目（ScholarMind 等）**完全独立**：独立 docker network、独立 volume、独立 cloudflared tunnel、独立 Compose project name = `scriptlens`（已写入 compose 文件，避免因在 `backend/` 目录启动而显示为 `backend`）。两者之间不共享任何 service。
 
 ---
 
@@ -92,6 +92,8 @@ python eval/_e2e_dryrun.py            # 不连 DB 的结构验证
 | 连 Redis | `redis-cli -h localhost -p 26379` |
 | 关停（保留数据） | `docker compose -f docker-compose.dev.yml stop` |
 | 销毁含数据 | `docker compose -f docker-compose.dev.yml down -v` |
+
+> dev compose 已固定 `name: scriptlens`，Docker Desktop / `docker compose ls` 中应显示为 `scriptlens`，不是启动目录名 `backend`。
 
 ### 2.5 dev 收敛标准
 

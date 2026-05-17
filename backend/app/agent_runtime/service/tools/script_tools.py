@@ -1229,6 +1229,35 @@ class RewriteSelectionSceneTool(BaseTool):
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc), summary="改写持久化失败")
 
+        operation_ref: Optional[str] = None
+        user_id = _coerce_optional_int(getattr(agent_state, "user_id", None))
+        if user_id is None:
+            logger.warning(
+                "rewrite_selection_scene_tool skip record_rewrite_op: missing user_id (script=%s scene=%s)",
+                script_id,
+                scene_id,
+            )
+        else:
+            from service import script_operation_service
+
+            try:
+                op_record = script_operation_service.record_rewrite_op(
+                    script_id=script_id,
+                    user_id=user_id,
+                    scene_id=scene_id,
+                    target_dimension="general",
+                    issue=instruction,
+                    original_text=scene_text,
+                    rewritten_text=rewritten_scene_text,
+                    rationale=rationale or "",
+                )
+                operation_ref = str(op_record.get("operation_id") or "").strip() or None
+            except script_operation_service.OperationError as exc:
+                logger.warning(
+                    "rewrite_selection_scene_tool record_rewrite_op failed (non-blocking): %s",
+                    exc,
+                )
+
         _mutate_agent_state_for_scene(
             agent_state=agent_state,
             scene_path=scene_path,
@@ -1246,6 +1275,7 @@ class RewriteSelectionSceneTool(BaseTool):
                 "original_fragment": original_fragment,
                 "rewritten_fragment": rewritten_fragment,
                 "instruction": instruction,
+                "operation_id": operation_ref,
                 "rationale": rationale,
                 "original_scene_chars": len(scene_text),
                 "rewritten_scene_chars": len(rewritten_scene_text),
@@ -1479,6 +1509,35 @@ class RewriteSceneTool(BaseTool):
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc), summary="改写持久化失败")
 
+        operation_ref: Optional[str] = None
+        user_id = _coerce_optional_int(getattr(agent_state, "user_id", None))
+        if user_id is None:
+            logger.warning(
+                "rewrite_scene_tool skip record_rewrite_op: missing user_id (script=%s scene=%s)",
+                script_id,
+                scene_id,
+            )
+        else:
+            from service import script_operation_service
+
+            try:
+                op_record = script_operation_service.record_rewrite_op(
+                    script_id=script_id,
+                    user_id=user_id,
+                    scene_id=scene_id,
+                    target_dimension="/".join(dims) if dims else "general",
+                    issue=expected_changes,
+                    original_text=result.original_text,
+                    rewritten_text=result.rewritten_text,
+                    rationale=result.rationale or "",
+                )
+                operation_ref = str(op_record.get("operation_id") or "").strip() or None
+            except script_operation_service.OperationError as exc:
+                logger.warning(
+                    "rewrite_scene_tool record_rewrite_op failed (non-blocking): %s",
+                    exc,
+                )
+
         _mutate_agent_state_for_scene(
             agent_state=agent_state,
             scene_path=scene_path,
@@ -1495,6 +1554,7 @@ class RewriteSceneTool(BaseTool):
                 "target_dimensions": list(result.target_dimensions),
                 "rationale": result.rationale,
                 "expected_changes": expected_changes,
+                "operation_id": operation_ref,
                 "original_chars": len(result.original_text),
                 "rewritten_chars": len(result.rewritten_text),
             },

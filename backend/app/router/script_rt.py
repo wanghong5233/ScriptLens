@@ -26,6 +26,7 @@ from typing import Any, AsyncIterator, Dict, List, Tuple
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     Depends,
     File,
     HTTPException,
@@ -33,6 +34,8 @@ from fastapi import (
     status,
 )
 from fastapi.responses import StreamingResponse
+from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from agent_runtime.factory import (
@@ -55,6 +58,7 @@ from schemas.script import (
     ReportProgressResponse,
     ReportProgressSnapshot,
     ReportResponse,
+    RevertOperationRequest,
     RevertOperationResponse,
     RewriteRequest,
     RewriteResponse,
@@ -91,7 +95,7 @@ from service.script_query_service import (
     update_scene_text,
 )
 from service.script_report_service import generate_report
-from utils.database import get_db
+from utils.database import engine as default_engine, get_db
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -360,6 +364,7 @@ def put_scene_content(
             "INVALID_SCENE_CONTENT",
             str(e),
         )
+
     return SceneContentUpdateResponse(**result)
 
 
@@ -1032,17 +1037,17 @@ def get_script_operation_snapshot(
 @router.post(
     "/{script_id}/operations/{operation_id}/revert",
     response_model=RevertOperationResponse,
-    summary="回退某 op（短剧场景目前 no-op：不改 scenes.text）",
+    summary="回退某 op：按 snapshot_before 还原 scenes.text",
     description=(
-        "ScriptLens 暂不持久化 keep 后的改写到 scenes 表（避免覆盖用户原始上传）。"
-        "本端点保留以兼容 doc-studio timeline UI，统一返回三份空数组（前端会显示"
-        "「该时间点没有可恢复内容」提示）。后续如果加 scene_versions 表，这里"
-        "再切到真实回退逻辑。"
+        "db:<uuid> 操作：从 script_operations.snapshot_before 回写到 scenes.text。"
+        "history:<id> 操作：走 .agent_history 快照做 best-effort 回退。"
+        "可通过 payload.files 指定回退文件子集；为空时回退该操作可恢复的全部文件。"
     ),
 )
 def revert_script_operation(
     script_id: str,
     operation_id: str,
+    payload: RevertOperationRequest = Body(default_factory=RevertOperationRequest),
     current_user: User = Depends(get_current_user),
 ) -> RevertOperationResponse:
     from service import script_operation_service
@@ -1055,9 +1060,18 @@ def revert_script_operation(
             detail=_op_error_detail("SCRIPT_NOT_FOUND", "剧本不存在或无权限访问"),
         )
 
-    # 仅校验 op 归属（让"操作不存在 / 无权"的报错走真实路径）
+    requested_files: List[str] = []
+    requested_seen: set[str] = set()
+    for raw_file in payload.files or []:
+        file_path = str(raw_file or "").strip()
+        if not file_path or file_path in requested_seen:
+            continue
+        requested_seen.add(file_path)
+        requested_files.append(file_path)
+
+    # 先校验 op 归属（让"操作不存在 / 无权"的报错走真实路径）
     try:
-        script_operation_service.validate_operation_access(
+        locator = script_operation_service.validate_operation_access(
             script_id=script_id,
             operation_id=operation_id,
             user_id=current_user.id,
@@ -1065,11 +1079,173 @@ def revert_script_operation(
     except script_operation_service.OperationError as exc:
         _raise_operation_http_error(str(exc))
 
+    from agent_runtime.service.script_vfs import ScriptVFS, ScriptVFSError
+
+    try:
+        vfs = ScriptVFS(script_id=script_id)
+    except ScriptVFSError as exc:
+        _raise_operation_http_error(str(exc))
+
+    reverted_files: List[str] = []
+    skipped_files: List[str] = []
+
+    if locator.source == "history":
+        target_files = list(requested_files)
+        if not target_files:
+            try:
+                _, history_payload = script_operation_service._load_agent_history_operation_payload(
+                    script_id=script_id,
+                    operation_id=locator.raw_id,
+                    user_id=current_user.id,
+                )
+            except script_operation_service.OperationError:
+                history_payload = {}
+            modified_files = history_payload.get("modified_files")
+            if isinstance(modified_files, list):
+                for raw_file in modified_files:
+                    file_path = str(raw_file or "").strip()
+                    if file_path and file_path not in target_files:
+                        target_files.append(file_path)
+
+        with default_engine.begin() as conn:
+            for raw_file in target_files:
+                raw_path = str(raw_file or "").strip()
+                if not raw_path:
+                    continue
+                try:
+                    normalized_path = vfs.coerce_file_path(raw_path)
+                    scene_id = vfs.resolve_scene_id(normalized_path)
+                    display_path = vfs.resolve_file_path(scene_id)
+                except ScriptVFSError:
+                    skipped_files.append(raw_path)
+                    continue
+                try:
+                    snapshot = script_operation_service.get_operation_snapshot(
+                        script_id=script_id,
+                        operation_id=operation_id,
+                        user_id=current_user.id,
+                        file_path=normalized_path,
+                        version="before",
+                    )
+                except script_operation_service.OperationError:
+                    skipped_files.append(display_path)
+                    continue
+
+                update_result = conn.execute(
+                    text(
+                        """
+                        UPDATE scriptlens.scenes
+                           SET text = :txt
+                         WHERE id = :sid
+                           AND script_id = :script_id
+                        """
+                    ),
+                    {
+                        "txt": str(snapshot.get("content") or ""),
+                        "sid": scene_id,
+                        "script_id": script_id,
+                    },
+                )
+                if update_result.rowcount == 0:
+                    skipped_files.append(display_path)
+                    continue
+                reverted_files.append(display_path)
+
+        return RevertOperationResponse(
+            operation_id=operation_id,
+            reverted_files=reverted_files,
+            deleted_files=[],
+            skipped_files=skipped_files,
+        )
+
+    try:
+        with default_engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT op.snapshot_before
+                    FROM scriptlens.script_operations op
+                    WHERE op.id = :op
+                      AND op.script_id = :sid
+                    """
+                ),
+                {"op": locator.raw_id, "sid": script_id},
+            ).mappings().first()
+    except SQLAlchemyError as exc:
+        _raise_operation_http_error(f"查询回滚快照失败: {exc}")
+
+    if row is None:
+        _raise_operation_http_error("操作记录不存在")
+
+    snapshot_before = row.get("snapshot_before")
+    if not isinstance(snapshot_before, dict):
+        snapshot_before = {}
+
+    target_files = list(requested_files)
+    if not target_files:
+        for key in snapshot_before.keys():
+            key_str = str(key or "").strip()
+            if key_str and key_str not in target_files:
+                target_files.append(key_str)
+
+    with default_engine.begin() as conn:
+        for raw_file in target_files:
+            raw_path = str(raw_file or "").strip()
+            if not raw_path:
+                continue
+
+            try:
+                normalized_path = vfs.coerce_file_path(raw_path)
+            except ScriptVFSError:
+                normalized_path = raw_path
+
+            scene_id: str | None = None
+            display_path = normalized_path
+            for candidate in (normalized_path, raw_path):
+                try:
+                    scene_id = vfs.resolve_scene_id(candidate)
+                    display_path = vfs.resolve_file_path(scene_id)
+                    break
+                except ScriptVFSError:
+                    continue
+
+            candidate_keys: List[str] = []
+            for candidate in (raw_path, normalized_path, display_path, scene_id or ""):
+                key = str(candidate or "").strip()
+                if key and key not in candidate_keys:
+                    candidate_keys.append(key)
+
+            snapshot_text: Any = None
+            for key in candidate_keys:
+                if key in snapshot_before:
+                    snapshot_text = snapshot_before.get(key)
+                    break
+
+            if scene_id is None or snapshot_text is None:
+                skipped_files.append(display_path)
+                continue
+
+            update_result = conn.execute(
+                text(
+                    """
+                    UPDATE scriptlens.scenes
+                       SET text = :txt
+                     WHERE id = :sid
+                       AND script_id = :script_id
+                    """
+                ),
+                {"txt": str(snapshot_text), "sid": scene_id, "script_id": script_id},
+            )
+            if update_result.rowcount == 0:
+                skipped_files.append(display_path)
+                continue
+            reverted_files.append(display_path)
+
     return RevertOperationResponse(
         operation_id=operation_id,
-        reverted_files=[],
+        reverted_files=reverted_files,
         deleted_files=[],
-        skipped_files=[],
+        skipped_files=skipped_files,
     )
 
 

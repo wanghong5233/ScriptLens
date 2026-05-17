@@ -115,6 +115,7 @@ import {
   getWorkspaceMessagesDebug,
   findSceneByRef,
   findSceneById,
+  resolveScenePathAliases,
   exportFullScript,
   type ScriptExportFormat,
 } from '@/api/docStudio'
@@ -2470,12 +2471,24 @@ const LatexEditorPage = () => {
   }, [llmMetricEntries])
 
   const activeFileTimeline = useMemo(() => {
-    if (!snap.activeFilePath) return []
-    const normalizedActivePath = normalizeWorkspacePath(snap.activeFilePath)
+    if (!snap.activeFilePath || !snap.workspaceId) return []
+    const activeAliases = resolveScenePathAliases(snap.workspaceId, snap.activeFilePath)
+    const normalizedActiveAliases = new Set(
+      (activeAliases.length ? activeAliases : [snap.activeFilePath]).map((p) =>
+        normalizeWorkspacePath(p),
+      ),
+    )
     const list = operationHistory.filter((item) =>
       Array.isArray(item.modified_files) &&
       item.modified_files.some(
-        (filePath) => normalizeWorkspacePath(String(filePath || '')) === normalizedActivePath,
+        (filePath) => {
+          const raw = String(filePath || '')
+          const aliases = resolveScenePathAliases(snap.workspaceId, raw)
+          const candidates = aliases.length ? aliases : [raw]
+          return candidates.some((candidate) =>
+            normalizedActiveAliases.has(normalizeWorkspacePath(candidate)),
+          )
+        },
       ),
     )
     return [...list].sort((a, b) => {
@@ -2486,7 +2499,7 @@ const LatexEditorPage = () => {
       if (!Number.isNaN(left)) return -1
       return b.operation_id.localeCompare(a.operation_id)
     })
-  }, [operationHistory, snap.activeFilePath])
+  }, [operationHistory, snap.activeFilePath, snap.workspaceId])
 
   const openFile = useCallback(
     async (path: string, forceReload = false, silent = false) => {
@@ -5722,11 +5735,19 @@ const LatexEditorPage = () => {
     (pathsToRefresh?: string[], contentByPath?: Record<string, string>) => {
       const paths = pathsToRefresh && pathsToRefresh.length > 0 ? pathsToRefresh : []
       paths.forEach((p) => {
+        const aliases = snap.workspaceId ? resolveScenePathAliases(snap.workspaceId, p) : []
+        const targetPaths = aliases.length ? aliases : [p]
         const content = contentByPath?.[p]
         if (typeof content === 'string') {
-          docStudioActions.setFileContent(p, content)
+          targetPaths.forEach((targetPath) => {
+            docStudioActions.setFileContent(targetPath, content)
+          })
         } else {
-          void openFile(p, true)
+          const preferredPath =
+            snap.activeFilePath && targetPaths.includes(snap.activeFilePath)
+              ? snap.activeFilePath
+              : targetPaths[0]
+          void openFile(preferredPath, true)
         }
       })
 
@@ -5779,7 +5800,7 @@ const LatexEditorPage = () => {
     setLineChanges([])
     setCurrentHunkIndex(0)
     },
-    [openFile],
+    [openFile, snap.activeFilePath, snap.workspaceId],
   )
 
   const openTimelineDiffPreview = useCallback((operationId: string, filePath?: string) => {
@@ -5816,35 +5837,50 @@ const LatexEditorPage = () => {
       message.warning('请选择差异文件')
       return
     }
-    if (!diffOperationId) {
-      message.error('缺少变更 ID（应为 db:<uuid> 或 history:<id>）')
-      return
-    }
     if (diffReverting) return
     setDiffReverting(true)
     try {
-      const result = await revertOperation(
-        {
-          workspaceId: snap.workspaceId,
-          operationId: diffOperationId,
-          files: [target.file_path],
-        },
-        {
-          loading: false,
-          errorToast: false,
-        },
-      )
-      const revertedFiles = result.reverted_files || []
-      for (const filePath of revertedFiles) {
-        if (snap.openedFiles.includes(filePath)) {
-          await openFile(filePath, true, true)
+      if (!diffOperationId || !diffOperationId.startsWith('db:')) {
+        const originalContent = target.original_content ?? ''
+        await updateFileContent(
+          {
+            workspaceId: snap.workspaceId,
+            path: target.file_path,
+            content: originalContent,
+          },
+          {
+            loading: false,
+            errorToast: false,
+          },
+        )
+        if (snap.openedFiles.includes(target.file_path)) {
+          await openFile(target.file_path, true, true)
         }
+        message.success('已回滚 1 个变更')
+      } else {
+        const result = await revertOperation(
+          {
+            workspaceId: snap.workspaceId,
+            operationId: diffOperationId,
+            files: [target.file_path],
+          },
+          {
+            loading: false,
+            errorToast: false,
+          },
+        )
+        const revertedFiles = result.reverted_files || []
+        for (const filePath of revertedFiles) {
+          if (snap.openedFiles.includes(filePath)) {
+            await openFile(filePath, true, true)
+          }
+        }
+        if (result.deleted_files?.length) {
+          await loadWorkspaceFiles(snap.workspaceId, false)
+        }
+        const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
+        message.success(affectedCount ? `已回滚 ${affectedCount} 个变更` : '没有需要回滚的变更')
       }
-      if (result.deleted_files?.length) {
-        await loadWorkspaceFiles(snap.workspaceId, false)
-      }
-      const affectedCount = (result.reverted_files?.length || 0) + (result.deleted_files?.length || 0)
-      message.success(affectedCount ? `已回滚 ${affectedCount} 个变更` : '没有需要回滚的变更')
 
       const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
       if (!nextDiffs.length) {
@@ -5869,19 +5905,22 @@ const LatexEditorPage = () => {
         agentDiffReviewRef.current?.getCurrentModifiedContent() ??
         resolvedModified ??
         allFileDiffs[currentDiffIndex]?.modified_content
-      const contentByPath = content && currentPath ? { [currentPath]: content } : undefined
-    const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
-    if (!nextDiffs.length) {
+
+      const contentByPath =
+        typeof content === 'string' && currentPath ? { [currentPath]: content } : undefined
+      const nextDiffs = allFileDiffs.filter((_, index) => index !== currentDiffIndex)
+      if (!nextDiffs.length) {
         closeDiffModal(paths, contentByPath)
-    } else {
+        void loadOperationHistory()
+      } else {
         if (contentByPath && currentPath) {
           docStudioActions.setFileContent(currentPath, content)
         }
-      setAllFileDiffs(nextDiffs)
-      setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
-    }
+        setAllFileDiffs(nextDiffs)
+        setCurrentDiffIndex(Math.min(currentDiffIndex, nextDiffs.length - 1))
+      }
     },
-    [allFileDiffs, currentDiffIndex, closeDiffModal, resolvedModified],
+    [allFileDiffs, currentDiffIndex, closeDiffModal, loadOperationHistory, resolvedModified],
   )
 
   const handleKeepAllDiffs = useCallback(() => {
@@ -5899,9 +5938,11 @@ const LatexEditorPage = () => {
           idx === currentDiffIndex && currentModified ? currentModified : (d.modified_content ?? '')
       }
     })
+
     closeDiffModal(paths, Object.keys(contentByPath).length > 0 ? contentByPath : undefined)
+    void loadOperationHistory()
     message.success('已保留全部文件变更')
-  }, [allFileDiffs, closeDiffModal, currentDiffIndex, resolvedModified])
+  }, [allFileDiffs, closeDiffModal, currentDiffIndex, loadOperationHistory, resolvedModified])
 
   const handleRejectAllDiffs = async () => {
     if (!snap.workspaceId) {
@@ -9598,7 +9639,7 @@ const LatexEditorPage = () => {
                                 >
                                   预览差异
                                 </Button>
-                                <Tooltip title="ScriptLens 当前不持久化改写到原文，因此回退仅做占位（点击后会提示无可恢复内容）。原始文档始终是上传时的版本。">
+                                <Tooltip title="点击后会把当前文件回退到该时间点的 before 快照（snapshot_before）。仅影响所选文件，其他文件不受影响。">
                                   <Popconfirm
                                     title="恢复当前文件到该时间点？"
                                     onConfirm={() =>

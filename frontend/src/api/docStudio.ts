@@ -410,6 +410,16 @@ function normalizeScenePath(path: string): string {
   return String(path || '').trim().replace(/\\/g, '/')
 }
 
+function buildSceneVfsPath(scene: SceneItemDTO): string | null {
+  const episodeNo = Number(scene.episode_no ?? 0)
+  const sceneIndex = parseSceneIndex(scene.scene_no)
+  if (!Number.isFinite(episodeNo) || episodeNo < 0) return null
+  if (sceneIndex == null || sceneIndex <= 0 || sceneIndex > 999) return null
+  const ep = String(Math.trunc(episodeNo)).padStart(2, '0')
+  const sn = String(Math.trunc(sceneIndex)).padStart(3, '0')
+  return `scenes/E${ep}-S${sn}.txt`
+}
+
 function findSceneByPathInCache(
   scenes: SceneItemDTO[],
   rawPath: string,
@@ -434,6 +444,27 @@ function findSceneByPathInCache(
         Number(parseSceneIndex(s.scene_no) ?? -1) === sc,
     ) || null
   )
+}
+
+export function resolveScenePathAliases(workspaceId: string, rawPath: string): string[] {
+  const normalizedPath = normalizeScenePath(rawPath)
+  if (!normalizedPath) return []
+  const aliases: string[] = [normalizedPath]
+  const scenes = sceneCache.get(workspaceId)
+  if (!Array.isArray(scenes) || scenes.length === 0) return aliases
+
+  const scene = findSceneByPathInCache(scenes, normalizedPath)
+  if (!scene) return aliases
+
+  const sceneId = normalizeScenePath(String(scene.id))
+  if (sceneId && !aliases.includes(sceneId)) {
+    aliases.push(sceneId)
+  }
+  const vfsPath = buildSceneVfsPath(scene)
+  if (vfsPath && !aliases.includes(vfsPath)) {
+    aliases.push(vfsPath)
+  }
+  return aliases
 }
 
 /**
@@ -1082,8 +1113,9 @@ export async function revertOperation(
   options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.RevertOperationResponse> {
   const encodedOperationId = encodeURIComponent(params.operationId)
-  // ScriptLens 后端目前 no-op（不真改 scenes.text，避免覆盖原始上传）。
-  // 但端点存在并会做权限校验：op 不存在 / 越权时会 404 / 403。
+  const payload = Array.isArray(params.files) && params.files.length > 0
+    ? { files: params.files }
+    : {}
   const { data } = await request.post<{
     operation_id: string
     reverted_files: string[]
@@ -1091,7 +1123,7 @@ export async function revertOperation(
     skipped_files: string[]
   }>(
     `/${params.workspaceId}/operations/${encodedOperationId}/revert`,
-    {},
+    payload,
     withScripts(options),
   )
   return {
