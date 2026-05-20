@@ -55,4 +55,4 @@
 
 ## 关联文档
 
-- `docs/11-operation-id-protocol.md`
+- `docs/architecture/11-operation-id-protocol.md`

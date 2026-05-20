@@ -179,7 +179,7 @@ flowchart TD
 | **自动重评** | `pendingRescoreRef` 钩在 keep 路径上；reject 不触发；时序由 `setTimeout(0)` 避开 setFileContent 同步竞争 |
 | **Brief 后端化** | user message 只发一行意图 + `<TASK_META>{...}</TASK_META>`，800 字 brief 不污染 chat 流 |
 
-详见 [`docs/10-rewrite-agent.md`](docs/10-rewrite-agent.md)。
+详见 [`docs/architecture/10-rewrite-agent.md`](docs/architecture/10-rewrite-agent.md)。
 
 ### 3. Quote-first 双锚定溯源
 
@@ -207,7 +207,7 @@ flowchart TD
 
 合规审核独立四档分级（`high_risk / medium_risk / low_risk / clean`），不进创作质量加权。
 
-业内出处：阅文集团「五力模型」（中文网文 / 短剧改编工业最广为使用的体系）+ 抖音 / 快手 StreamLake 选品手册阈值。详见 [`docs/08-evaluation-framework.md`](docs/08-evaluation-framework.md)。
+业内出处：阅文集团「五力模型」（中文网文 / 短剧改编工业最广为使用的体系）+ 抖音 / 快手 StreamLake 选品手册阈值。详见 [`docs/requirement/08-evaluation-framework.md`](docs/requirement/08-evaluation-framework.md)。
 
 ---
 
@@ -338,15 +338,15 @@ cd ../frontend && npm install && npm run dev
 | 文档 | 作用 |
 |---|---|
 | [`docs/source/task.md`](docs/source/task.md) | 题目原文，最高准则 |
-| [`docs/01-requirements.md`](docs/01-requirements.md) | PRD：契约 + Agent 输出 + 验收清单 |
-| [`docs/03-system-mental-model.md`](docs/03-system-mental-model.md) | UI / Agent 协作心智模型 + AgentTask 协议 |
-| [`docs/04-script-pipeline.md`](docs/04-script-pipeline.md) | 上传 → 评分 → 检索 → 派发 数据流水线 |
-| [`docs/05-report-architecture.md`](docs/05-report-architecture.md) | 4 segment 结构契约 + 4 chain 并行 |
-| [`docs/06-storage-architecture.md`](docs/06-storage-architecture.md) | PG 存储层 + 检索契约 |
-| [`docs/08-evaluation-framework.md`](docs/08-evaluation-framework.md) | 阅文五力 rubric + 短剧场景化档位锚点 |
-| [`docs/09-action-lens.md`](docs/09-action-lens.md) | 行动 segment + Persona Action Card |
-| [`docs/10-rewrite-agent.md`](docs/10-rewrite-agent.md) | Plan-then-Execute 改写 + diff 透明迁移 + rescore 链路 |
-| [`docs/00-reuse-matrix.md`](docs/00-reuse-matrix.md) | ScholarMind → ScriptLens 模块复用矩阵 |
+| [`docs/requirement/01-requirements.md`](docs/requirement/01-requirements.md) | PRD：契约 + Agent 输出 + 验收清单 |
+| [`docs/architecture/03-system-mental-model.md`](docs/architecture/03-system-mental-model.md) | UI / Agent 协作心智模型 + AgentTask 协议 |
+| [`docs/pipeline/04-script-pipeline.md`](docs/pipeline/04-script-pipeline.md) | 上传 → 评分 → 检索 → 派发 数据流水线 |
+| [`docs/architecture/05-report-architecture.md`](docs/architecture/05-report-architecture.md) | 4 segment 结构契约 + 4 chain 并行 |
+| [`docs/architecture/06-storage-architecture.md`](docs/architecture/06-storage-architecture.md) | PG 存储层 + 检索契约 |
+| [`docs/requirement/08-evaluation-framework.md`](docs/requirement/08-evaluation-framework.md) | 阅文五力 rubric + 短剧场景化档位锚点 |
+| [`docs/architecture/09-action-lens.md`](docs/architecture/09-action-lens.md) | 行动 segment + Persona Action Card |
+| [`docs/architecture/10-rewrite-agent.md`](docs/architecture/10-rewrite-agent.md) | Plan-then-Execute 改写 + diff 透明迁移 + rescore 链路 |
+| [`docs/architecture/00-reuse-matrix.md`](docs/architecture/00-reuse-matrix.md) | ScholarMind → ScriptLens 模块复用矩阵 |
 | [`backend/README.deploy.md`](backend/README.deploy.md) | Docker 部署手册 |
 
 ---

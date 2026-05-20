@@ -1,6 +1,6 @@
 # ScriptLens 诊断报告架构
 
-> 本文是诊断报告的**结构契约**。最高准则是 [`source/task.md`](source/task.md)；当 [`01-requirements.md`](01-requirements.md) 与本文冲突时，**新结构以本文为准**，PRD 同步修订。
+> 本文是诊断报告的**结构契约**。最高准则是 [`source/task.md`](../source/task.md)；当 [`01-requirements.md`](../requirement/01-requirements.md) 与本文冲突时，**新结构以本文为准**，PRD 同步修订。
 > 三角分工：03 = 人机协作形态；04 = 数据/代码走向；本文 = 报告内部结构。
 > 存储层选型见 [`06-storage-architecture.md`](06-storage-architecture.md)。
 
@@ -45,7 +45,7 @@
 | 角色动机是否成立 | 人物 | `character_graph.nodes[].motivation` + `evaluation.dimensions[motivation]` |
 | 问题和风险 | 评估 | `risk_flags` |
 | 数据等级评估 (§五 3) | 评估 | `evaluation.dimensions[]` (5 维) |
-| 改写建议 (§五 4) | 行动 · 编剧 | `rewrite_seeds[]` (评估 segment 不再承载，详见 docs/10-rewrite-agent.md §1) |
+| 改写建议 (§五 4) | 行动 · 编剧 | `rewrite_seeds[]` (评估 segment 不再承载，详见 docs/architecture/10-rewrite-agent.md §1) |
 
 **任何结论必须能回到原文锚点（task.md §三 2「保留原文依据」）**：所有可点元素携带 `evidence_ref_id` 或 `scene_id`。
 

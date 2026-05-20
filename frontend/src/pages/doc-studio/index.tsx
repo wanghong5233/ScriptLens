@@ -436,11 +436,46 @@ const LIVE_TOOL_LABELS: Record<string, string> = {
   answer_without_edit_tool: '直接回答',
 }
 
+const LIVE_DIMENSION_LABELS: Record<string, string> = {
+  story: '故事力',
+  character: '人物力',
+  concept: '题材力',
+  emotion: '情感力',
+  pacing: '叙事力',
+  compliance: '合规',
+}
+
 const formatLiveToolName = (toolName?: string) => {
   const normalized = String(toolName || '').trim()
   if (!normalized) return ''
   if (LIVE_TOOL_LABELS[normalized]) return LIVE_TOOL_LABELS[normalized]
   return normalized.replace(/_tool$/, '').replace(/_/g, ' ')
+}
+
+const formatLiveToolStartLabel = (
+  toolName?: string,
+  parameters?: Record<string, unknown>,
+) => {
+  const normalized = String(toolName || '').trim()
+  const base = formatLiveToolName(normalized)
+  if (!normalized) return base
+
+  if (normalized === 'score_dimension_tool') {
+    const dim = String(parameters?.dimension || '').trim()
+    const dimLabel = LIVE_DIMENSION_LABELS[dim] || dim
+    return dimLabel ? `${base} · ${dimLabel}` : base
+  }
+
+  if (normalized === 'rewrite_scene_tool') {
+    const dims = Array.isArray(parameters?.target_dimensions)
+      ? (parameters?.target_dimensions as unknown[])
+          .map((item) => LIVE_DIMENSION_LABELS[String(item || '').trim()] || String(item || '').trim())
+          .filter(Boolean)
+      : []
+    return dims.length > 0 ? `${base} · ${dims.join('/')}` : base
+  }
+
+  return base
 }
 
 const formatOperationIdForDisplay = (operationId?: string) => {
@@ -2472,6 +2507,19 @@ const LatexEditorPage = () => {
 
   const activeFileTimeline = useMemo(() => {
     if (!snap.activeFilePath || !snap.workspaceId) return []
+    const sortByTimestampDesc = (items: DocStudioAPI.OperationSummary[]) =>
+      [...items].sort((a, b) => {
+        const left = Date.parse(a.timestamp || '')
+        const right = Date.parse(b.timestamp || '')
+        if (!Number.isNaN(left) && !Number.isNaN(right)) return right - left
+        if (!Number.isNaN(right)) return 1
+        if (!Number.isNaN(left)) return -1
+        return b.operation_id.localeCompare(a.operation_id)
+      })
+    // 虚拟「完整剧本」文件没有单一 scene_path 语义，此时展示全剧操作时间线。
+    if (snap.activeFilePath === FULL_SCRIPT_VIRTUAL_PATH) {
+      return sortByTimestampDesc(operationHistory)
+    }
     const activeAliases = resolveScenePathAliases(snap.workspaceId, snap.activeFilePath)
     const normalizedActiveAliases = new Set(
       (activeAliases.length ? activeAliases : [snap.activeFilePath]).map((p) =>
@@ -2491,14 +2539,7 @@ const LatexEditorPage = () => {
         },
       ),
     )
-    return [...list].sort((a, b) => {
-      const left = Date.parse(a.timestamp || '')
-      const right = Date.parse(b.timestamp || '')
-      if (!Number.isNaN(left) && !Number.isNaN(right)) return right - left
-      if (!Number.isNaN(right)) return 1
-      if (!Number.isNaN(left)) return -1
-      return b.operation_id.localeCompare(a.operation_id)
-    })
+    return sortByTimestampDesc(list)
   }, [operationHistory, snap.activeFilePath, snap.workspaceId])
 
   const openFile = useCallback(
@@ -2517,6 +2558,12 @@ const LatexEditorPage = () => {
         docStudioActions.setActiveFile(path)
         if (!silent) docStudioActions.setFileLoading(path, true)
         try {
+          if (forceReload) {
+            await fetchWorkspaceFiles(
+              { workspaceId: workspaceIdAtStart },
+              { loading: false, errorToast: false },
+            )
+          }
           const orderedScenePaths = collectAllFilePaths(
             (docStudioState.fileTree || []) as DocStudioAPI.FileNode[],
           )
@@ -2527,13 +2574,16 @@ const LatexEditorPage = () => {
           const parts: string[] = []
           for (const scenePath of orderedScenePaths) {
             const buf = docStudioState.files[scenePath]
-            if (buf?.content) {
+            if (!forceReload && buf?.content) {
               parts.push(buf.content)
               continue
             }
             // eslint-disable-next-line no-await-in-loop
             const file = await fetchFileContent(
-              { workspaceId: workspaceIdAtStart, path: scenePath },
+              {
+                workspaceId: workspaceIdAtStart,
+                path: scenePath,
+              },
               { loading: false, errorToast: false },
             )
             if (!isWorkspaceStillCurrent()) return
@@ -2567,6 +2617,7 @@ const LatexEditorPage = () => {
         const file = await fetchFileContent({
           workspaceId: workspaceIdAtStart,
           path,
+          forceRefresh: forceReload,
         }, {
           loading: false,
           errorToast: false,
@@ -5395,30 +5446,54 @@ const LatexEditorPage = () => {
       setResolvedOriginal(fallbackOriginal)
       setResolvedModified(fallbackModified)
       try {
+        if (diffModalContext === 'agent') {
+          // Agent diff 需要对比「before vs 本次改写结果」，不能读可能滞后的 sceneCache。
+          const [beforeSnapshot, afterSnapshot] = await Promise.all([
+            fetchOperationSnapshotFile(
+              {
+                workspaceId: snap.workspaceId,
+                operationId: diffOperationId,
+                filePath: diff.file_path,
+                version: 'before',
+              },
+              { loading: false, errorToast: false },
+            ),
+            fetchOperationSnapshotFile(
+              {
+                workspaceId: snap.workspaceId,
+                operationId: diffOperationId,
+                filePath: diff.file_path,
+                version: 'after',
+              },
+              { loading: false, errorToast: false },
+            ),
+          ])
+          setResolvedOriginal(beforeSnapshot?.content ?? fallbackOriginal)
+          setResolvedModified(afterSnapshot?.content ?? fallbackModified)
+          return
+        }
         const [snapshot, current] = await Promise.all([
           fetchOperationSnapshotFile(
             {
-            workspaceId: snap.workspaceId,
-            operationId: diffOperationId,
-            filePath: diff.file_path,
-            version: 'before',
+              workspaceId: snap.workspaceId,
+              operationId: diffOperationId,
+              filePath: diff.file_path,
+              version: 'before',
             },
             { loading: false, errorToast: false },
           ),
           fetchFileContent(
-            { workspaceId: snap.workspaceId, path: diff.file_path },
+            { workspaceId: snap.workspaceId, path: diff.file_path, forceRefresh: true },
             { loading: false, errorToast: false },
           ),
         ])
-        const originalContent = snapshot?.content ?? fallbackOriginal
-        const modifiedContent = current?.content ?? fallbackModified
-        setResolvedOriginal(originalContent)
-        setResolvedModified(modifiedContent)
+        setResolvedOriginal(snapshot?.content ?? fallbackOriginal)
+        setResolvedModified(current?.content ?? fallbackModified)
       } catch {
         // 保持 fallback，不闪烁
       }
     },
-    [diffOperationId, snap.workspaceId],
+    [diffModalContext, diffOperationId, snap.workspaceId],
   )
 
   useEffect(() => {
@@ -5719,6 +5794,9 @@ const LatexEditorPage = () => {
         setLastOperationId(null)
       }
       await loadOperationHistory()
+      if (affectedCount && snap.activeFilePath === FULL_SCRIPT_VIRTUAL_PATH) {
+        await openFile(FULL_SCRIPT_VIRTUAL_PATH, true, true)
+      }
       if (diffModalOpen && diffModalContext === 'timeline') {
         closeDiffModal(
           allFileDiffs.map((d) => d.file_path).filter((p): p is string => Boolean(p)),
@@ -5750,6 +5828,10 @@ const LatexEditorPage = () => {
           void openFile(preferredPath, true)
         }
       })
+      if (paths.length > 0 && snap.activeFilePath === FULL_SCRIPT_VIRTUAL_PATH) {
+        // 「完整剧本」是派生视图：任一场景变动后都需要重算一次聚合文本。
+        void openFile(FULL_SCRIPT_VIRTUAL_PATH, true, true)
+      }
 
       // fe_rescore_hook：keep 路径会带 contentByPath（reject 路径不带）；
       // 全部 keep 完毕（最后一个 hunk close）才触发 rescore，避免在 reject 时误派发。
@@ -6434,6 +6516,7 @@ const LatexEditorPage = () => {
           (response.changes && response.changes.length > 0),
       )
       const isFileOpIntent = String(response.intent_type || '').toLowerCase() === 'file_op'
+      const hasDbOperation = Boolean(operationId && operationId.startsWith('db:'))
 
       // 按 data shape 自动提取 rewrite_plan：
       // 兼容 propose_full_script_plan_tool / 旧 propose_dimension_rewrite_tool。
@@ -6484,7 +6567,7 @@ const LatexEditorPage = () => {
         setLastOperationId(operationId)
       }
       // 文件操作（创建/移动/删除）不一定产生可视 diff，但必须立即同步左侧文件树。
-      if ((hasChanges || isFileOpIntent) && snap.workspaceId) {
+      if ((hasChanges || isFileOpIntent || hasDbOperation) && snap.workspaceId) {
         await syncWorkspaceFileTree(snap.workspaceId)
       }
       if (operationId) {
@@ -7100,7 +7183,11 @@ const LatexEditorPage = () => {
             const meta = parseLiveEventMeta(messageEvent, payload)
             markPendingSendCommitted('tool')
             const rawToolName = String(payload?.tool_name || '')
-            const displayToolName = formatLiveToolName(rawToolName)
+            const rawParameters =
+              payload?.parameters && typeof payload.parameters === 'object'
+                ? (payload.parameters as Record<string, unknown>)
+                : undefined
+            const displayToolName = formatLiveToolStartLabel(rawToolName, rawParameters)
             const text = displayToolName ? `开始工具 · ${displayToolName}` : '开始工具调用'
             appendLiveTimelineEvent({
               text,

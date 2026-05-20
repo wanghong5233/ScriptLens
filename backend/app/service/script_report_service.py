@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -42,6 +43,11 @@ from service.script_tools.character_graph_chain import CharacterGraph, extract_c
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
 from service.script_tools.dimension_scorer import (
     ScoreOutput,
+    STORY_KEY_BEATS,
+    STORY_TWIST_EVENT_TYPES,
+    STORY_TWIST_PER_EP_HIGH,
+    STORY_TWIST_PER_EP_MID_HIGH,
+    STORY_TWIST_PER_EP_MID_LOW,
     score_character,
     score_concept,
     score_emotion,
@@ -159,6 +165,64 @@ async def score_one_dimension(
     if meta is None:
         raise ValueError(f"script_id={script_id} 不存在")
 
+    # 读取 latest report 的该维度基线分，供前端/Agent 做稳定的 before-vs-after 对照。
+    # 注意：基线只是最近一次报告快照，不代表“改写前固定版本”；对话层应结合操作时间解释。
+    baseline_score: Optional[int] = None
+    baseline_level: Optional[str] = None
+    baseline_reason: Optional[str] = None
+    baseline_evidence_scene_ids: List[str] = []
+    with engine.connect() as conn:
+        baseline_row = conn.execute(
+            text(
+                """
+                SELECT report_json
+                FROM scriptlens.reports
+                WHERE script_id = :sid
+                ORDER BY generated_at DESC
+                LIMIT 1
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().first()
+    if baseline_row is not None:
+        payload = baseline_row.get("report_json")
+        if isinstance(payload, (str, bytes)):
+            try:
+                payload = json.loads(payload)
+            except (TypeError, ValueError):
+                payload = {}
+        if isinstance(payload, dict):
+            scorecard = payload.get("scorecard")
+            if isinstance(scorecard, list):
+                for item in scorecard:
+                    if not isinstance(item, dict):
+                        continue
+                    item_dim = str(item.get("dimension") or "").strip()
+                    if item_dim != dimension:
+                        continue
+                    raw_score = item.get("score")
+                    if isinstance(raw_score, (int, float)) and not isinstance(raw_score, bool):
+                        baseline_score = int(raw_score)
+                    raw_level = item.get("level")
+                    if isinstance(raw_level, str):
+                        baseline_level = raw_level
+                    raw_reason = item.get("reason")
+                    if isinstance(raw_reason, str):
+                        baseline_reason = raw_reason
+                    raw_refs = item.get("evidence_ref_ids")
+                    if isinstance(raw_refs, list):
+                        baseline_ref_ids = {str(ref) for ref in raw_refs if str(ref).strip()}
+                        evidence_refs = payload.get("evidence_refs")
+                        if isinstance(evidence_refs, list):
+                            baseline_evidence_scene_ids = [
+                                str(ref.get("scene_id"))
+                                for ref in evidence_refs
+                                if isinstance(ref, dict)
+                                and str(ref.get("id") or "") in baseline_ref_ids
+                                and str(ref.get("scene_id") or "").strip()
+                            ]
+                    break
+
     if dimension == "compliance":
         r = await screen_risks(script_id=script_id, caller=caller)
         ds = _to_dim_from_risk(r)
@@ -168,10 +232,17 @@ async def score_one_dimension(
             "level": ds.level,
             "reason": ds.reason,
             "evidence_scene_ids": ds.evidence_scene_ids,
+            "baseline": {
+                "score": baseline_score,
+                "level": baseline_level,
+                "reason": baseline_reason,
+                "evidence_scene_ids": baseline_evidence_scene_ids,
+            },
         }
 
     # 五力评分需要先跑上游基础信号，按 dimension 按需触发
     reward_events = await extract_reward_events(script_id=script_id, caller=caller)
+    story_diagnostics: Optional[Dict[str, Any]] = None
 
     if dimension == "story":
         beat_sheet = await extract_beat_sheet(
@@ -181,6 +252,12 @@ async def score_one_dimension(
             beat_sheet=beat_sheet,
             reward_events=reward_events,
             total_episodes=meta.total_episodes,
+        )
+        story_diagnostics = _build_story_diagnostics(
+            beat_sheet=beat_sheet,
+            reward_events=reward_events,
+            total_episodes=meta.total_episodes,
+            score=out.score,
         )
     elif dimension == "character":
         motiv, cgraph = await asyncio.gather(
@@ -204,12 +281,74 @@ async def score_one_dimension(
         )
 
     ds = _to_dim(dimension, out)
-    return {
+    result = {
         "dimension": ds.dimension,
         "score": ds.score,
         "level": ds.level,
         "reason": ds.reason,
         "evidence_scene_ids": ds.evidence_scene_ids,
+        "baseline": {
+            "score": baseline_score,
+            "level": baseline_level,
+            "reason": baseline_reason,
+            "evidence_scene_ids": baseline_evidence_scene_ids,
+        },
+    }
+    if story_diagnostics is not None:
+        result["diagnostics"] = story_diagnostics
+    return result
+
+
+def _build_story_diagnostics(
+    *,
+    beat_sheet: Optional[BeatSheet],
+    reward_events: List[RewardEvent],
+    total_episodes: int,
+    score: Optional[int],
+) -> Dict[str, Any]:
+    """给 story 评分返回结构化诊断，便于解释“为什么没涨分”。"""
+    episodes = int(total_episodes or 0)
+    if episodes <= 0:
+        episodes = len({ev.episode_no for ev in reward_events if ev.episode_no is not None}) or 1
+    episodes = max(1, episodes)
+
+    present_beats: set[str] = set()
+    if beat_sheet is not None:
+        for act in beat_sheet.acts:
+            for beat in act.beats:
+                if beat.type in STORY_KEY_BEATS and beat.anchor_scene_id:
+                    present_beats.add(beat.type)
+    missing_beats = [b for b in STORY_KEY_BEATS if b not in present_beats]
+
+    twist_count = sum(1 for ev in reward_events if ev.event_type in STORY_TWIST_EVENT_TYPES)
+    twist_per_ep = twist_count / episodes
+
+    if score is None or score < 4:
+        target_band = "medium"
+        target_ratio = STORY_TWIST_PER_EP_MID_LOW
+    elif score < 7:
+        target_band = "high"
+        target_ratio = STORY_TWIST_PER_EP_MID_HIGH
+    else:
+        target_band = "top"
+        target_ratio = STORY_TWIST_PER_EP_HIGH
+    required_twists = int(math.ceil(target_ratio * episodes))
+    missing_twists = max(0, required_twists - twist_count)
+
+    return {
+        "version": "story_v1",
+        "total_episodes": episodes,
+        "twist_count": twist_count,
+        "twist_per_episode": round(twist_per_ep, 4),
+        "present_beats": sorted(present_beats),
+        "missing_beats": missing_beats,
+        "next_band": {
+            "target": target_band,
+            "twist_per_episode_threshold": target_ratio,
+            "required_twist_count": required_twists,
+            "missing_twists": missing_twists,
+        },
+        "estimated_min_rewrite_scenes_for_next_band": missing_twists + len(missing_beats),
     }
 
 

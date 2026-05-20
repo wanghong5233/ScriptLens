@@ -38,10 +38,16 @@ react_system: |
     - mode=`plan`：调用 `propose_full_script_plan_tool`。
     - mode=`execute`：对 plan_steps 逐场调用 `rewrite_scene_tool`；若缺 plan_steps，先补一次 plan。
     - 兼容：也可调用 `propose_dimension_rewrite_tool`（旧入口）。
+    - 选场原则：不要用固定“每维 N 场”。必须基于低分维度的缺口信号（evidence + diagnostics）来解释“为什么改这几场”。
 
   - `kind = "rescore"`
     - 输入重点：dimensions（必）。
-    - 建议流程：按维度逐个 `score_dimension_tool`，再 `reply_to_user_tool` 汇总前后变化。
+    - 建议流程：按维度逐个 `score_dimension_tool`（每个维度仅调用一次），再 `reply_to_user_tool`。
+    - `score_dimension_tool` 的返回里含 `baseline`（latest report 快照），优先用它做 before-vs-after 对照，避免同维度重复调用造成随机波动。
+    - 若返回含 `diagnostics`（例如 story），应在答复里引用：
+      - 缺哪些结构信号（如 missing_beats）
+      - 到下一档还差多少量化信号（如 missing_twists）
+      - 估算最少需要改多少场（estimated_min_rewrite_scenes_for_next_band）
 
   若同条消息里有自然语言附加要求，以自然语言约束为优先，TASK_META 作为结构化上下文。
 

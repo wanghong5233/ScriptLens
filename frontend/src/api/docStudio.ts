@@ -467,6 +467,19 @@ export function resolveScenePathAliases(workspaceId: string, rawPath: string): s
   return aliases
 }
 
+async function ensureSceneCache(
+  workspaceId: string,
+  options?: AxiosRequestConfig,
+  forceRefresh = false,
+): Promise<SceneItemDTO[]> {
+  let scenes = sceneCache.get(workspaceId)
+  if (forceRefresh || !Array.isArray(scenes)) {
+    await fetchWorkspaceFiles({ workspaceId }, options)
+    scenes = sceneCache.get(workspaceId)
+  }
+  return Array.isArray(scenes) ? scenes : []
+}
+
 /**
  * 把 LLM 输出里的引用（"5-3"、"5-3 场"、"第 5 集第 3 场"）解析为 sceneId。
  *
@@ -744,7 +757,7 @@ export async function fetchWorkspaceFiles(
 }
 
 export async function fetchFileContent(
-  params: { workspaceId: string; path: string },
+  params: { workspaceId: string; path: string; forceRefresh?: boolean },
   options?: AxiosRequestConfig,
 ) {
   // path 兼容两种形态：
@@ -754,11 +767,11 @@ export async function fetchFileContent(
   if (!normalizedPath) {
     throw new Error('场景路径不能为空')
   }
-  let scenes = sceneCache.get(params.workspaceId)
-  if (!scenes) {
-    await fetchWorkspaceFiles({ workspaceId: params.workspaceId }, options)
-    scenes = sceneCache.get(params.workspaceId) || []
-  }
+  const scenes = await ensureSceneCache(
+    params.workspaceId,
+    options,
+    Boolean(params.forceRefresh),
+  )
   const scene = findSceneByPathInCache(scenes, normalizedPath)
   if (!scene) {
     throw new Error(`场景不存在: path=${normalizedPath}`)
@@ -787,11 +800,7 @@ export async function updateFileContent(
     throw new Error('updateFileContent: path 不能为空')
   }
 
-  let scenes = sceneCache.get(workspaceId)
-  if (!scenes) {
-    await fetchWorkspaceFiles({ workspaceId }, options)
-    scenes = sceneCache.get(workspaceId) || []
-  }
+  let scenes = await ensureSceneCache(workspaceId, options)
   const scene = findSceneByPathInCache(scenes, normalizedPath)
   if (!scene) {
     throw new Error(`updateFileContent: 场景不存在 path=${normalizedPath}`)
@@ -806,11 +815,11 @@ export async function updateFileContent(
   })
 
   // 同步刷新 sceneCache，避免下次 fetchFileContent 取到旧文本
-  scenes = sceneCache.get(workspaceId)
-  if (scenes) {
-    const idx = scenes.findIndex((s) => String(s.id) === sceneId)
+  const refreshedScenes = sceneCache.get(workspaceId)
+  if (Array.isArray(refreshedScenes)) {
+    const idx = refreshedScenes.findIndex((s) => String(s.id) === sceneId)
     if (idx >= 0) {
-      scenes[idx] = { ...scenes[idx], text: content }
+      refreshedScenes[idx] = { ...refreshedScenes[idx], text: content }
     }
   }
 
@@ -1126,6 +1135,8 @@ export async function revertOperation(
     payload,
     withScripts(options),
   )
+  // 回滚会直接改 DB（scenes.text），这里统一刷新 sceneCache，避免后续 fetchFileContent 拿到旧缓存。
+  await fetchWorkspaceFiles({ workspaceId: params.workspaceId }, { ...options, loading: false, errorToast: false })
   return {
     operation_id: data.operation_id,
     reverted_files: data.reverted_files || [],

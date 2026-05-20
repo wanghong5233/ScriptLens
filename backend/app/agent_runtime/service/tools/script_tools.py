@@ -117,6 +117,25 @@ class ScoreDimensionTool(BaseTool):
         if not script_id:
             return _missing_script_id()
 
+        cache_key = f"{script_id}:{dimension}"
+        cache = getattr(agent_state, "_score_dimension_cache", None)
+        if not isinstance(cache, dict):
+            cache = {}
+            setattr(agent_state, "_score_dimension_cache", cache)
+        if cache_key in cache:
+            cached = cache[cache_key]
+            evi_count = len((cached or {}).get("evidence_scene_ids") or [])
+            score = (cached or {}).get("score")
+            level = (cached or {}).get("level")
+            if score is None:
+                summary = (
+                    f"{dimension}: 证据不足，未给分（{evi_count} 条证据场景，"
+                    f"原因：{(cached or {}).get('reason') or '未说明'}） [cached]"
+                )
+            else:
+                summary = f"{dimension}: {score}/10 ({level})，{evi_count} 条证据场景 [cached]"
+            return ToolResult(success=True, data=cached, summary=summary)
+
         from service.script_report_service import score_one_dimension
         from service.script_tools.llm_caller import ScoreLLMError
 
@@ -133,6 +152,8 @@ class ScoreDimensionTool(BaseTool):
         except Exception as e:
             logger.error("score_dimension_tool unexpected error: %s", e, exc_info=True)
             return ToolResult(success=False, error=str(e), summary="评分异常")
+
+        cache[cache_key] = result
 
         evi_count = len(result.get("evidence_scene_ids") or [])
         score = result.get("score")

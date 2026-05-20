@@ -414,7 +414,7 @@ budget = ceil_to_pow2(field_count × avg_field_tokens × safety_factor)
 - **本文 (`08-evaluation-framework.md`)** = v2 评估框架的权威源，对应代码中的 `_DIMENSIONS_FIVE` + 前端 `evaluationRubric.ts`
 - [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md) = v1 archive，保留行业调研部分（§1 / §2），档位表（§3）已被本文 §3 覆盖。后续 v3 调整时直接更新本文，不动 02
 - [`01-requirements.md`](01-requirements.md) §6 = 用户向需求陈述，文案同步本文五力词表
-- [`05-report-architecture.md`](05-report-architecture.md) §6 = 前端 segment 结构契约，五力词表同步
+- [`05-report-architecture.md`](../architecture/05-report-architecture.md) §6 = 前端 segment 结构契约，五力词表同步
 - `frontend/src/pages/doc-studio/evaluationRubric.ts` = 前端 rubric 常量，与本文 §3 双向同步：改任意一边时另一边必须跟改
 
 ## 10. 演进路径

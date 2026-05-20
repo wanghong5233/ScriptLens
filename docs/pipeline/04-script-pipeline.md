@@ -1,7 +1,7 @@
 # ScriptLens 剧本处理流水线
 
 > 本文是 **剧本数据生命周期** 的实现层文档，跨越「上传 → 评分 → 检索 → 任务派发」四阶段。
-> 与 [`01-requirements.md`](01-requirements.md)（契约 PRD）和 [`03-system-mental-model.md`](03-system-mental-model.md)（UI / Agent 心智）形成三角：
+> 与 [`01-requirements.md`](../requirement/01-requirements.md)（契约 PRD）和 [`03-system-mental-model.md`](../architecture/03-system-mental-model.md)（UI / Agent 心智）形成三角：
 >
 > - 01 = "**做什么**"
 > - 03 = "**人机怎么协作**"
@@ -264,7 +264,7 @@ BM25 命中 0 条时（典型场景：纯抽象语义查询如"令人破防的�
 
 ## 5. 任务派发（与 03 文档交叉引用）
 
-简述：报告里的可点元素 → `dispatchAgentTask(task)` → 切到 chat tab + 注入 prompt + Monaco 高亮。详见 [`03-system-mental-model.md`](03-system-mental-model.md) §6 (AgentTask 协议) 与 §7 (端到端任务流)。
+简述：报告里的可点元素 → `dispatchAgentTask(task)` → 切到 chat tab + 注入 prompt + Monaco 高亮。详见 [`03-system-mental-model.md`](../architecture/03-system-mental-model.md) §6 (AgentTask 协议) 与 §7 (端到端任务流)。
 
 本节只补充**与数据流相关**的两个不变式：
 
@@ -324,7 +324,7 @@ DROP TABLE scriptlens.script_chunks;  -- 含 idx_script_chunks_* 一并随表删
 
 ## 8. 相关文档
 
-- [`00-reuse-matrix.md`](00-reuse-matrix.md) · ScholarMind 模块复用矩阵
-- [`01-requirements.md`](01-requirements.md) · 契约 PRD（5 维评分 / API / schema）
-- [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md) · 5 维评分工业判据
-- [`03-system-mental-model.md`](03-system-mental-model.md) · UI / Agent 协作心智模型
+- [`00-reuse-matrix.md`](../architecture/00-reuse-matrix.md) · ScholarMind 模块复用矩阵
+- [`01-requirements.md`](../requirement/01-requirements.md) · 契约 PRD（5 维评分 / API / schema）
+- [`02-script-evaluation-rubric.md`](../requirement/02-script-evaluation-rubric.md) · 5 维评分工业判据
+- [`03-system-mental-model.md`](../architecture/03-system-mental-model.md) · UI / Agent 协作心智模型

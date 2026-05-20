@@ -1,10 +1,10 @@
 # ScriptLens 产品需求
 
-> **最高准则是 [`source/task.md`](source/task.md)**，PRD 是 task.md 的工程化落地，可随开发演进修订。
-> - 报告内部结构（4 segment / 故事/人物/评估）契约见 [`05-report-architecture.md`](05-report-architecture.md)
-> - 存储层当前实现与 SQLite + FTS5 演进方向见 [`06-storage-architecture.md`](06-storage-architecture.md)
-> - 解析质量评估方法见 [`07-evaluation.md`](07-evaluation.md)
-> - UI 与 Agent 协作落地心智见 [`03-system-mental-model.md`](03-system-mental-model.md)
+> **最高准则是 [`source/task.md`](../source/task.md)**，PRD 是 task.md 的工程化落地，可随开发演进修订。
+> - 报告内部结构（4 segment / 故事/人物/评估）契约见 [`05-report-architecture.md`](../architecture/05-report-architecture.md)
+> - 存储层当前实现与 SQLite + FTS5 演进方向见 [`06-storage-architecture.md`](../architecture/06-storage-architecture.md)
+> - 解析质量评估方法见 [`07-evaluation.md`](../playbook/07-evaluation.md)
+> - UI 与 Agent 协作落地心智见 [`03-system-mental-model.md`](../architecture/03-system-mental-model.md)
 >
 > 当 PRD 与 05 / 06 / 03 冲突时：**新结构以专题文档为准，PRD 同步修订**；当 PRD 与 task.md 冲突时：**task.md 为准**。
 
@@ -57,13 +57,13 @@ ScriptLens 是面向**短剧选品 / 编剧统筹 / 平台审核**的爆款短�
 | Q2 | 5 个决策维度各打几分？依据是什么？ | scorecard，每条带 `evidence_ref_ids` |
 | Q3 | 某个判断的原文依据是什么？（追问） | Agent 多轮，回答必须带证据片段 |
 | Q4 | 哪 1-2 个低分段最值得改？怎么改？ | 改写工具输出原文 + 改写版 + diff + 解释 |
-| Q5 | 不同岗位关心什么？ | 「行动」segment 同时呈现三张 Persona Action Card（选品 / 编剧 / 审核），每张卡 = 一句话结论 + 优先证据 ≤3 + Next Action ≤3，详见 [`09-action-lens.md`](09-action-lens.md) |
+| Q5 | 不同岗位关心什么？ | 「行动」segment 同时呈现三张 Persona Action Card（选品 / 编剧 / 审核），每张卡 = 一句话结论 + 优先证据 ≤3 + Next Action ≤3，详见 [`09-action-lens.md`](../architecture/09-action-lens.md) |
 
 Q1–Q4 是 MVP 必做，Q5 是加分项。
 
 ## 6. 5 维数据评估卡（task.md §五 3 加分项实装）
 
-5 维评分是 task.md §五 3「等级判断或量化分析」的具体实装，**作为深度层「评估」segment 的内容**，不抢 30 秒决策位（[`05-report-architecture.md §6`](05-report-architecture.md#6-前端-4-segment)）。
+5 维评分是 task.md §五 3「等级判断或量化分析」的具体实装，**作为深度层「评估」segment 的内容**，不抢 30 秒决策位（[`05-report-architecture.md §6`](../architecture/05-report-architecture.md#6-前端-4-segment)）。
 
 | 维度 | 0-10 评分依据 | 失败模式 |
 |---|---|---|
@@ -81,7 +81,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 
 ## 7. Agent 输出契约
 
-> **本节是 5 维评分契约的稳定基线**。`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` 等扩展字段（v3）在 [`05-report-architecture.md §4`](05-report-architecture.md#4-数据契约) 定义，不在本表，保持 PRD 稳定。
+> **本节是 5 维评分契约的稳定基线**。`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` 等扩展字段（v3）在 [`05-report-architecture.md §4`](../architecture/05-report-architecture.md#4-数据契约) 定义，不在本表，保持 PRD 稳定。
 
 ```jsonc
 {
@@ -131,11 +131,11 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 }
 ```
 
-视角切换由「行动」segment 的三张 Persona Action Card 实装；`scorecard` / `must_read_scene_ids` 在底层契约里顺序固定，不按角色重排（详见 [`09-action-lens.md`](09-action-lens.md)）。
+视角切换由「行动」segment 的三张 Persona Action Card 实装；`scorecard` / `must_read_scene_ids` 在底层契约里顺序固定，不按角色重排（详见 [`09-action-lens.md`](../architecture/09-action-lens.md)）。
 
-**v3 扩展字段**（`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` / `evaluation`）契约见 [`05-report-architecture.md §5`](05-report-architecture.md#5-数据契约)；本节是 v1 基线契约，过渡期内 `scorecard` 与 `evaluation.dimensions` 同源。
+**v3 扩展字段**（`coverage_card` / `beat_sheet` / `character_graph` / `pacing_curve` / `evaluation`）契约见 [`05-report-architecture.md §5`](../architecture/05-report-architecture.md#5-数据契约)；本节是 v1 基线契约，过渡期内 `scorecard` 与 `evaluation.dimensions` 同源。
 
-**报告 UI 分层与 4 segment 组织（速览 / 故事 / 人物 / 评分）见 [`05-report-architecture.md §5`](05-report-architecture.md#5-前端-4-segment)；本节 §7 是底层契约，不锁定 UI 形态。**
+**报告 UI 分层与 4 segment 组织（速览 / 故事 / 人物 / 评分）见 [`05-report-architecture.md §5`](../architecture/05-report-architecture.md#5-前端-4-segment)；本节 §7 是底层契约，不锁定 UI 形态。**
 
 ## 8. 必须支持的交互
 
@@ -144,10 +144,10 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 | 上传剧本（docx / pdf / txt / md） | `POST /api/scripts` 多部分文件 |
 | 异步解析进度 | `GET /api/jobs/{id}` 轮询 |
 | 查看结构化报告 | `GET /api/scripts/{id}/report` |
-| 多轮追问 | `POST /api/scripts/{id}/chat`，SSE 流式 + `Last-Event-ID` 重连。后端走 ReAct Agent（`app/agent_runtime/` 子包，in-process 调用，不起独立微服务），工具栈含 RAG / 评分 / 改写 / **联网检索（web_search）**；Agent 调用 web_search 的边界与 query 模式见 [`00-reuse-matrix.md §5.1`](00-reuse-matrix.md#51-web_search_tool-短剧场景调用边界) |
+| 多轮追问 | `POST /api/scripts/{id}/chat`，SSE 流式 + `Last-Event-ID` 重连。后端走 ReAct Agent（`app/agent_runtime/` 子包，in-process 调用，不起独立微服务），工具栈含 RAG / 评分 / 改写 / **联网检索（web_search）**；Agent 调用 web_search 的边界与 query 模式见 [`00-reuse-matrix.md §5.1`](../architecture/00-reuse-matrix.md#51-web_search_tool-短剧场景调用边界) |
 | 证据高亮 | 报告中 `evidence_ref_ids` → 前端跳转左侧原文 + 高亮场景 |
 | 改写片段 | `POST /api/scripts/{id}/rewrite` 带 `target_dimension` |
-| 视角切换 | `GET /api/scripts/{id}/view`（无 `?role=` 参数）；前端「行动」segment 派生三张 Persona Action Card（选品 / 编剧 / 审核），契约见 [`09-action-lens.md`](09-action-lens.md) |
+| 视角切换 | `GET /api/scripts/{id}/view`（无 `?role=` 参数）；前端「行动」segment 派生三张 Persona Action Card（选品 / 编剧 / 审核），契约见 [`09-action-lens.md`](../architecture/09-action-lens.md) |
 | 反馈 / 修正 | `POST /api/scripts/{id}/feedback` 带 `scope`（general / dimension / rewrite / scene）+ `scope_ref` + `message`，写入 `script_feedback` 表，下次 chat 自动注入 prompt |
 
 ## 9. 边界与失效场景
@@ -170,7 +170,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 | **P0** | 前端展示 | 双栏：左原文带场景树 + 高亮，右 Agent 对话 + 报告 tab |
 | **P1** | 数据分析能力 | §6 的 5 维 scorecard + 评分依据表 |
 | **P1** | 低评级改写 | §7 的 `rewrite_suggestions` 工具 |
-| **P1** | 联网检索能力 | task §六「真正可工作的 Agent」的关键支撑。Agent 工具栈含 `web_search_tool`（Tavily / Serper），覆盖剧本之外的查询：选品看市场 / 编剧查爆款 / 审核查法规 / 改写借参考。调用边界与 query 模式见 [`00-reuse-matrix.md §5.1`](00-reuse-matrix.md#51-web_search_tool-短剧场景调用边界) |
+| **P1** | 联网检索能力 | task §六「真正可工作的 Agent」的关键支撑。Agent 工具栈含 `web_search_tool`（Tavily / Serper），覆盖剧本之外的查询：选品看市场 / 编剧查爆款 / 审核查法规 / 改写借参考。调用边界与 query 模式见 [`00-reuse-matrix.md §5.1`](../architecture/00-reuse-matrix.md#51-web_search_tool-短剧场景调用边界) |
 | **P2** | 评估方法 | 3-5 份真实剧本人工标注 + 自动指标（证据召回率、维度分一致性）；详见 [`02-script-evaluation-rubric.md §5`](02-script-evaluation-rubric.md) |
 | **P3** | 可进化 skill 机制（轻量实现） | 用户在报告 / 维度 / 改写 / 场景上提交反馈 → 写 `script_feedback` 表（按 scope 标记）→ 下次 chat 自动抽取为 3 个轻量 skill 槽（维度解释偏好 / 改写偏好 / 风险规避偏好）并注入 prompt，使 Agent 能感知用户偏好与历史修正。**不做完整 RL 训练 / reward model / skill 调度库** |
 
@@ -182,7 +182,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 - 不做多用户协作权限
 - 不做完整账号体系（沿用 `testuser` demo-entry 即可）
 - 不做 6 个用户角色全套视角，只做 3 个 Persona Action Card（选品 / 编剧 / 审核）
-- 不做全局视角 tab / 视角重排报告（数据 lens 假象，详见 [`09-action-lens.md §3`](09-action-lens.md)）
+- 不做全局视角 tab / 视角重排报告（数据 lens 假象，详见 [`09-action-lens.md §3`](../architecture/09-action-lens.md)）
 - 不做 3 套时间预算分层（30s / 3min / 10min），单层报告 + 可下钻就够
 - 不做完整 skill 调度库 / RL 训练 pipeline / reward model（仅 §10 P3 的轻量反馈注入）
 - 不做老 `.doc` 二进制解析（提示用户另存为 docx）
@@ -196,7 +196,7 @@ Q1–Q4 是 MVP 必做，Q5 是加分项。
 - [ ] 用户可点击任一证据，左侧原文高亮跳转到对应场景
 - [ ] 用户可多轮追问，Agent 回答必须引用原文
 - [ ] 用户可对任一低分维度请求改写，输出原文 + 改写版 + diff
-- [ ] 「行动」segment 同时呈现选品 / 编剧 / 审核三张 Persona Action Card，每张卡含一句话结论 + 优先证据 + Next Action（详见 [`09-action-lens.md`](09-action-lens.md)）
+- [ ] 「行动」segment 同时呈现选品 / 编剧 / 审核三张 Persona Action Card，每张卡含一句话结论 + 优先证据 + Next Action（详见 [`09-action-lens.md`](../architecture/09-action-lens.md)）
 - [ ] 用户可在报告 / 维度 / 改写 / 场景任一处提交反馈，下一次 chat Agent 能感知该反馈并据此调整回答
 
 加分（按 §10 优先级）：

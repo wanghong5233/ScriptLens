@@ -1,6 +1,6 @@
 # ScriptLens 系统心智模型
 
-> 本文档是 [`01-requirements.md`](01-requirements.md) **UI 与 Agent 协作落地形态的最新认知**。
+> 本文档是 [`01-requirements.md`](../requirement/01-requirements.md) **UI 与 Agent 协作落地形态的最新认知**。
 > 当 PRD 的契约（schema / API / 5 维评分依据）与本文表述冲突时，**契约以 PRD 为准；交互形态与协作关系以本文为准**。
 > 本文随开发演进迭代，PRD 保持稳定。
 
@@ -63,7 +63,7 @@ type AgentTask =
   | RewriteSeedTask
   | { kind: 'dim_inquiry';      dimension; current_score }
 
-// rewrite_seed 是动作族里唯一字段较多的 kind，详见 docs/10-rewrite-agent.md §4
+// rewrite_seed 是动作族里唯一字段较多的 kind，详见 docs/architecture/10-rewrite-agent.md §4
 interface RewriteSeedTask {
   kind: 'rewrite_seed'
   dimension: 'story' | 'character' | 'concept' | 'emotion' | 'pacing'
@@ -161,7 +161,7 @@ type RewriteTaskStatus = {
 | 选项 | 结论 | 理由 |
 |---|---|---|
 | 报告作为独立路由 `/scripts/:id/report` 主入口 | ❌ 降级为「全屏阅读 / 分享 / 打印」备用 | 离开了原文 + 编辑器，证据不可点 = 不可溯源，违反 §3 数据流 |
-| 报告作为 doc-studio 右栏 tab ② 主入口 | ✅ 默认入口 | 与原文同屏，dispatchTask 能直接联动编辑器；右栏宽度可容纳决策卡 + 5 维卡 + 必读 3 场。改写候选已迁移到「行动 · 编剧」segment（详见 docs/10-rewrite-agent.md §1） |
+| 报告作为 doc-studio 右栏 tab ② 主入口 | ✅ 默认入口 | 与原文同屏，dispatchTask 能直接联动编辑器；右栏宽度可容纳决策卡 + 5 维卡 + 必读 3 场。改写候选已迁移到「行动 · 编剧」segment（详见 docs/architecture/10-rewrite-agent.md §1） |
 | 删除独立路由 | ❌ 保留 | 全屏沉浸阅读、外部分享链接仍有用；独立页里的可点元素跳回 doc-studio 带 `?task=base64(...)` 通道 |
 
 ## 10. 不做的（YAGNI 边界）
@@ -189,11 +189,11 @@ type RewriteTaskStatus = {
 
 ## 12. 相关文档
 
-- [`source/task.md`](source/task.md) · 题目原文，最高准则
-- [`01-requirements.md`](01-requirements.md) · PRD（task.md 工程化落地基线）
-- [`02-script-evaluation-rubric.md`](02-script-evaluation-rubric.md) · 5 维评分工业判据 + prompt 模板
-- [`04-script-pipeline.md`](04-script-pipeline.md) · 剧本数据流水线（上传 → 评分 → 检索 → 派发）
+- [`source/task.md`](../source/task.md) · 题目原文，最高准则
+- [`01-requirements.md`](../requirement/01-requirements.md) · PRD（task.md 工程化落地基线）
+- [`02-script-evaluation-rubric.md`](../requirement/02-script-evaluation-rubric.md) · 5 维评分工业判据 + prompt 模板
+- [`04-script-pipeline.md`](../pipeline/04-script-pipeline.md) · 剧本数据流水线（上传 → 评分 → 检索 → 派发）
 - [`05-report-architecture.md`](05-report-architecture.md) · 报告 4 segment 结构契约 + 数据契约
 - [`06-storage-architecture.md`](06-storage-architecture.md) · 存储层（PG 当前实现 + SQLite/FTS5 演进方向）
-- [`07-evaluation.md`](07-evaluation.md) · 解析质量评估方法（人工标注 + 自动指标 + 用户任务）
+- [`07-evaluation.md`](../playbook/07-evaluation.md) · 解析质量评估方法（人工标注 + 自动指标 + 用户任务）
 - [`00-reuse-matrix.md`](00-reuse-matrix.md) · ScholarMind 模块复用矩阵 + web_search 边界

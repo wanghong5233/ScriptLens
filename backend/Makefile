@@ -6,10 +6,10 @@
 #   cd ScriptLens/backend && make xxx
 #   已经 docker compose -f docker-compose.dev.yml up -d 起过栈
 #
-# 覆盖：make PROJECT=xxx logs-api  （比如换 compose project 名时）
+# 覆盖：make PROJECT=xxx logs-api  （比如临时切换 compose project 名时）
 
-# Compose project 名（默认 = compose 文件所在目录名 = backend）
-PROJECT      ?= backend
+# Compose project 名（默认与 docker-compose.dev.yml 顶层 `name: scriptlens` 对齐）
+PROJECT      ?= scriptlens
 COMPOSE_FILE ?= docker-compose.dev.yml
 DC           := docker compose -p $(PROJECT) -f $(COMPOSE_FILE)
 

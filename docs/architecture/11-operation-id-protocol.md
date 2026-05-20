@@ -47,4 +47,4 @@ ScriptLens 当前存在两类操作快照来源：
 
 ## 关联文档
 
-- `docs/12-error-codes.md`
+- `docs/playbook/12-error-codes.md`

@@ -3,8 +3,8 @@
 三个纯函数（不写库，调用方负责持久化）：
 
   1. select_target_scenes(script_id, dimensions)
-        基于 latest report 拿到每维度 score<7 的代表场（rewrite_seeds 同款逻辑），
-        按 dimension union 去重 → 形成全剧 plan 候选场列表。
+        基于 latest report 低分维度证据 + story 信号缺口（节拍/反转密度）
+        选出待改场，按 dimension union 去重 → 形成全剧 plan 候选场列表。
 
   2. propose_plan(script_id, dimensions, scenes, ...) -> RewritePlan
         单次 LLM 调用产 plan tree：每场标 target_dimensions / rationale /
@@ -24,12 +24,19 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from service.script_tools.dimension_scorer import (
+    STORY_KEY_BEATS,
+    STORY_TWIST_EVENT_TYPES,
+    STORY_TWIST_PER_EP_MID_HIGH,
+    STORY_TWIST_PER_EP_MID_LOW,
+)
 from service.script_tools.llm_caller import (
     LlmCaller,
     ModelTier,
@@ -59,6 +66,12 @@ _CHARACTERS_TOP_N = 12
 
 # plan tree 上限：太多场会撑爆 LLM 输出 + 用户也审不过来
 _MAX_PLAN_STEPS = 12
+_STORY_KEY_BEATS = STORY_KEY_BEATS
+_STORY_TWIST_HL_TYPES = set(STORY_TWIST_EVENT_TYPES)
+_STORY_TWIST_PER_EP_TARGET = {
+    "medium": STORY_TWIST_PER_EP_MID_LOW,   # 对齐 score_story mid_low 门槛（2 -> 4）
+    "high": STORY_TWIST_PER_EP_MID_HIGH,    # 对齐 score_story mid_high 门槛（4 -> 7）
+}
 
 
 # ============================================================
@@ -142,11 +155,17 @@ def select_target_scenes(
     max_scenes: int = _MAX_PLAN_STEPS,
     engine: Engine = default_engine,
 ) -> List[Dict[str, Any]]:
-    """选择需要改写的代表场（按维度 union 去重）。
+    """选择需要改写的代表场（按信号缺口驱动，而不是固定条数）。
 
     数据来源：reports.report_json.evaluation.dimensions[].evidence_ref_ids
-              → evidence_refs.scene_id。逻辑与 evaluation_chain._derive_rewrite_seed_dicts
-              一致：score < 7 的维度才算短板，每维度按 evidence_ref_ids 顺序取首场。
+              → evidence_refs.scene_id。score < 7 的维度才算短板。
+
+    设计原则（第一性）：
+      1) 先覆盖“评分证据指出的问题场”（evidence_ref_ids 全量去重）；
+      2) 对 story 维度，额外按“下一档阈值缺口”补结构位：
+         - 缺关键节拍：补对应结构位场（开场/激励/中点/高潮/收束）
+         - 反转密度不足：补“无反转集”的收束场（优先后段集）
+      3) 若候选超出 max_scenes，按“策略场 > 多维重叠场 > 分数缺口更大”裁剪。
 
     Returns:
         list of dict，每条形如：
@@ -163,6 +182,125 @@ def select_target_scenes(
     dims = [d for d in dimensions if d in _DIMENSIONS_FIVE]
     if not dims:
         return []
+
+    def _to_numeric_score(raw: Any) -> Optional[float]:
+        if isinstance(raw, bool):
+            return None
+        if isinstance(raw, (int, float)):
+            return float(raw)
+        return None
+
+    def _add_scene_candidate(
+        *,
+        per_scene: Dict[str, Dict[str, Any]],
+        scene_id: str,
+        dim: str,
+        dim_reason: str,
+        scene_hint: Optional[Dict[str, Any]] = None,
+        strategy_boost: int = 0,
+    ) -> None:
+        scene_key = str(scene_id or "").strip()
+        if not scene_key:
+            return
+        bucket = per_scene.setdefault(
+            scene_key,
+            {
+                "scene_id": scene_key,
+                "scene_label": (scene_hint or {}).get("scene_label") if scene_hint else "",
+                "episode_no": (scene_hint or {}).get("episode_no") if scene_hint else None,
+                "scene_no": (scene_hint or {}).get("scene_no") if scene_hint else None,
+                "matched_dimensions": [],
+                "dim_reasons": {},
+                "_strategy_boost": 0,
+            },
+        )
+        if dim not in bucket["matched_dimensions"]:
+            bucket["matched_dimensions"].append(dim)
+        if dim and dim_reason and (dim not in bucket["dim_reasons"] or strategy_boost > 0):
+            bucket["dim_reasons"][dim] = dim_reason
+        if strategy_boost > 0:
+            bucket["_strategy_boost"] = max(int(bucket.get("_strategy_boost") or 0), strategy_boost)
+
+    def _collect_present_beats(beat_sheet_payload: Any) -> set[str]:
+        present: set[str] = set()
+        if not isinstance(beat_sheet_payload, dict):
+            return present
+        for act in beat_sheet_payload.get("acts") or []:
+            if not isinstance(act, dict):
+                continue
+            for beat in act.get("beats") or []:
+                if not isinstance(beat, dict):
+                    continue
+                beat_type = str(beat.get("type") or "").strip()
+                anchor = str(beat.get("anchor_scene_id") or "").strip()
+                if beat_type in _STORY_KEY_BEATS and anchor:
+                    present.add(beat_type)
+        return present
+
+    def _pick_structure_scene_ids(
+        missing_beats: List[str],
+        ordered_scene_rows: List[Dict[str, Any]],
+    ) -> List[str]:
+        if not ordered_scene_rows:
+            return []
+        ids = [str(row.get("id") or "") for row in ordered_scene_rows if str(row.get("id") or "").strip()]
+        if not ids:
+            return []
+        # 优先按“集边界”取结构位：解释成本更低，比纯百分位更贴合短剧阅读节奏。
+        episode_to_scene_ids: Dict[int, List[str]] = {}
+        for row in ordered_scene_rows:
+            sid = str(row.get("id") or "").strip()
+            ep_raw = row.get("episode_no")
+            if not sid or not isinstance(ep_raw, int):
+                continue
+            episode_to_scene_ids.setdefault(int(ep_raw), []).append(sid)
+
+        beat_to_scene_id: Dict[str, str] = {}
+        if episode_to_scene_ids:
+            eps = sorted(episode_to_scene_ids.keys())
+            first_ep = eps[0]
+            mid_ep = eps[len(eps) // 2]
+            last_ep = eps[-1]
+            climax_ep = eps[-2] if len(eps) >= 3 else eps[-1]
+            beat_to_scene_id = {
+                "opening": episode_to_scene_ids[first_ep][0],
+                "inciting": episode_to_scene_ids[first_ep][-1],
+                "midpoint": episode_to_scene_ids[mid_ep][-1],
+                "climax": episode_to_scene_ids[climax_ep][-1],
+                "closing": episode_to_scene_ids[last_ep][-1],
+            }
+        else:
+            n = len(ids)
+            beat_to_index = {
+                "opening": 0,
+                "inciting": max(0, min(n - 1, int(math.floor(n * 0.12)))),
+                "midpoint": max(0, min(n - 1, int(math.floor(n * 0.5)))),
+                "climax": max(0, min(n - 1, int(math.floor(n * 0.82)))),
+                "closing": n - 1,
+            }
+            beat_to_scene_id = {
+                beat: ids[idx] for beat, idx in beat_to_index.items()
+            }
+        out: List[str] = []
+        seen: set[str] = set()
+        for beat in missing_beats:
+            sid = beat_to_scene_id.get(beat)
+            if sid and sid not in seen:
+                seen.add(sid)
+                out.append(sid)
+        return out
+
+    def _episode_last_scene_ids(ordered_scene_rows: List[Dict[str, Any]]) -> Dict[int, str]:
+        out: Dict[int, str] = {}
+        for row in ordered_scene_rows:
+            ep_raw = row.get("episode_no")
+            if not isinstance(ep_raw, int):
+                continue
+            sid = str(row.get("id") or "").strip()
+            if not sid:
+                continue
+            out[int(ep_raw)] = sid
+        return out
 
     with engine.connect() as conn:
         report_row = conn.execute(
@@ -202,63 +340,155 @@ def select_target_scenes(
             str(ref.get("id")): ref for ref in evidence_refs if ref.get("id")
         }
 
+        scripts_meta = conn.execute(
+            text(
+                """
+                SELECT COALESCE(total_episodes, 0) AS total_episodes
+                FROM scriptlens.scripts
+                WHERE id = :sid
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().first() or {}
+        total_episodes = int(scripts_meta.get("total_episodes") or 0)
+
+        all_scene_rows = conn.execute(
+            text(
+                """
+                SELECT id::text AS id, episode_no, scene_no, scene_label, text
+                FROM scriptlens.scenes
+                WHERE script_id = :sid
+                ORDER BY episode_no NULLS LAST, scene_no, start_line
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().all()
+        scene_full_map: Dict[str, Dict[str, Any]] = {str(row["id"]): dict(row) for row in all_scene_rows}
+        scene_order_index: Dict[str, int] = {
+            str(row["id"]): idx for idx, row in enumerate(all_scene_rows)
+        }
+
         per_scene: Dict[str, Dict[str, Any]] = {}
+        dim_score_map: Dict[str, Optional[float]] = {}
         for entry in eval_dims:
             dim = str(entry.get("key") or entry.get("dimension") or "")
             if dim not in dims:
                 continue
-            score = entry.get("score")
-            if score is None or (isinstance(score, (int, float)) and score >= 7):
+            score_num = _to_numeric_score(entry.get("score"))
+            dim_score_map[dim] = score_num
+            if score_num is None or score_num >= 7:
                 continue
             ref_ids = entry.get("evidence_ref_ids") or []
             if not isinstance(ref_ids, list) or not ref_ids:
                 continue
             reason_first = _first_sentence(str(entry.get("reason") or ""))
 
-            for ref_id in ref_ids[:3]:
+            for ref_id in ref_ids:
                 evi = evi_by_id.get(str(ref_id))
                 if evi is None:
                     continue
                 scene_id = str(evi.get("scene_id") or "")
                 if not scene_id:
                     continue
-                bucket = per_scene.setdefault(
-                    scene_id,
-                    {
-                        "scene_id": scene_id,
-                        "scene_label": evi.get("scene_label") or "",
-                        "episode_no": evi.get("episode_no"),
-                        "scene_no": evi.get("scene_no"),
-                        "matched_dimensions": [],
-                        "dim_reasons": {},
-                    },
+                _add_scene_candidate(
+                    per_scene=per_scene,
+                    scene_id=scene_id,
+                    dim=dim,
+                    dim_reason=reason_first,
+                    scene_hint=evi,
                 )
-                if dim not in bucket["matched_dimensions"]:
-                    bucket["matched_dimensions"].append(dim)
-                    bucket["dim_reasons"][dim] = reason_first
-                break
+
+        # story 维度的“信号缺口驱动”补场：
+        # - 结构缺口：缺哪个 beat 就补哪个结构位
+        # - 密度缺口：按“到下一档阈值还差多少反转”补无反转集的收束场
+        if "story" in dims:
+            story_entry = next(
+                (
+                    item for item in eval_dims
+                    if str(item.get("key") or item.get("dimension") or "").strip() == "story"
+                ),
+                None,
+            )
+            story_score = _to_numeric_score((story_entry or {}).get("score"))
+            if story_score is not None and story_score < 7 and all_scene_rows:
+                beat_sheet_payload = payload.get("beat_sheet") or {}
+                present_beats = _collect_present_beats(beat_sheet_payload)
+                missing_beats = [beat for beat in _STORY_KEY_BEATS if beat not in present_beats]
+
+                highlights = payload.get("highlights") or []
+                twist_scene_ids: set[str] = set()
+                if isinstance(highlights, list):
+                    for hl in highlights:
+                        if not isinstance(hl, dict):
+                            continue
+                        hl_type = str(hl.get("type") or "").strip()
+                        sid = str(hl.get("scene_id") or "").strip()
+                        if hl_type in _STORY_TWIST_HL_TYPES and sid:
+                            twist_scene_ids.add(sid)
+
+                if total_episodes <= 0:
+                    episodes_seen = {
+                        int(row["episode_no"])
+                        for row in all_scene_rows
+                        if isinstance(row.get("episode_no"), int)
+                    }
+                    total_episodes = len(episodes_seen)
+                total_episodes = max(1, total_episodes)
+
+                next_band = "medium" if story_score < 4 else "high"
+                target_ratio = _STORY_TWIST_PER_EP_TARGET[next_band]
+                required_twists = int(math.ceil(target_ratio * total_episodes))
+                missing_twists = max(0, required_twists - len(twist_scene_ids))
+
+                structure_scene_ids = _pick_structure_scene_ids(missing_beats, [dict(r) for r in all_scene_rows])
+                for sid in structure_scene_ids:
+                    _add_scene_candidate(
+                        per_scene=per_scene,
+                        scene_id=sid,
+                        dim="story",
+                        dim_reason=f"补关键节拍（缺 {','.join(missing_beats)}）",
+                        scene_hint=scene_full_map.get(sid),
+                        strategy_boost=30,
+                    )
+
+                if missing_twists > 0:
+                    episode_to_last_scene = _episode_last_scene_ids([dict(r) for r in all_scene_rows])
+                    scene_to_episode: Dict[str, int] = {}
+                    for row in all_scene_rows:
+                        sid = str(row.get("id") or "").strip()
+                        ep = row.get("episode_no")
+                        if sid and isinstance(ep, int):
+                            scene_to_episode[sid] = int(ep)
+                    twist_episodes = {
+                        scene_to_episode[sid]
+                        for sid in twist_scene_ids
+                        if sid in scene_to_episode
+                    }
+                    all_episodes_sorted = sorted(episode_to_last_scene.keys(), reverse=True)
+                    no_twist_episodes = [ep for ep in all_episodes_sorted if ep not in twist_episodes]
+                    for ep in no_twist_episodes[:missing_twists]:
+                        sid = episode_to_last_scene.get(ep)
+                        if not sid:
+                            continue
+                        _add_scene_candidate(
+                            per_scene=per_scene,
+                            scene_id=sid,
+                            dim="story",
+                            dim_reason=(
+                                f"补反转密度（当前 {len(twist_scene_ids)}/{total_episodes}，"
+                                f"下一档需至少 {required_twists}）"
+                            ),
+                            scene_hint=scene_full_map.get(sid),
+                            strategy_boost=20,
+                        )
 
         if not per_scene:
             return []
 
-        scene_ids = list(per_scene.keys())
-        scene_rows = conn.execute(
-            text(
-                """
-                SELECT id::text AS id, episode_no, scene_no, scene_label, text
-                FROM scriptlens.scenes
-                WHERE script_id = :sid AND id::text = ANY(:ids)
-                """
-            ),
-            {"sid": script_id, "ids": scene_ids},
-        ).mappings().all()
-
-        scene_text_map = {row["id"]: dict(row) for row in scene_rows}
-
     out: List[Dict[str, Any]] = []
-    for sid in scene_ids:
+    for sid in per_scene.keys():
         bucket = per_scene[sid]
-        sc = scene_text_map.get(sid)
+        sc = scene_full_map.get(sid)
         if sc is None:
             # report 引用了但 scene 已删 —— 跳过，警告下，不让 plan 整体崩
             logger.warning("rewrite plan: scene_id=%s not found in scenes table", sid)
@@ -272,11 +502,33 @@ def select_target_scenes(
             bucket["scene_no"] = sc.get("scene_no")
         out.append(bucket)
 
-    out.sort(key=lambda b: (
-        b.get("episode_no") if b.get("episode_no") is not None else 9999,
-        str(b.get("scene_no") or ""),
-    ))
-    return out[:max_scenes]
+    # 候选超限时，按“策略补场 > 多维重叠 > 维度缺口更大”优先，再回到剧本顺序。
+    def _scene_priority(item: Dict[str, Any]) -> float:
+        strategy_boost = int(item.get("_strategy_boost") or 0)
+        matched_dims = [str(dim) for dim in item.get("matched_dimensions") or []]
+        dim_overlap = len(set(matched_dims))
+        gap_score = 0.0
+        for dim in matched_dims:
+            dim_score = dim_score_map.get(dim)
+            if dim_score is None:
+                gap_score += 2.0
+            else:
+                gap_score += max(0.0, 7.0 - float(dim_score))
+        return float(strategy_boost) + dim_overlap * 8.0 + gap_score
+
+    out.sort(
+        key=lambda item: (
+            -_scene_priority(item),
+            scene_order_index.get(str(item.get("scene_id") or ""), 10**9),
+        )
+    )
+    trimmed = out[:max_scenes]
+    trimmed.sort(
+        key=lambda b: scene_order_index.get(str(b.get("scene_id") or ""), 10**9)
+    )
+    for item in trimmed:
+        item.pop("_strategy_boost", None)
+    return trimmed
 
 
 # ============================================================

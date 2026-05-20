@@ -1,12 +1,12 @@
 # ScriptLens 存储架构
 
-> 本文是 ScriptLens 数据持久化层的**存储契约 + 演进方向**。最高准则是 [`source/task.md`](source/task.md)。
+> 本文是 ScriptLens 数据持久化层的**存储契约 + 演进方向**。最高准则是 [`source/task.md`](../source/task.md)。
 > 当前实现保留 PostgreSQL（与 ScholarMind compose 共部署）；SQLite + FTS5 为未来优化点，触发条件见 §6。
-> 与 [`04-script-pipeline.md`](04-script-pipeline.md) 三角：04 = 数据流 / 阶段；本文 = 存储介质 / 索引 / 检索。
+> 与 [`04-script-pipeline.md`](../pipeline/04-script-pipeline.md) 三角：04 = 数据流 / 阶段；本文 = 存储介质 / 索引 / 检索。
 
 ## 1. 现状
 
-ScriptLens 持久化层走 **PostgreSQL**（独立 schema `scriptlens`），与 ScholarMind 共享 compose。检索路径是 `scenes.text` 上的 GIN + `to_tsvector('simple')` 一级、jieba 关键词兜底、LLM metadata 二级兜底。无 embedding（[`04-script-pipeline.md §6`](04-script-pipeline.md)）。
+ScriptLens 持久化层走 **PostgreSQL**（独立 schema `scriptlens`），与 ScholarMind 共享 compose。检索路径是 `scenes.text` 上的 GIN + `to_tsvector('simple')` 一级、jieba 关键词兜底、LLM metadata 二级兜底。无 embedding（[`04-script-pipeline.md §6`](../pipeline/04-script-pipeline.md)）。
 
 ```
 ┌────────────────────────────────────────────────────┐
@@ -50,7 +50,7 @@ ingestion_service  report_service  rag_service
 | 当前检索质量 | PG `simple` tokenizer 对中文长串不稳，但角色名/场号/关键词可通过 jieba ILIKE 兜底 | 本期加 Agent 端 jieba 关键词兜底，不改 schema |
 | SQLite 收益 | 单文件部署 + FTS5 自定义 tokenizer 简洁 | 作为未来优化点保留 |
 | SQLite 代价 | 15+ 文件有 `scriptlens.X` / `s.id::text` / `to_tsvector` / `ANY(characters)` / JSONB 等 PG-only SQL | 本期不切，避免 1-1.5 天偏离 task.md 主线 |
-| Embedding | 已删除（[`04-script-pipeline.md §6`](04-script-pipeline.md)） | 不再制约存储选型 |
+| Embedding | 已删除（[`04-script-pipeline.md §6`](../pipeline/04-script-pipeline.md)） | 不再制约存储选型 |
 
 ## 4. 检索契约（当前 PG 实现）
 
@@ -126,8 +126,8 @@ BM25 + keyword 都 miss 时，把全剧 scene metadata（scene_id / scene_no / s
 **触发判断以运行时指标为准，不在无数据时提前决策。**
 # ScriptLens 存储架构
 
-> 本文是 ScriptLens 数据持久化层的**存储契约**。最高准则是 [`source/task.md`](source/task.md)。
-> 与 [`04-script-pipeline.md`](04-script-pipeline.md) 三角：04 = 数据流 / 阶段；本文 = 存储介质 / 索引 / 检索。
+> 本文是 ScriptLens 数据持久化层的**存储契约**。最高准则是 [`source/task.md`](../source/task.md)。
+> 与 [`04-script-pipeline.md`](../pipeline/04-script-pipeline.md) 三角：04 = 数据流 / 阶段；本文 = 存储介质 / 索引 / 检索。
 
 ## 1. 现状
 
@@ -181,7 +181,7 @@ ScriptLens 持久化层走 **SQLite + FTS5 (jieba tokenizer)**，单文件部署
 | ACID 与崩溃恢复 | 单文件 + WAL 模式提供完整 ACID + 崩溃自动恢复 | 与 PG 等价 |
 | jsonb 支持 | SQLite 3.45+ 提供 `jsonb1` 扩展（jsonb 二进制存储 + 索引） | report_payload 仍可走 jsonb，不损失能力 |
 | 备份 / 迁移 / 演示 | PG: pg_dump → restore；SQLite: 拷贝 .db 文件 | take-home 演示场景下 SQLite 让评审 5 秒拿到完整数据 |
-| Embedding | 已删除（[`04-script-pipeline.md §6`](04-script-pipeline.md)） | SQLite 无 vector 扩展不再是限制 |
+| Embedding | 已删除（[`04-script-pipeline.md §6`](../pipeline/04-script-pipeline.md)） | SQLite 无 vector 扩展不再是限制 |
 
 ## 4. FTS5 + jieba 接入契约
 
@@ -251,6 +251,6 @@ LIMIT :top_k;
 
 ## 7. 与既有文档的关系
 
-- [`04-script-pipeline.md`](04-script-pipeline.md) §3 `ScriptDbWriter.write()` 仍是数据落点入口；本文换的是底层引擎与索引实现，pipeline 不变
+- [`04-script-pipeline.md`](../pipeline/04-script-pipeline.md) §3 `ScriptDbWriter.write()` 仍是数据落点入口；本文换的是底层引擎与索引实现，pipeline 不变
 - [`05-report-architecture.md §5`](05-report-architecture.md#5-数据契约) `ReportPayload` 写入 `reports.report_payload` 字段（jsonb），SQLite jsonb1 扩展无差别
-- [`01-requirements.md §11`](01-requirements.md#11-非目标) 「不做多用户协作权限」与本文 SQLite 单写选择一致
+- [`01-requirements.md §11`](../requirement/01-requirements.md#11-非目标) 「不做多用户协作权限」与本文 SQLite 单写选择一致
