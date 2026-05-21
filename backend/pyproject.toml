@@ -1,0 +1,23 @@
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["app"]
+
+[tool.ruff.lint]
+select = [
+  "E",
+  "F",
+  "W",
+  "I",
+  "UP",
+  "B",
+  "PLR",
+]
+ignore = [
+  "PLR0913",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"app/core/config.py" = ["PLR2004"]
+"app/service/core/ingestion/constants.py" = ["PLR2004"]
+

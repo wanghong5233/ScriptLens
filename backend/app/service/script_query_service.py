@@ -9,8 +9,9 @@
 from __future__ import annotations
 
 import logging
+import json
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -51,7 +52,7 @@ def get_script_detail(*, script_id: str, user_id: int, engine: Engine = default_
                 """
                 SELECT id::text AS id, title, source_format, status,
                        total_episodes, total_scenes, total_chars,
-                       failure_reason, created_at, updated_at
+                       failure_reason, workspace_config, created_at, updated_at
                 FROM scriptlens.scripts
                 WHERE id = :sid AND user_id = :uid
                 """
@@ -60,7 +61,13 @@ def get_script_detail(*, script_id: str, user_id: int, engine: Engine = default_
         ).mappings().first()
     if not row:
         raise ScriptNotFoundError(script_id)
-    return dict(row)
+    payload = dict(row)
+    raw_config = payload.get("workspace_config")
+    if isinstance(raw_config, dict):
+        payload["workspace_config"] = raw_config
+    else:
+        payload["workspace_config"] = {}
+    return payload
 
 
 def get_script_status(*, script_id: str, user_id: int, engine: Engine = default_engine) -> tuple[str, Optional[str]]:
@@ -184,3 +191,52 @@ def update_scene_text(
         )
 
     return {"scene_id": scene_id, "char_count": len(content), "previous_text": previous_text}
+
+
+def update_script_workspace(
+    *,
+    script_id: str,
+    user_id: int,
+    title: Optional[str] = None,
+    config: Optional[Dict[str, Any]] = None,
+    engine: Engine = default_engine,
+) -> dict:
+    next_title = (title or "").strip() or None
+    next_config = config if isinstance(config, dict) else None
+    with engine.begin() as conn:
+        row = conn.execute(
+            text(
+                """
+                SELECT title, workspace_config
+                FROM scriptlens.scripts
+                WHERE id = :sid AND user_id = :uid
+                """
+            ),
+            {"sid": script_id, "uid": user_id},
+        ).mappings().first()
+        if not row:
+            raise ScriptNotFoundError(script_id)
+        merged_config: Dict[str, Any] = {}
+        current_config = row.get("workspace_config")
+        if isinstance(current_config, dict):
+            merged_config.update(current_config)
+        if next_config is not None:
+            merged_config.update(next_config)
+        conn.execute(
+            text(
+                """
+                UPDATE scriptlens.scripts
+                SET title = :title,
+                    workspace_config = CAST(:workspace_config AS JSONB),
+                    updated_at = now()
+                WHERE id = :sid AND user_id = :uid
+                """
+            ),
+            {
+                "sid": script_id,
+                "uid": user_id,
+                "title": next_title or row["title"],
+                "workspace_config": json.dumps(merged_config, ensure_ascii=False),
+            },
+        )
+    return get_script_detail(script_id=script_id, user_id=user_id, engine=engine)

@@ -32,6 +32,7 @@ export interface ChatStreamArgs {
   history?: Array<{ role: 'user' | 'assistant'; content: string }>
   role?: string
   context?: Record<string, any>
+  sessionId?: string | null
 }
 
 const pendingArgs = new Map<string, ChatStreamArgs>()
@@ -141,6 +142,11 @@ export class ScriptLensAgentStream {
       history: args.history ?? [],
       role: args.role ?? 'general',
       context: args.context ?? undefined,
+      session_id:
+        args.sessionId ||
+        args.context?.session_id ||
+        args.context?.sessionId ||
+        null,
     }
 
     let response: Response

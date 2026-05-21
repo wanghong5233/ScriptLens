@@ -47,6 +47,7 @@ from agent_runtime.factory import (
 from core.config import settings
 from models.user import User
 from schemas.script import (
+    ApiError,
     FeedbackItem,
     FeedbackListResponse,
     FeedbackRequest,
@@ -71,6 +72,7 @@ from schemas.script import (
     ScriptListItem,
     ScriptScenesResponse,
     ScriptUploadResponse,
+    ScriptWorkspaceUpdateRequest,
     ViewResponse,
 )
 from service.auth import get_current_user
@@ -92,6 +94,7 @@ from service.script_query_service import (
     get_script_status,
     list_scenes,
     list_user_scripts,
+    update_script_workspace,
     update_scene_text,
 )
 from service.script_report_service import generate_report
@@ -272,6 +275,154 @@ def get_script(
             "剧本不存在或无权限访问",
         )
     return ScriptDetail(**row)
+
+
+@router.patch(
+    "/{script_id}",
+    response_model=ScriptDetail,
+    responses={400: {"model": ApiError}, 404: {"model": ApiError}},
+    summary="更新剧本工作区元数据（title/config）",
+)
+def patch_script_workspace(
+    script_id: str,
+    payload: ScriptWorkspaceUpdateRequest,
+    current_user: User = Depends(get_current_user),
+) -> ScriptDetail:
+    try:
+        row = update_script_workspace(
+            script_id=script_id,
+            user_id=current_user.id,
+            title=payload.title,
+            config=payload.config,
+        )
+    except ScriptNotFoundError:
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "鍓ф湰涓嶅瓨鍦ㄦ垨鏃犳潈闄愯闂?",
+        )
+    except ValueError as exc:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "INVALID_WORKSPACE_CONFIG",
+            str(exc),
+        )
+    return ScriptDetail(**row)
+
+
+@router.get(
+    "/{script_id}/messages",
+    summary="分页获取工作区绑定会话的消息历史",
+    responses={400: {"model": ApiError}, 404: {"model": ApiError}},
+)
+def list_script_workspace_messages(
+    script_id: str,
+    session_id: str,
+    page: int = 1,
+    page_size: int = 200,
+    current_user: User = Depends(get_current_user),
+):
+    if page < 1:
+        page = 1
+    page_size = max(1, min(page_size, 500))
+    try:
+        row = get_script_detail(script_id=script_id, user_id=current_user.id)
+    except ScriptNotFoundError:
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "鍓ф湰涓嶅瓨鍦ㄦ垨鏃犳潈闄愯闂?",
+        )
+
+    cfg = row.get("workspace_config") if isinstance(row, dict) else {}
+    bound_session_id = _parse_script_workspace_session_id(
+        (cfg or {}).get("session_id")
+    )
+    if not bound_session_id:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "SESSION_NOT_BOUND",
+            "宸ヤ綔鍖烘湭缁戝畾浼氳瘽",
+        )
+    req_session_id = _parse_script_workspace_session_id(session_id)
+    if req_session_id != bound_session_id:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "SESSION_MISMATCH",
+            "璇锋眰 session_id 涓庡綋鍓嶅伐浣滃尯缁戝畾浼氳瘽涓嶄竴鑷?",
+        )
+
+    with default_engine.connect() as conn:
+        session_row = conn.execute(
+            text(
+                """
+                SELECT session_id, user_id, surface
+                FROM public.sessions
+                WHERE session_id = :session_id
+                """
+            ),
+            {"session_id": req_session_id},
+        ).first()
+        if session_row is None:
+            _raise_api_error(
+                status.HTTP_404_NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "浼氳瘽涓嶅瓨鍦?",
+            )
+        if str(session_row.user_id) != str(current_user.id):
+            _raise_api_error(
+                status.HTTP_403_FORBIDDEN,
+                "SESSION_FORBIDDEN",
+                "鏃犳潈璁块棶璇ヤ細璇?",
+            )
+        if str(session_row.surface or "").strip() != "doc_studio":
+            _raise_api_error(
+                status.HTTP_400_BAD_REQUEST,
+                "INVALID_SESSION_SURFACE",
+                "浼氳瘽 surface 蹇呴』涓?doc_studio",
+            )
+
+        total = conn.execute(
+            text(
+                """
+                SELECT count(1)
+                FROM public.messages
+                WHERE session_id = :session_id
+                """
+            ),
+            {"session_id": req_session_id},
+        ).scalar() or 0
+
+        rows = conn.execute(
+            text(
+                """
+                SELECT message_id::text AS message_id,
+                       session_id,
+                       user_question,
+                       model_answer,
+                       create_time,
+                       retrieval_content
+                FROM public.messages
+                WHERE session_id = :session_id
+                ORDER BY create_time ASC, message_id ASC
+                OFFSET :offset
+                LIMIT :limit
+                """
+            ),
+            {
+                "session_id": req_session_id,
+                "offset": (page - 1) * page_size,
+                "limit": page_size,
+            },
+        ).mappings().all()
+
+    items = [dict(item) for item in rows]
+    return {
+        "total": int(total),
+        "page": int(page),
+        "pageSize": int(page_size),
+        "items": items,
+    }
 
 
 @router.delete(
@@ -641,6 +792,150 @@ def _raise_operation_http_error(msg: str) -> None:
     )
 
 
+def _parse_script_workspace_session_id(value: Any) -> str | None:
+    text_value = str(value or "").strip()
+    return text_value or None
+
+
+def _extract_final_agent_reply(raw_result: Dict[str, Any]) -> str:
+    finish_reply = ""
+    history = raw_result.get("execution_history")
+    if isinstance(history, list):
+        for step in reversed(history):
+            if not isinstance(step, dict):
+                continue
+            if str(step.get("type") or "").strip().lower() != "finish":
+                continue
+            content = str(step.get("content") or "").strip()
+            if content:
+                finish_reply = content
+                break
+            result_payload = step.get("result")
+            if isinstance(result_payload, dict):
+                reply = str(result_payload.get("reply") or "").strip()
+                if reply:
+                    finish_reply = reply
+                    break
+    if finish_reply:
+        return finish_reply
+    return ""
+
+
+def _build_retrieval_content_payload(
+    *,
+    script_id: str,
+    session_id: str,
+    role: str,
+    context: Dict[str, Any],
+    raw_result: Dict[str, Any],
+) -> str | None:
+    payload: Dict[str, Any] = {
+        "source": "scriptlens_chat",
+        "workspace_id": script_id,
+        "script_id": script_id,
+        "session_id": session_id,
+        "role": role,
+        "trace_id": raw_result.get("trace_id"),
+        "run_id": raw_result.get("operation_id"),
+        "operation_id": raw_result.get("operation_id"),
+    }
+    if isinstance(context, dict):
+        if isinstance(context.get("image_attachments"), list):
+            payload["images"] = context.get("image_attachments")
+        if isinstance(context.get("selections"), list):
+            payload["selections"] = context.get("selections")
+        elif isinstance(context.get("selection"), dict):
+            payload["selections"] = [context.get("selection")]
+        if isinstance(context.get("file_mentions"), list):
+            payload["file_mentions"] = context.get("file_mentions")
+        file_path = str(context.get("file_path") or "").strip()
+        if file_path:
+            payload["file_path"] = file_path
+    try:
+        return json.dumps(payload, ensure_ascii=False)
+    except Exception:
+        return None
+
+
+def _persist_chat_message(
+    *,
+    script_id: str,
+    user_id: int,
+    session_id: str,
+    question: str,
+    answer: str,
+    retrieval_content: str | None,
+) -> str | None:
+    if not answer.strip():
+        return None
+    with default_engine.begin() as conn:
+        script_row = conn.execute(
+            text(
+                """
+                SELECT user_id
+                FROM scriptlens.scripts
+                WHERE id = :sid
+                """
+            ),
+            {"sid": script_id},
+        ).first()
+        if script_row is None:
+            raise ScriptNotFoundError(script_id)
+        if int(script_row.user_id) != int(user_id):
+            _raise_api_error(
+                status.HTTP_403_FORBIDDEN,
+                "SCRIPT_FORBIDDEN",
+                "鏃犳潈璁块棶璇ュ墽鏈?",
+            )
+        session_row = conn.execute(
+            text(
+                """
+                SELECT session_id, user_id, surface
+                FROM public.sessions
+                WHERE session_id = :session_id
+                """
+            ),
+            {"session_id": session_id},
+        ).first()
+        if session_row is None:
+            _raise_api_error(
+                status.HTTP_404_NOT_FOUND,
+                "SESSION_NOT_FOUND",
+                "浼氳瘽涓嶅瓨鍦?",
+            )
+        if str(session_row.user_id) != str(user_id):
+            _raise_api_error(
+                status.HTTP_403_FORBIDDEN,
+                "SESSION_FORBIDDEN",
+                "鏃犳潈璁块棶璇ヤ細璇?",
+            )
+        if str(session_row.surface or "").strip() != "doc_studio":
+            _raise_api_error(
+                status.HTTP_400_BAD_REQUEST,
+                "INVALID_SESSION_SURFACE",
+                "浼氳瘽 surface 蹇呴』涓?doc_studio",
+            )
+        message_id = conn.execute(
+            text(
+                """
+                INSERT INTO public.messages (
+                    session_id, user_question, model_answer, retrieval_content
+                ) VALUES (
+                    :session_id, :user_question, :model_answer, :retrieval_content
+                )
+                RETURNING message_id::text
+                """
+            ),
+            {
+                "session_id": session_id,
+                "user_question": question,
+                "model_answer": answer,
+                "retrieval_content": retrieval_content,
+            },
+        ).scalar()
+    return str(message_id) if message_id else None
+
+
 @router.post(
     "/{script_id}/chat",
     summary="多轮追问 ReAct Agent（SSE 流）",
@@ -656,6 +951,31 @@ async def chat_with_script(
     body: ScriptChatRequest,
     current_user: User = Depends(get_current_user),
 ):
+    try:
+        script_row = get_script_detail(script_id=script_id, user_id=current_user.id)
+    except ScriptNotFoundError:
+        _raise_api_error(
+            status.HTTP_404_NOT_FOUND,
+            "SCRIPT_NOT_FOUND",
+            "鍓ф湰涓嶅瓨鍦ㄦ垨鏃犳潈闄愯闂?",
+        )
+    bound_session_id = _parse_script_workspace_session_id(
+        (script_row.get("workspace_config") or {}).get("session_id")
+    )
+    session_id = _parse_script_workspace_session_id(body.session_id) or bound_session_id
+    if session_id is None:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "SESSION_ID_REQUIRED",
+            "chat 蹇呴』鎻愪緵 session_id 鎴栦簨鍏堢粦瀹?workspace_config.session_id",
+        )
+    if bound_session_id and session_id != bound_session_id:
+        _raise_api_error(
+            status.HTTP_400_BAD_REQUEST,
+            "SESSION_MISMATCH",
+            "chat session_id 涓庡綋鍓嶅伐浣滃尯缁戝畾浼氳瘽涓嶄竴鑷?",
+        )
+
     try:
         s_status, _ = get_script_status(script_id=script_id, user_id=current_user.id)
     except ScriptNotFoundError:
@@ -687,6 +1007,7 @@ async def chat_with_script(
     # script_id / role 由路由层强约束，禁止被客户端 context 覆盖。
     context_payload["script_id"] = script_id
     context_payload["role"] = body.role
+    context_payload["session_id"] = session_id
     agent = build_chat_agent(script_id=script_id)
     queue: asyncio.Queue = asyncio.Queue()
     sentinel: Tuple[str, Dict[str, Any]] = ("__END__", {})
@@ -727,6 +1048,34 @@ async def chat_with_script(
                 "intent_confidence": raw_result.get("intent_confidence"),
                 "runtime_model": raw_result.get("runtime_model"),
             }
+            try:
+                answer = _extract_final_agent_reply(raw_result)
+                retrieval_content = _build_retrieval_content_payload(
+                    script_id=script_id,
+                    session_id=session_id,
+                    role=body.role,
+                    context=context_payload,
+                    raw_result=raw_result,
+                )
+                message_id = _persist_chat_message(
+                    script_id=script_id,
+                    user_id=current_user.id,
+                    session_id=session_id,
+                    question=body.question,
+                    answer=answer,
+                    retrieval_content=retrieval_content,
+                )
+                if message_id:
+                    result_payload["message_id"] = message_id
+            except HTTPException:
+                raise
+            except Exception:
+                logger.exception(
+                    "chat persistence failed script_id=%s session_id=%s",
+                    script_id,
+                    session_id,
+                )
+                raise
             # 兼容 doc-studio async 事件名（result），payload 结构与其一致：{ result: {...} }。
             await queue.put(("result", {"result": result_payload}))
             # 保留 ScriptLens 现有 complete 事件，避免破坏旧客户端。

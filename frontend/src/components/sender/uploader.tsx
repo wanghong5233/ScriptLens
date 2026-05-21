@@ -1,8 +1,8 @@
 import { PaperClipOutlined } from '@ant-design/icons'
 import { Button, Upload } from 'antd'
+import { BYTES_PER_MB, MAX_UPLOAD_SIZE_MB } from '../../constants/numbers'
 
 const ACCEPT = ['pdf', 'doc', 'docx', 'txt']
-const LIMIT = 200  // 单文件最大 200MB，支持大型文档
 
 export default function Uploader(props: {
   onFileSelected: (file: File) => void
@@ -15,7 +15,6 @@ export default function Uploader(props: {
       maxCount={1}
       accept={ACCEPT.map((item) => `.${item}`).join(',')}
       beforeUpload={(file) => {
-        // 检查后缀名
         const ext = file.name?.split('.')?.pop()?.toLowerCase() ?? ''
         const isAccept = ACCEPT.includes(ext)
         if (!isAccept) {
@@ -23,17 +22,15 @@ export default function Uploader(props: {
           return Upload.LIST_IGNORE
         }
 
-        // 文件大小限制
-        const isLimit = file.size <= LIMIT * 1024 * 1024
+        const isLimit = file.size <= MAX_UPLOAD_SIZE_MB * BYTES_PER_MB
         if (!isLimit) {
-          window.$app.message.error(`文件大小不能超过${LIMIT}M`)
+          window.$app.message.error(`文件大小不能超过 ${MAX_UPLOAD_SIZE_MB}MB`)
           return Upload.LIST_IGNORE
         }
 
-        // 仅将文件传递给父组件，不上传
         onFileSelected(file)
         window.$app.message.success('文件已添加')
-        return false // 阻止自动上传
+        return false
       }}
     >
       <Button

@@ -1,5 +1,10 @@
 import { AxiosRequestConfig } from 'axios'
 import { request } from './request'
+import {
+  DEFAULT_PAGE_NUMBER,
+  DEFAULT_PAGE_SIZE,
+  DEFAULT_REPLAY_SINCE_SEQ,
+} from '../constants/numbers'
 
 export function list(
   params?: {
@@ -47,7 +52,11 @@ export function listMessages(
   },
   options?: AxiosRequestConfig,
 ) {
-  const { sessionId, page = 1, pageSize = 100 } = params
+  const {
+    sessionId,
+    page = DEFAULT_PAGE_NUMBER,
+    pageSize = DEFAULT_PAGE_SIZE,
+  } = params
   return request.get<{
     total: number
     page: number
@@ -191,7 +200,7 @@ export function chatReplay(
   },
   options?: AxiosRequestConfig,
 ) {
-  const { id, runId, sinceSeq = -1 } = params
+  const { id, runId, sinceSeq = DEFAULT_REPLAY_SINCE_SEQ } = params
   return request.get<ReadableStream>(
     `sessions/${id}/ask/replay/${runId}`,
     {

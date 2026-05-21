@@ -21,6 +21,7 @@
 import { AxiosRequestConfig } from 'axios'
 import { getApiBase } from './env'
 import { request } from './request'
+import { DEFAULT_SCRIPT_FEEDBACK_LIMIT } from '../constants/numbers'
 import {
   ScriptLensAgentStream,
   openScriptLensAgentStream,
@@ -54,6 +55,7 @@ type ScriptDetailDTO = {
   total_scenes?: number | null
   total_chars?: number | null
   failure_reason?: string | null
+  workspace_config?: Record<string, any> | null
   created_at: string
   updated_at: string
 }
@@ -593,6 +595,10 @@ function scenesToFileTree(scenes: SceneItemDTO[]): DocStudioAPI.FileNode[] {
 }
 
 function detailToWorkspace(d: ScriptDetailDTO): DocStudioAPI.WorkspaceDetail {
+  const workspaceConfig =
+    d.workspace_config && typeof d.workspace_config === 'object'
+      ? d.workspace_config
+      : {}
   return {
     workspaceId: d.id,
     name: d.title,
@@ -600,6 +606,7 @@ function detailToWorkspace(d: ScriptDetailDTO): DocStudioAPI.WorkspaceDetail {
     fileCount: d.total_scenes ?? 0,
     updatedAt: toUnixMs(d.updated_at),
     config: {
+      ...workspaceConfig,
       title: d.title,
       source_format: d.source_format,
       status: d.status,
@@ -684,23 +691,68 @@ export async function createWorkspace(
 }
 
 export async function updateWorkspace(
-  _params: {
+  params: {
     workspaceId: string
     name?: string
     config?: Record<string, any>
   },
-  _options?: AxiosRequestConfig,
+  options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.WorkspaceDetail> {
-  return unsupported('updateWorkspace（剧本元数据修改未实现）')
+  const payload: Record<string, any> = {}
+  if (typeof params.name === 'string' && params.name.trim()) {
+    payload.title = params.name.trim()
+  }
+  if (params.config && typeof params.config === 'object') {
+    payload.config = params.config
+  }
+  const { data } = await request.patch<ScriptDetailDTO>(
+    `/${params.workspaceId}`,
+    payload,
+    withScripts(options),
+  )
+  return detailToWorkspace(data)
 }
 
 export async function bindWorkspaceSession(
   params: { workspaceId: string; sessionId?: string | null },
   options?: AxiosRequestConfig,
 ): Promise<DocStudioAPI.WorkspaceDetail> {
-  // ScriptLens chat 当前是无状态（history 由前端传），sessionId 无意义。
-  // 直接返回当前 workspace 详情，让 doc-studio UI 的 session 绑定流程跑通。
-  return fetchWorkspace({ workspaceId: params.workspaceId }, options)
+  const detail = await fetchWorkspace({ workspaceId: params.workspaceId }, options)
+  const currentConfig = (detail.config || {}) as Record<string, any>
+  const normalizedSessionId =
+    typeof params.sessionId === 'string' && params.sessionId.trim()
+      ? params.sessionId.trim()
+      : null
+  const sessionIdsRaw = Array.isArray(currentConfig.session_ids)
+    ? currentConfig.session_ids.map((item: any) => String(item || '').trim()).filter(Boolean)
+    : []
+  const sessionHistoryRaw = Array.isArray(currentConfig.session_history)
+    ? currentConfig.session_history.map((item: any) => String(item || '').trim()).filter(Boolean)
+    : []
+
+  const nextConfig: Record<string, any> = { ...currentConfig }
+  if (!normalizedSessionId) {
+    nextConfig.session_id = null
+    nextConfig.session_ids = sessionIdsRaw.includes('__new__')
+      ? sessionIdsRaw
+      : [...sessionIdsRaw, '__new__']
+  } else {
+    nextConfig.session_id = normalizedSessionId
+    const nextIds = sessionIdsRaw.filter((id) => id !== '__new__')
+    if (!nextIds.includes(normalizedSessionId)) {
+      nextIds.unshift(normalizedSessionId)
+    }
+    nextConfig.session_ids = [...nextIds, '__new__']
+    nextConfig.session_history = sessionHistoryRaw.filter((id) => id !== normalizedSessionId)
+  }
+
+  return updateWorkspace(
+    {
+      workspaceId: params.workspaceId,
+      config: nextConfig,
+    },
+    options,
+  )
 }
 
 export async function deleteWorkspace(
@@ -736,6 +788,10 @@ export async function fetchWorkspaceFiles(
   params: { workspaceId: string },
   options?: AxiosRequestConfig,
 ) {
+  const detail = await fetchWorkspace(
+    { workspaceId: params.workspaceId },
+    { ...options, loading: false, errorToast: false },
+  )
   const { data } = await request.get<ScenesResponseDTO>(
     `/${params.workspaceId}/scenes`,
     withScripts(options),
@@ -751,6 +807,7 @@ export async function fetchWorkspaceFiles(
     files,
     mainFile,
     config: {
+      ...(detail.config || {}),
       total_scenes: data?.total ?? scenes.length,
     },
   } as DocStudioAPI.WorkspaceFilesResponse
@@ -882,26 +939,44 @@ export async function uploadFile(
 // ============================================================
 
 export async function listWorkspaceMessages(
-  _params: {
+  params: {
     workspaceId: string
     sessionId: string
     page?: number
     pageSize?: number
   },
-  _options?: AxiosRequestConfig,
+  options?: AxiosRequestConfig,
 ) {
-  return {
-    total: 0,
-    page: 1,
-    pageSize: 200,
-    items: [] as Array<{
+  const page = Number(params.page) > 0 ? Number(params.page) : 1
+  const pageSize = Number(params.pageSize) > 0 ? Number(params.pageSize) : 200
+  const { data } = await request.get<{
+    total: number
+    page: number
+    pageSize: number
+    items: Array<{
       message_id: string
       session_id: string
       user_question: string
       model_answer: string
       create_time: string
       retrieval_content?: string
-    }>,
+    }>
+  }>(
+    `/${params.workspaceId}/messages`,
+    withScripts({
+      ...(options ?? {}),
+      params: {
+        session_id: params.sessionId,
+        page,
+        page_size: pageSize,
+      },
+    }),
+  )
+  return {
+    total: Number(data?.total || 0),
+    page: Number(data?.page || page),
+    pageSize: Number(data?.pageSize || pageSize),
+    items: Array.isArray(data?.items) ? data.items : [],
   }
 }
 
@@ -1023,7 +1098,13 @@ export async function runAgentTaskAsync(
     question: params.userIntent,
     history: [],
     role,
-    context: params.context,
+    context: {
+      ...(params.context || {}),
+      session_id:
+        params.context?.session_id ??
+        params.context?.sessionId ??
+        null,
+    },
   })
   return { runId, status: 'queued' }
 }
@@ -1153,19 +1234,59 @@ export async function restoreCheckpoint(
 }
 
 export async function rewindConversation(
-  _params: {
+  params: {
     workspaceId: string
     keepUserTurns?: number
     beforeMessageId?: string
   },
-  _options?: AxiosRequestConfig,
+  options?: AxiosRequestConfig,
 ): Promise<{
   session_id?: string
   total_turns?: number
   kept_turns?: number
   deleted_turns?: number
 }> {
-  return unsupported('rewindConversation（chat 当前无服务端 session）')
+  const workspace = await fetchWorkspace(
+    { workspaceId: params.workspaceId },
+    { ...options, loading: false, errorToast: false },
+  )
+  const sessionId = String(
+    workspace.config?.session_id ||
+      workspace.config?.sessionId ||
+      '',
+  ).trim()
+  if (!sessionId) {
+    throw new Error('rewindConversation: 褰撳墠宸ヤ綔鍖烘湭缁戝畾浼氳瘽')
+  }
+
+  const payload: Record<string, any> = {}
+  if (typeof params.beforeMessageId === 'string' && params.beforeMessageId.trim()) {
+    payload.before_message_id = params.beforeMessageId.trim()
+  } else {
+    payload.keep_messages = Math.max(0, Number(params.keepUserTurns || 0) * 2)
+  }
+
+  const { data } = await request.post<{
+    session_id?: string
+    total_messages?: number
+    kept_messages?: number
+    deleted_messages?: number
+  }>(
+    `${getApiBase()}/sessions/${encodeURIComponent(sessionId)}/rewind`,
+    payload,
+    {
+      ...(options ?? {}),
+      loading: false,
+      errorToast: false,
+    },
+  )
+
+  return {
+    session_id: data?.session_id || sessionId,
+    total_turns: Number(data?.total_messages || 0) / 2,
+    kept_turns: Number(data?.kept_messages || 0) / 2,
+    deleted_turns: Number(data?.deleted_messages || 0) / 2,
+  }
 }
 
 export async function fetchOperationSnapshotFile(
@@ -1508,7 +1629,7 @@ export async function submitScriptFeedback(
 
 export async function fetchScriptFeedback(
   scriptId: string,
-  limit = 50,
+  limit = DEFAULT_SCRIPT_FEEDBACK_LIMIT,
   options?: AxiosRequestConfig,
 ): Promise<{ script_id: string; items: ScriptFeedbackItem[] }> {
   const { data } = await request.get<{ script_id: string; items: ScriptFeedbackItem[] }>(

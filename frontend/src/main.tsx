@@ -7,6 +7,10 @@ import { App as AntdApp, ConfigProvider, Spin } from 'antd'
 import zhCN from 'antd/locale/zh_CN'
 import { BrowserRouter } from 'react-router-dom'
 import App from './App'
+import {
+  GLOBAL_SPINNER_Z_INDEX,
+  LOADING_HIDE_DELAY_MS,
+} from './constants/numbers'
 
 function MountGlobals() {
   window.$app = AntdApp.useApp()
@@ -27,7 +31,7 @@ function MountGlobals() {
         setLoading(false)
         setLoadingText('')
       }
-    }, 100)
+    }, LOADING_HIDE_DELAY_MS)
   }, [])
 
   return (
@@ -35,7 +39,7 @@ function MountGlobals() {
       spinning={loading}
       tip={loadingText}
       fullscreen
-      style={{ zIndex: 9999999 }}
+      style={{ zIndex: GLOBAL_SPINNER_Z_INDEX }}
     />
   )
 }

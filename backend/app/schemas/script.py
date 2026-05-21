@@ -64,8 +64,14 @@ class ScriptDetail(BaseModel):
     total_scenes: Optional[int] = None
     total_chars: Optional[int] = None
     failure_reason: Optional[str] = None
+    workspace_config: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
+
+
+class ScriptWorkspaceUpdateRequest(BaseModel):
+    title: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    config: Optional[Dict[str, Any]] = Field(default=None)
 
 
 class ScriptListItem(BaseModel):
@@ -517,28 +523,13 @@ class ChatHistoryItem(BaseModel):
 
 
 class ScriptChatRequest(BaseModel):
-    """POST /api/scripts/{id}/chat 请求。
-
-    历史由前端维护并随每次请求传入（后端 chat 无状态）。后续如需服务端
-    会话持久化再加 chat_sessions 表。
-    """
+    """POST /api/scripts/{id}/chat request."""
 
     question: str = Field(..., min_length=1, max_length=4000)
-    history: List[ChatHistoryItem] = Field(
-        default_factory=list,
-        description="按时间正序的历史消息（最近 N 条由前端裁剪）",
-    )
-    role: ChatRole = Field(
-        "general",
-        description="用户角色（影响 prompt 注入）：selection/writer/review/rewrite/general",
-    )
-    context: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description=(
-            "可选上下文（如 file_path、selections、file_mentions、image_attachments）。"
-            "用于 Agent 工具链定位选区与文件，不参与问题正文 question 的长度限制。"
-        ),
-    )
+    history: List[ChatHistoryItem] = Field(default_factory=list)
+    role: ChatRole = Field("general")
+    context: Optional[Dict[str, Any]] = Field(default=None)
+    session_id: Optional[str] = Field(default=None)
 
 
 class RewriteRequest(BaseModel):

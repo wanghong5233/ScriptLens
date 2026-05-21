@@ -1,5 +1,18 @@
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
+import {
+  PDF_EXPORT_CANVAS_SCALE,
+  PDF_EXPORT_MARGIN_MM,
+  PDF_MIN_RENDER_WIDTH_PX,
+  PDF_OFFSCREEN_TOP_PX,
+  PDF_PAGE_NUMBER_BOTTOM_MM,
+  PDF_PAGE_NUMBER_FONT_SIZE,
+  PDF_PAGE_NUMBER_TEXT_GRAY,
+  PDF_RENDER_SETTLE_DELAY_MS,
+  PDF_SVG_MIN_RENDER_SIZE_PX,
+  PDF_SVG_RENDER_SCALE,
+  PDF_SVG_REPLACEMENT_MARGIN,
+} from '../constants/numbers'
 
 export type PdfExportOptions = {
   filename?: string
@@ -10,8 +23,8 @@ export type PdfExportOptions = {
 
 const DEFAULT_OPTIONS: Required<PdfExportOptions> = {
   filename: 'report',
-  margin: 16,
-  scale: 2,
+  margin: PDF_EXPORT_MARGIN_MM,
+  scale: PDF_EXPORT_CANVAS_SCALE,
   showPageNumbers: true,
 }
 
@@ -23,8 +36,8 @@ async function convertSvgsToImages(element: HTMLElement) {
     svgs.map(async (svg) => {
       try {
         const bbox = svg.getBoundingClientRect()
-        const width = Math.max(bbox.width, 120)
-        const height = Math.max(bbox.height, 120)
+        const width = Math.max(bbox.width, PDF_SVG_MIN_RENDER_SIZE_PX)
+        const height = Math.max(bbox.height, PDF_SVG_MIN_RENDER_SIZE_PX)
         const clonedSvg = svg.cloneNode(true) as SVGElement
         clonedSvg.setAttribute('width', String(width))
         clonedSvg.setAttribute('height', String(height))
@@ -45,7 +58,7 @@ async function convertSvgsToImages(element: HTMLElement) {
 
         if (image.width && image.height) {
           const canvas = document.createElement('canvas')
-          const scale = 2
+          const scale = PDF_SVG_RENDER_SCALE
           canvas.width = width * scale
           canvas.height = height * scale
           const ctx = canvas.getContext('2d')
@@ -60,7 +73,7 @@ async function convertSvgsToImages(element: HTMLElement) {
             replacement.style.width = `${width}px`
             replacement.style.height = `${height}px`
             replacement.style.display = 'block'
-            replacement.style.margin = '12px auto'
+            replacement.style.margin = PDF_SVG_REPLACEMENT_MARGIN
             svg.parentNode?.replaceChild(replacement, svg)
           }
         }
@@ -113,19 +126,19 @@ function splitCanvasIntoPages(
 
 export async function exportToPdf(element: HTMLElement, options: PdfExportOptions = {}) {
   const opts = { ...DEFAULT_OPTIONS, ...options }
-  const width = Math.max(element.getBoundingClientRect().width, 800)
+  const width = Math.max(element.getBoundingClientRect().width, PDF_MIN_RENDER_WIDTH_PX)
   const clone = element.cloneNode(true) as HTMLElement
   clone.style.position = 'fixed'
-  clone.style.top = '-99999px'
+  clone.style.top = `${PDF_OFFSCREEN_TOP_PX}px`
   clone.style.left = '0'
   clone.style.width = `${width}px`
   clone.style.background = '#fff'
   document.body.appendChild(clone)
 
   try {
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    await new Promise((resolve) => setTimeout(resolve, PDF_RENDER_SETTLE_DELAY_MS))
     await convertSvgsToImages(clone)
-    await new Promise((resolve) => setTimeout(resolve, 200))
+    await new Promise((resolve) => setTimeout(resolve, PDF_RENDER_SETTLE_DELAY_MS))
 
     const canvas = await html2canvas(clone, {
       scale: opts.scale,
@@ -149,9 +162,9 @@ export async function exportToPdf(element: HTMLElement, options: PdfExportOption
       pdf.addImage(imgData, 'PNG', opts.margin, opts.margin, contentWidth, imgHeight)
 
       if (opts.showPageNumbers) {
-        pdf.setFontSize(10)
-        pdf.setTextColor(120)
-        pdf.text(`${index + 1} / ${pageCount}`, pageWidth - opts.margin, pageHeight - 6, {
+        pdf.setFontSize(PDF_PAGE_NUMBER_FONT_SIZE)
+        pdf.setTextColor(PDF_PAGE_NUMBER_TEXT_GRAY)
+        pdf.text(`${index + 1} / ${pageCount}`, pageWidth - opts.margin, pageHeight - PDF_PAGE_NUMBER_BOTTOM_MM, {
           align: 'right',
         })
       }

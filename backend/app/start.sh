@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "=== 应用启动脚本 ==="
 
@@ -34,4 +35,4 @@ echo "检查数据库迁移状态..."
 alembic upgrade head
 
 echo "启动应用服务..."
-exec "$@" 
+exec "$@"

@@ -6570,7 +6570,7 @@ const LatexEditorPage = () => {
       if ((hasChanges || isFileOpIntent || hasDbOperation) && snap.workspaceId) {
         await syncWorkspaceFileTree(snap.workspaceId)
       }
-      if (operationId) {
+      if (operationId && hasChanges && hasDbOperation) {
         void loadOperationHistory()
       }
       if (response.file_diffs && response.file_diffs.length > 0) {
@@ -6930,7 +6930,12 @@ const LatexEditorPage = () => {
           {
             workspaceId: snap.workspaceId,
             userIntent: promptForAgent,
-            context: Object.keys(contextPayload).length ? contextPayload : undefined,
+            context: Object.keys(contextPayload).length
+              ? {
+                  ...contextPayload,
+                  session_id: sid || null,
+                }
+              : { session_id: sid || null },
             knowledgeBaseId,
             knowledgeBaseName,
             options: Object.keys(effectiveLlmOptions).length ? effectiveLlmOptions : undefined,
