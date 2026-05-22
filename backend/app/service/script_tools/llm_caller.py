@@ -12,9 +12,9 @@
 3. 评分要 JSON mode，主 OpenAiLlm 没有该选项
 
 兜底策略：
-- OpenAI 调用抛网络/限速/超时类异常 → 切 DashScope 重试一次
-- 二次失败 → 抛 ScoreLLMError，由上层流水线决定该维标记 score=null
-- JSON 解析失败 → 重试一次（temperature=0），仍失败抛错
+- provider 顺序由 LLMRuntime 统一治理（默认遵循 SM_LLM_TYPE）
+- 同一 provider 内按 candidate 列表切模型
+- provider 级失败会自动尝试下一个 provider，最终失败抛 ScoreLLMError
 """
 
 from __future__ import annotations
@@ -353,7 +353,7 @@ class TokenBudget:
 
 
 class LlmCaller:
-    """OpenAI 主、DashScope 兜底；强 JSON 输出；可指定模型档位。
+    """强 JSON 输出调用器；provider 路由复用 LLMRuntime 统一策略。
 
     单例使用：`caller = LlmCaller(); await caller.call_json(prompt, tier=PRIMARY)`。
     """
@@ -369,15 +369,19 @@ class LlmCaller:
 
     def __init__(self, *, default_temperature: float = 0.2) -> None:
         self.default_temperature = default_temperature
-        self._openai = AsyncOpenAI(
-            api_key=settings.OPENAI_API_KEY or "",
-            base_url=settings.OPENAI_BASE_URL,
-        )
-        # DashScope 也走 OpenAI compatible 协议
-        self._dashscope = AsyncOpenAI(
-            api_key=settings.DASHSCOPE_API_KEY or "",
-            base_url=settings.DASHSCOPE_BASE_URL,
-        )
+        self._runtime = LLMRuntime(settings_obj=settings)
+        self._provider_clients: dict[str, AsyncOpenAI] = {}
+        if settings.OPENAI_API_KEY:
+            self._provider_clients["openai"] = AsyncOpenAI(
+                api_key=settings.OPENAI_API_KEY,
+                base_url=settings.OPENAI_BASE_URL,
+            )
+        if settings.DASHSCOPE_API_KEY:
+            # DashScope 也走 OpenAI compatible 协议
+            self._provider_clients["dashscope"] = AsyncOpenAI(
+                api_key=settings.DASHSCOPE_API_KEY,
+                base_url=settings.DASHSCOPE_BASE_URL,
+            )
 
     async def call_json(
         self,
@@ -390,53 +394,111 @@ class LlmCaller:
     ) -> LLMResponse:
         """调用 LLM 并要求 JSON 输出（response_format={'type': 'json_object'}）。
 
-        失败序列：
-          OpenAI 一次 → JSON 解析 → 失败时切 DashScope 一次 → 仍失败 raise
+        provider 顺序由 LLMRuntime 统一决定（默认遵循 SM_LLM_TYPE）。
+        每个 provider 内再走 model candidate fallback。
         """
         temp = self.default_temperature if temperature is None else temperature
         messages = []
         if system_message:
             messages.append({"role": "system", "content": system_message})
         messages.append({"role": "user", "content": prompt})
+        providers = self._runtime.get_provider_candidates()
+        if not providers:
+            raise ScoreLLMError("未配置可用 LLM provider（OPENAI_API_KEY / DASHSCOPE_API_KEY）")
+        logger.debug("LlmCaller route: providers=%s tier=%s", providers, tier)
 
-        # 1. OpenAI 主路径（model 级 fallback：candidate 列表逐个试，命中 404/model_not_found 切下一个）
-        try:
-            return await self._call_provider_with_fallback(
-                provider="openai",
-                client=self._openai,
-                tier=tier,
-                messages=messages,
-                temperature=temp,
-                max_tokens=max_tokens,
-            )
-        except self._RETRYABLE_EXC as e:
-            logger.warning("OpenAI 调用失败，切 DashScope 兜底：%s: %s", type(e).__name__, e)
-        except APIError as e:
-            # 5xx / quota / 整 provider 不可用 → 切 DashScope；4xx 业务错误直接抛
-            if e.status_code and (500 <= e.status_code < 600 or e.status_code == 429):
-                logger.warning("OpenAI %s 兜底：%s", e.status_code, _short(e))
-            elif isinstance(e, NotFoundError):
-                logger.warning("OpenAI 全部候选模型均 404，切 DashScope 兜底：%s", _short(e))
-            else:
-                raise ScoreLLMError(f"OpenAI 业务错误不兜底：{e}") from e
-        except ScoreLLMJSONError as e:
-            logger.warning("OpenAI JSON 解析失败，切 DashScope 重试：%s", e)
+        errors: list[str] = []
+        primary = providers[0]
+        for provider in providers:
+            client = self._provider_clients.get(provider)
+            if client is None:
+                errors.append(f"{provider}: API key not configured")
+                continue
 
-        # 2. DashScope 兜底（同样走 model 级 fallback）
-        if not settings.DASHSCOPE_API_KEY:
-            raise ScoreLLMError("OpenAI 失败且未配置 DASHSCOPE_API_KEY 兜底")
-        try:
-            return await self._call_provider_with_fallback(
-                provider="dashscope",
-                client=self._dashscope,
-                tier=tier,
-                messages=messages,
-                temperature=temp,
-                max_tokens=max_tokens,
+            try:
+                resp = await self._call_provider_with_fallback(
+                    provider=provider,
+                    client=client,
+                    tier=tier,
+                    messages=messages,
+                    temperature=temp,
+                    max_tokens=max_tokens,
+                )
+                if provider != primary:
+                    logger.warning("LlmCaller provider fallback applied: %s -> %s", primary, provider)
+                logger.info("LlmCaller selected provider=%s model=%s tier=%s", resp.provider, resp.model, tier)
+                return resp
+            except self._RETRYABLE_EXC as e:
+                logger.warning(
+                    "%s 调用失败，尝试下个 provider：%s: %s",
+                    self._provider_label(provider),
+                    type(e).__name__,
+                    e,
+                )
+                errors.append(f"{provider}: {type(e).__name__}: {e}")
+                continue
+            except ScoreLLMJSONError as e:
+                logger.warning(
+                    "%s JSON 解析失败，尝试下个 provider：%s",
+                    self._provider_label(provider),
+                    e,
+                )
+                errors.append(f"{provider}: {type(e).__name__}: {e}")
+                continue
+            except APIError as e:
+                if self._is_provider_fallbackable_api_error(e):
+                    logger.warning(
+                        "%s APIError(%s) 可兜底，尝试下个 provider：%s",
+                        self._provider_label(provider),
+                        getattr(e, "status_code", None),
+                        _short(e),
+                    )
+                    errors.append(f"{provider}: APIError({getattr(e, 'status_code', None)}): {_short(e)}")
+                    continue
+                raise ScoreLLMError(f"{self._provider_label(provider)} 业务错误不兜底：{e}") from e
+
+        raise ScoreLLMError("所有 provider 均失败：" + " | ".join(errors))
+
+    @staticmethod
+    def _provider_label(provider: str) -> str:
+        if provider == "openai":
+            return "OpenAI"
+        if provider == "dashscope":
+            return "DashScope"
+        return provider
+
+    @staticmethod
+    def _is_provider_fallbackable_api_error(e: APIError) -> bool:
+        status = getattr(e, "status_code", None)
+        if status in {401, 403, 404, 408, 409, 429}:
+            return True
+        if status and 500 <= status < 600:
+            return True
+        if status == 400:
+            param, code = _classify_400(e)
+            if param in {"model", "temperature", "max_tokens", "max_completion_tokens", "response_format"}:
+                return True
+            if code in {
+                "model_not_found",
+                "model_not_supported",
+                "invalid_model",
+                "unsupported_parameter",
+                "unsupported_value",
+                "invalid_api_key",
+                "insufficient_quota",
+            }:
+                return True
+            msg = str(e).lower()
+            markers = (
+                "api key",
+                "unauthorized",
+                "quota",
+                "rate limit",
+                "billing",
+                "temporarily unavailable",
             )
-        except (APIError, ScoreLLMJSONError) + self._RETRYABLE_EXC as e:
-            logger.error("DashScope 兜底也失败：%s: %s", type(e).__name__, e)
-            raise ScoreLLMError(f"OpenAI 与 DashScope 都失败：{e}") from e
+            return any(marker in msg for marker in markers)
+        return False
 
     async def _call_provider_with_fallback(
         self,

@@ -9,9 +9,13 @@ from typing import Any, Dict, Iterable
 import httpx
 
 from core.config import settings
+from service.core.llm.runtime import (
+    FORBIDDEN_LLM_MODELS as _RUNTIME_FORBIDDEN,
+    LLMRuntime,
+)
 from service.core.rag.nlp.rag_tokenizer import RagTokenizer
 
-FORBIDDEN_LLM_MODELS = {"qwen-plus", "qwen-turbo", "qwen2.5-plus"}
+FORBIDDEN_LLM_MODELS: set[str] = set(_RUNTIME_FORBIDDEN)
 
 try:
     from nltk import word_tokenize as _wt
@@ -29,6 +33,10 @@ class ConfigService:
 
     _model_probe_cache: Dict[str, Dict[str, Any]] = {}
     _model_probe_cache_ttl_secs = 600
+
+    @staticmethod
+    def _runtime() -> LLMRuntime:
+        return LLMRuntime(settings_obj=settings)
 
     def get_feature_flags(self) -> Dict[str, Any]:
         """Return feature flag settings."""
@@ -87,7 +95,7 @@ class ConfigService:
 
     def llm_models(self, *, refresh: bool = False) -> Dict[str, Any]:
         """Return the runtime LLM model catalog for frontend selectors."""
-
+        preferred_provider = self._preferred_provider()
         providers = ("dashscope", "openai")
         visibility = {
             provider: self._fetch_visible_model_ids(provider, refresh=refresh)
@@ -100,16 +108,16 @@ class ConfigService:
 
         default_model = self._select_default_model(
             models=models,
-            provider=self._preferred_provider(),
+            provider=preferred_provider,
             vision=False,
         )
         default_vision_model = self._select_default_model(
             models=models,
-            provider=self._preferred_provider(),
+            provider=preferred_provider,
             vision=True,
         )
         return {
-            "preferredProvider": self._preferred_provider(),
+            "preferredProvider": preferred_provider,
             "defaultModel": default_model,
             "defaultVisionModel": default_vision_model,
             "models": models,
@@ -258,29 +266,33 @@ class ConfigService:
         return result
 
     def _candidate_models(self, provider: str) -> list[str]:
-        configured = (
-            getattr(settings, "OPENAI_MODEL_CANDIDATES", "")
-            if provider == "openai"
-            else getattr(settings, "DASHSCOPE_MODEL_CANDIDATES", "")
-        )
-        default_model = (
-            getattr(settings, "OPENAI_MODEL_NAME", "")
-            if provider == "openai"
-            else getattr(settings, "DASHSCOPE_MODEL_NAME", "")
-        )
+        if provider not in {"openai", "dashscope"}:
+            return []
+
+        runtime = self._runtime()
         task_models = [
             getattr(settings, "SM_LLM_MODEL_ANSWER", None),
             getattr(settings, "SM_LLM_MODEL_AUX", None),
             getattr(settings, "SM_LLM_MODEL_GRAPH", None),
             getattr(settings, "SM_LLM_MODEL_SUMMARY", None),
         ]
-        candidates = [default_model, *self._split_csv(configured)]
-        candidates.extend(
+        out: list[str] = []
+        seen: set[str] = set()
+        # 第一项用 runtime 默认解析；后续补 task 特定模型，全部复用 runtime 的统一候选规则。
+        model_overrides: list[str | None] = [None]
+        model_overrides.extend(
             str(item).strip()
             for item in task_models
             if item and self._infer_provider_from_model(str(item)) == provider
         )
-        return self._dedupe(candidates)
+        for override in model_overrides:
+            llm_options = {"llm_model": override} if override else None
+            for model_name in runtime.get_model_candidates_for_provider(provider, llm_options):
+                if model_name in seen:
+                    continue
+                seen.add(model_name)
+                out.append(model_name)
+        return out
 
     @staticmethod
     def _dedupe(values: Iterable[str]) -> list[str]:
@@ -354,8 +366,11 @@ class ConfigService:
             return settings.DASHSCOPE_BASE_URL, settings.DASHSCOPE_API_KEY
         return None, None
 
-    @staticmethod
-    def _preferred_provider() -> str:
+    def _preferred_provider(self) -> str:
+        runtime = self._runtime()
+        candidates = runtime.get_provider_candidates()
+        if candidates:
+            return candidates[0]
         raw = str(getattr(settings, "SM_LLM_TYPE", "") or "").strip().lower()
         if raw in {"openai", "dashscope"}:
             return raw

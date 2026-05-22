@@ -84,8 +84,7 @@ services:
       SM_VECTOR_STORE: pgvector
       SM_PARSER_ORDER: pymupdf
       SM_GROBID_ENABLED: "false"
-      # LLM 推理优先 GPT（评分/决策/改写/对话），DashScope 兜底
-      SM_LLM_TYPE: ${SM_LLM_TYPE:-openai}
+      # LLM provider 由 .env.dev 统一治理（避免 compose 默认值覆盖 env_file）
       # Embedding / Reranker 固定 DashScope，不切换
       SM_EMBEDDER_TYPE: dashscope
       SM_RERANKER_TYPE: dashscope

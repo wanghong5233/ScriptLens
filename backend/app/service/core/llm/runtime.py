@@ -126,14 +126,13 @@ class LLMRuntime:
         self.provider = None
 
         if self.mode == "api":
-            self.api_key = self.settings.OPENAI_API_KEY or self.settings.DASHSCOPE_API_KEY
-            self.base_url = (
-                self.settings.OPENAI_BASE_URL if self.settings.OPENAI_API_KEY else self.settings.DASHSCOPE_BASE_URL
-            )
-            self.model = (
-                self.settings.OPENAI_MODEL_NAME if self.settings.OPENAI_API_KEY else self.settings.DASHSCOPE_MODEL_NAME
-            )
-            self.provider = "OpenAI" if self.settings.OPENAI_API_KEY else "DashScope"
+            preferred_provider = self._preferred_provider_from_settings()
+            provider_key = preferred_provider if preferred_provider in {"openai", "dashscope"} else "dashscope"
+            provider_config = self._get_provider_config(provider_key)
+            self.api_key = provider_config.get("api_key")
+            self.base_url = provider_config.get("base_url")
+            self.model = provider_config.get("model")
+            self.provider = str(provider_config.get("provider") or provider_key)
 
             if not self.api_key:
                 logger.warning("LLM API key not configured. LLM calls will fail.")
@@ -152,14 +151,28 @@ class LLMRuntime:
                     self.model,
                 )
 
-    def _build_client_cache_key(self, provider: str, base_url: str) -> str:
+    def _build_client_cache_key(self, provider: str, base_url: Optional[str]) -> str:
         """Build a cache key for provider clients."""
 
-        return f"{provider.lower()}::{base_url}"
+        return f"{provider.lower()}::{str(base_url or '')}"
 
     @staticmethod
     def _normalize_provider_key(provider: str) -> str:
         return str(provider or "").strip().lower()
+
+    def _preferred_provider_from_settings(self) -> str:
+        """Resolve preferred provider with SM_LLM_TYPE as source of truth."""
+        configured = self._normalize_provider_key(getattr(self.settings, "SM_LLM_TYPE", ""))
+        if configured not in {"openai", "dashscope"}:
+            configured = ""
+
+        available = self._get_available_providers()
+        if configured and configured in available:
+            return configured
+        if available:
+            return available[0]
+        # 无可用 key 时保留配置偏好，便于错误信息定位
+        return configured or "dashscope"
 
     def _get_provider_config(self, provider: str) -> Dict[str, Any]:
         """Return provider settings for the given provider."""
@@ -302,7 +315,7 @@ class LLMRuntime:
             if provider_override and str(provider_override).lower() != "auto":
                 resolved_provider = str(provider_override)
             else:
-                resolved_provider = "openai" if self.settings.OPENAI_API_KEY else "dashscope"
+                resolved_provider = self._preferred_provider_from_settings()
 
         normalized_provider = self._normalize_provider_key(resolved_provider)
         config = self._get_provider_config(normalized_provider)
@@ -340,7 +353,7 @@ class LLMRuntime:
         if normalized_override and normalized_override != "auto":
             preferred = normalized_override
         else:
-            preferred = "openai" if self.settings.OPENAI_API_KEY else "dashscope"
+            preferred = self._preferred_provider_from_settings()
 
         available = self._get_available_providers()
         if preferred and preferred not in available and available:
@@ -357,6 +370,18 @@ class LLMRuntime:
             if provider not in candidates:
                 candidates.append(provider)
         return candidates
+
+    def get_provider_candidates(self, llm_options: Optional[Dict[str, Any]] = None) -> List[str]:
+        """Public wrapper used by other modules to reuse one routing policy."""
+        return self._get_provider_candidates(llm_options)
+
+    def get_model_candidates_for_provider(
+        self,
+        provider_key: str,
+        llm_options: Optional[Dict[str, Any]] = None,
+    ) -> List[str]:
+        """Public wrapper used by other modules to reuse model candidate policy."""
+        return self._model_candidates_for_provider(llm_options, provider_key)
 
     def get_health_snapshot(self) -> Dict[str, Any]:
         """Return provider health information for UI/monitoring."""
@@ -479,7 +504,7 @@ class LLMRuntime:
             "total_tokens": total_tokens,
         }
 
-    def _get_client(self, provider: str, api_key: str, base_url: str) -> AsyncOpenAI:
+    def _get_client(self, provider: str, api_key: str, base_url: Optional[str]) -> AsyncOpenAI:
         """Get or create a client for a provider."""
 
         cache_key = self._build_client_cache_key(provider, base_url)

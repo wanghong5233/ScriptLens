@@ -1,13 +1,12 @@
 from __future__ import annotations
 from typing import Iterable, Generator, Optional, Dict, Any, List
 from core.config import settings
+from service.core.llm.runtime import LLMRuntime
 import httpx
 import logging
 
 
 logger = logging.getLogger(__name__)
-
-FORBIDDEN_LLM_MODELS = {"qwen-plus", "qwen-turbo", "qwen2.5-plus"}
 
 
 class LLMClient:
@@ -26,19 +25,15 @@ class LLMClient:
         model: Optional[str] = None,
         timeout_secs: Optional[float] = None,
     ) -> None:
-        # 动态选择：若显式配置为 dashscope/openai 则使用；
-        # 若为 local 但存在云端 API Key，则自动切换到对应云端；否则使用本地占位实现。
+        self._runtime = LLMRuntime(settings_obj=settings)
         prov = self._normalize_provider(provider or settings.SM_LLM_TYPE)
-        if prov == "local" and settings.DASHSCOPE_API_KEY:
-            prov = "dashscope"
-        if prov == "local" and settings.OPENAI_API_KEY:
-            prov = "openai"
         if prov not in {"dashscope", "openai", "local"}:
             raise ValueError(f"Unsupported LLM provider: {prov}")
         self.provider = prov
         self.task = (task or "default").strip().lower()
-        self.model = model or self._resolve_task_model(self.task, self.provider)
-        self.base_url, self.api_key = self._resolve_transport(self.provider)
+        default_provider = self._primary_provider_for_resolution(provider=provider, model=model)
+        self.model = model or self._resolve_task_model(self.task, default_provider)
+        self.base_url, self.api_key = self._resolve_transport(default_provider)
         self.timeout_secs = float(timeout_secs or getattr(settings, "SM_LLM_REQUEST_TIMEOUT_SECS", 60) or 60)
         self._last_usage: Dict[str, int] | None = None
         self._last_runtime_model: Dict[str, Any] | None = None
@@ -51,15 +46,6 @@ class LLMClient:
         if raw in {"", "auto"}:
             return "local"
         return raw
-
-    def _resolve_provider(self, provider: Optional[str]) -> str:
-        prov = self._normalize_provider(provider) if provider is not None else self.provider
-        if prov == "local":
-            if settings.DASHSCOPE_API_KEY:
-                return "dashscope"
-            if settings.OPENAI_API_KEY:
-                return "openai"
-        return prov
 
     def _resolve_transport(self, provider: str) -> tuple[Optional[str], Optional[str]]:
         normalized = self._normalize_provider(provider)
@@ -95,23 +81,70 @@ class LLMClient:
         inferred = self._infer_provider_from_model(model)
         return inferred is None or inferred == provider
 
+    def _provider_candidates(
+        self,
+        *,
+        provider: Optional[str],
+        model: Optional[str],
+    ) -> List[str]:
+        normalized = self._normalize_provider(provider) if provider is not None else ""
+        if normalized == "local":
+            return []
+        llm_options: Dict[str, Any] = {}
+        if normalized and normalized != "auto":
+            llm_options["llm_provider"] = normalized
+        elif model:
+            inferred = self._infer_provider_from_model(model)
+            if inferred in {"openai", "dashscope"}:
+                llm_options["llm_provider"] = inferred
+        return self._runtime.get_provider_candidates(llm_options or None)
+
+    def _primary_provider_for_resolution(
+        self,
+        *,
+        provider: Optional[str],
+        model: Optional[str],
+    ) -> str:
+        candidates = self._provider_candidates(provider=provider, model=model)
+        if candidates:
+            return candidates[0]
+
+        normalized = self._normalize_provider(provider) if provider is not None else self.provider
+        if normalized in {"openai", "dashscope"}:
+            return normalized
+
+        configured = self._normalize_provider(getattr(settings, "SM_LLM_TYPE", ""))
+        if configured in {"openai", "dashscope"}:
+            return configured
+        return "dashscope"
+
+    def _local_fallback_model(self, model: Optional[str]) -> str:
+        preferred = self._primary_provider_for_resolution(provider=None, model=model)
+        return str(model or self._resolve_task_model(self.task, preferred))
+
     def _resolve_runtime_config(
         self,
         *,
         provider: Optional[str] = None,
         model: Optional[str] = None,
     ) -> tuple[str, Optional[str], Optional[str], str]:
-        resolved_provider = self._resolve_provider(provider)
-        inferred_provider = self._infer_provider_from_model(model)
-        if provider is None and inferred_provider in {"dashscope", "openai"}:
-            resolved_provider = inferred_provider
-        if resolved_provider not in {"dashscope", "openai", "local"}:
-            raise ValueError(f"Unsupported LLM provider: {resolved_provider}")
-        fallback_model = (
-            self.model
-            if resolved_provider == self.provider
-            else self._resolve_task_model(self.task, resolved_provider)
-        )
+        normalized = self._normalize_provider(provider) if provider is not None else ""
+        if normalized == "local":
+            model_name = self._local_fallback_model(model)
+            return "local", None, None, model_name
+
+        if normalized in {"openai", "dashscope"}:
+            resolved_provider = normalized
+        else:
+            inferred_provider = self._infer_provider_from_model(model)
+            if inferred_provider in {"openai", "dashscope"}:
+                resolved_provider = inferred_provider
+            elif self.provider in {"openai", "dashscope"}:
+                resolved_provider = self.provider
+            else:
+                resolved_provider = self._primary_provider_for_resolution(provider=provider, model=model)
+
+        fallback_model = self._resolve_task_model(self.task, resolved_provider)
         model_name = str(model or fallback_model)
         base_url, api_key = self._resolve_transport(resolved_provider)
         return resolved_provider, base_url, api_key, model_name
@@ -142,53 +175,11 @@ class LLMClient:
                 return str(candidate)
         return str(default_model)
 
-    @staticmethod
-    def _split_csv(value: Optional[str]) -> List[str]:
-        items: List[str] = []
-        seen: set[str] = set()
-        for raw in str(value or "").split(","):
-            item = raw.strip().strip('"').strip("'")
-            if not item or item in seen or item.lower() in FORBIDDEN_LLM_MODELS:
-                continue
-            seen.add(item)
-            items.append(item)
-        return items
-
     def _configured_models_for_provider(self, provider: str) -> List[str]:
-        if provider == "openai":
-            raw_candidates = self._split_csv(getattr(settings, "OPENAI_MODEL_CANDIDATES", ""))
-            default_model = str(getattr(settings, "OPENAI_MODEL_NAME", "gpt-5.2") or "")
-        elif provider == "dashscope":
-            raw_candidates = self._split_csv(getattr(settings, "DASHSCOPE_MODEL_CANDIDATES", ""))
-            default_model = str(getattr(settings, "DASHSCOPE_MODEL_NAME", "qwen3-max-latest") or "")
-        else:
+        if provider not in {"openai", "dashscope"}:
             return []
-
-        task_models = [
-            getattr(settings, "SM_LLM_MODEL_ANSWER", None),
-            getattr(settings, "SM_LLM_MODEL_AUX", None),
-            getattr(settings, "SM_LLM_MODEL_GRAPH", None),
-            getattr(settings, "SM_LLM_MODEL_SUMMARY", None),
-        ]
-        candidates = [
-            default_model,
-            self._resolve_task_model(self.task, provider),
-            *raw_candidates,
-            *[
-                str(item).strip()
-                for item in task_models
-                if item and self._model_matches_provider(str(item), provider)
-            ],
-        ]
-        result: List[str] = []
-        seen: set[str] = set()
-        for candidate in candidates:
-            model_name = str(candidate or "").strip()
-            if not model_name or model_name in seen or model_name.lower() in FORBIDDEN_LLM_MODELS:
-                continue
-            seen.add(model_name)
-            result.append(model_name)
-        return result
+        llm_options: Dict[str, Any] = {"llm_model": self._resolve_task_model(self.task, provider)}
+        return self._runtime.get_model_candidates_for_provider(provider, llm_options)
 
     def _fallback_candidates(
         self,
@@ -196,35 +187,33 @@ class LLMClient:
         provider: Optional[str],
         model: Optional[str],
     ) -> List[tuple[str, Optional[str], Optional[str], str]]:
-        primary_provider, primary_base_url, primary_api_key, primary_model = self._resolve_runtime_config(
-            provider=provider,
-            model=model,
-        )
-        ordered_providers = [primary_provider]
-        inferred = self._infer_provider_from_model(model)
-        if inferred and inferred not in ordered_providers:
-            ordered_providers.append(inferred)
-        for candidate_provider in ("openai", "dashscope"):
-            if candidate_provider not in ordered_providers:
-                ordered_providers.append(candidate_provider)
+        normalized = self._normalize_provider(provider) if provider is not None else ""
+        if normalized == "local":
+            return [("local", None, None, self._local_fallback_model(model))]
+
+        provider_candidates = self._provider_candidates(provider=provider, model=model)
+        if not provider_candidates:
+            return [("local", None, None, self._local_fallback_model(model))]
 
         candidates: List[tuple[str, Optional[str], Optional[str], str]] = []
         seen: set[tuple[str, str]] = set()
-        for candidate_provider in ordered_providers:
-            if candidate_provider == "local":
-                key = ("local", primary_model)
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(("local", None, None, primary_model))
-                continue
-
+        for candidate_provider in provider_candidates:
             base_url, api_key = self._resolve_transport(candidate_provider)
             if not base_url or not api_key:
                 continue
-            model_names = []
-            if candidate_provider == primary_provider:
-                model_names.append(primary_model)
-            model_names.extend(self._configured_models_for_provider(candidate_provider))
+            llm_options: Dict[str, Any] = {}
+            if model:
+                llm_options["llm_model"] = str(model)
+            else:
+                llm_options["llm_model"] = self._resolve_task_model(self.task, candidate_provider)
+
+            model_names = self._runtime.get_model_candidates_for_provider(
+                candidate_provider,
+                llm_options or None,
+            )
+            if not model_names:
+                model_names = self._configured_models_for_provider(candidate_provider)
+
             for model_name in model_names:
                 normalized_model = str(model_name or "").strip()
                 if not normalized_model or not self._model_matches_provider(normalized_model, candidate_provider):
@@ -235,7 +224,9 @@ class LLMClient:
                 seen.add(key)
                 candidates.append((candidate_provider, base_url, api_key, normalized_model))
 
-        return candidates or [self._resolve_runtime_config(provider=provider, model=model)]
+        if candidates:
+            return candidates
+        return [("local", None, None, self._local_fallback_model(model))]
 
     @staticmethod
     def _error_text(exc: BaseException) -> str:
