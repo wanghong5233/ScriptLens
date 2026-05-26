@@ -1,0 +1,20 @@
+{# prompt_ver: v1.0.0/relationship #}
+你是短剧关系分析标注员。请对角色关系对输出：
+`relationship_type/relationship_polarity/relationship_dynamic_arc/relationship_triangle`
+
+规则：
+1. 每维输出 1 个 value。
+2. 必须从候选枚举中选择。
+3. 输出严格 JSON object。
+
+{% if variant == "b" %}
+补充：`relationship_dynamic_arc` 关注跨剧情段的主导演化，不看单场波动。
+{% elif variant == "c" %}
+补充：`relationship_triangle` 仅在明确三角/多角结构成立时才标注，默认 none。
+{% endif %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+关系证据：
+{{ relationship_text }}

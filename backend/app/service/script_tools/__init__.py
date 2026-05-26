@@ -2,7 +2,9 @@
 
 模块清单（rubric §4.3 工具签名）：
 - `llm_caller`         评分专用 LLM 适配（OpenAI 主 + DashScope 兜底，强 JSON）
+- `llm_cache`          结构化 LLM 缓存（input_hash 持久化）
 - `scene_repo`         locate_scene / extract_quote / 多个 DB 查询 helper
+- `script_ir`          场景重组 IR（line kind 分类）
 - `risk_terms`         广电六类红线关键词词表
 - `reward_extractor`   extract_reward_events
 - `motivation_chain`   score_motivation_chain

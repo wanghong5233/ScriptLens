@@ -1,0 +1,54 @@
+version: v2.0.0
+extends: v1.0.0
+description: "AIGC storyboard hints from docs/2026-05-26-剧本标签体系设计决策.md §4.3"
+prompt_ver: "v2.0.0"
+scope:
+  plot_unit:
+    - dim: scene_locale_type
+      cardinality: single
+      values:
+        - modern_indoor
+        - modern_outdoor
+        - ancient_indoor
+        - ancient_outdoor
+        - fantasy_world
+        - school
+        - transport
+        - unclear
+    - dim: scene_time_of_day
+      cardinality: single
+      values: [day, night, dawn, dusk, unclear]
+    - dim: scene_in_out
+      cardinality: single
+      values: [int, ext, mixed]
+    - dim: scene_emotion_keynote
+      cardinality: single
+      values: [tense, romantic, sad, happy, comedic, epic, eerie, calm]
+    - dim: shot_suggestion
+      cardinality: single
+      values:
+        - close_up
+        - medium_shot
+        - wide_shot
+        - over_shoulder
+        - push_in
+        - pull_out
+        - pan
+        - tilt_up
+        - tilt_down
+        - tracking
+        - mixed
+        - unclear
+    - dim: prop_focus
+      cardinality: multi
+      open_enum: true
+      values:
+        - sword
+        - jade_pendant
+        - token
+        - contract
+        - poison
+        - antidote
+        - letter
+        - child
+        - pet

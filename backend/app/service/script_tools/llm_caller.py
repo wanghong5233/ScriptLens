@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 from dataclasses import dataclass
@@ -40,6 +41,7 @@ from service.core.llm.runtime import (
     FORBIDDEN_LLM_MODELS as _RUNTIME_FORBIDDEN,
     LLMRuntime,
 )
+from service.script_tools.llm_cache import LlmCache
 
 logger = logging.getLogger(__name__)
 
@@ -98,6 +100,9 @@ class ModelCapability:
         是否支持 `response_format={"type":"json_object"}`。多数现代模型支持，
         老 OpenAI proxy / o1 / 部分 DashScope 旧模型不支持。
 
+    supports_seed
+        是否支持 seed 参数。用于稳定性实验固定随机性。
+
     reasoning_token_overhead
         非 0 表示这是 reasoning model：调用方声明 max_tokens=X 表示「想要的
         content tokens」，底层会用 X + reasoning_token_overhead 作为
@@ -115,6 +120,7 @@ class ModelCapability:
     uses_max_completion_tokens: bool = False
     supports_custom_temperature: bool = True
     supports_json_response_format: bool = True
+    supports_seed: bool = True
     reasoning_token_overhead: int = 0
     description: str = ""
 
@@ -131,6 +137,7 @@ _MODEL_CAPABILITIES: tuple[tuple[str, ModelCapability], ...] = (
             uses_max_completion_tokens=True,
             supports_custom_temperature=False,
             supports_json_response_format=True,
+            supports_seed=False,
             reasoning_token_overhead=3072,
             description="OpenAI GPT-5 reasoning family",
         ),
@@ -143,6 +150,7 @@ _MODEL_CAPABILITIES: tuple[tuple[str, ModelCapability], ...] = (
             uses_max_completion_tokens=True,
             supports_custom_temperature=False,
             supports_json_response_format=False,  # o1 早期不支持 json_object
+            supports_seed=False,
             reasoning_token_overhead=8192,
             description="OpenAI o1 reasoning",
         ),
@@ -154,6 +162,7 @@ _MODEL_CAPABILITIES: tuple[tuple[str, ModelCapability], ...] = (
             uses_max_completion_tokens=True,
             supports_custom_temperature=False,
             supports_json_response_format=True,
+            supports_seed=False,
             reasoning_token_overhead=8192,
             description="OpenAI o3 reasoning",
         ),
@@ -166,6 +175,7 @@ _MODEL_CAPABILITIES: tuple[tuple[str, ModelCapability], ...] = (
             uses_max_completion_tokens=False,
             supports_custom_temperature=True,
             supports_json_response_format=True,
+            supports_seed=True,
             reasoning_token_overhead=0,
             description="OpenAI GPT-4 family",
         ),
@@ -178,6 +188,7 @@ _MODEL_CAPABILITIES: tuple[tuple[str, ModelCapability], ...] = (
             uses_max_completion_tokens=False,
             supports_custom_temperature=True,
             supports_json_response_format=True,
+            supports_seed=True,
             reasoning_token_overhead=0,
             description="DashScope Qwen family",
         ),
@@ -398,6 +409,117 @@ class LlmCaller:
         每个 provider 内再走 model candidate fallback。
         """
         temp = self.default_temperature if temperature is None else temperature
+        return await self._call_json_internal(
+            prompt=prompt,
+            tier=tier,
+            temperature=temp,
+            max_tokens=max_tokens,
+            system_message=system_message,
+            seed=None,
+        )
+
+    async def call_json_deterministic(
+        self,
+        prompt: str,
+        *,
+        tag_set_ver: str,
+        prompt_ver: str,
+        dim: str,
+        seed: int,
+        tier: str = ModelTier.PRIMARY,
+        max_tokens: int = 2048,
+        system_message: Optional[str] = None,
+        use_cache: bool = True,
+    ) -> LLMResponse:
+        """Deterministic call for tag extraction experiments.
+
+        Invariants:
+        - temperature 固定为 0
+        - seed 参与输入 hash
+        - 命中缓存时不发 LLM 请求
+        """
+        input_hash = self._build_input_hash(
+            prompt=prompt,
+            system_message=system_message,
+            tag_set_ver=tag_set_ver,
+            prompt_ver=prompt_ver,
+            dim=dim,
+            seed=seed,
+            max_tokens=max_tokens,
+            tier=tier,
+        )
+
+        if use_cache:
+            cached = await LlmCache.get(input_hash)
+            if cached is not None:
+                return LLMResponse(
+                    raw=cached.raw,
+                    parsed=cached.parsed,
+                    provider=cached.provider,
+                    model=cached.model,
+                    elapsed_ms=cached.elapsed_ms,
+                )
+
+        resp = await self._call_json_internal(
+            prompt=prompt,
+            tier=tier,
+            temperature=0.0,
+            max_tokens=max_tokens,
+            system_message=system_message,
+            seed=seed,
+        )
+        if use_cache:
+            await LlmCache.put(
+                input_hash,
+                model_ver=resp.model,
+                prompt_ver=prompt_ver,
+                tag_set_ver=tag_set_ver,
+                seed=seed,
+                raw=resp.raw,
+                parsed=resp.parsed,
+                provider=resp.provider,
+                elapsed_ms=resp.elapsed_ms,
+            )
+        return resp
+
+    @staticmethod
+    def _build_input_hash(
+        *,
+        prompt: str,
+        system_message: Optional[str],
+        tag_set_ver: str,
+        prompt_ver: str,
+        dim: str,
+        seed: int,
+        max_tokens: int,
+        tier: str,
+    ) -> str:
+        payload = json.dumps(
+            {
+                "prompt": prompt,
+                "system_message": system_message or "",
+                "tag_set_ver": tag_set_ver,
+                "prompt_ver": prompt_ver,
+                "dim": dim,
+                "seed": seed,
+                "max_tokens": max_tokens,
+                "tier": tier,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    async def _call_json_internal(
+        self,
+        *,
+        prompt: str,
+        tier: str,
+        temperature: float,
+        max_tokens: int,
+        system_message: Optional[str],
+        seed: Optional[int],
+    ) -> LLMResponse:
         messages = []
         if system_message:
             messages.append({"role": "system", "content": system_message})
@@ -421,8 +543,9 @@ class LlmCaller:
                     client=client,
                     tier=tier,
                     messages=messages,
-                    temperature=temp,
+                    temperature=temperature,
                     max_tokens=max_tokens,
+                    seed=seed,
                 )
                 if provider != primary:
                     logger.warning("LlmCaller provider fallback applied: %s -> %s", primary, provider)
@@ -476,7 +599,14 @@ class LlmCaller:
             return True
         if status == 400:
             param, code = _classify_400(e)
-            if param in {"model", "temperature", "max_tokens", "max_completion_tokens", "response_format"}:
+            if param in {
+                "model",
+                "temperature",
+                "max_tokens",
+                "max_completion_tokens",
+                "response_format",
+                "seed",
+            }:
                 return True
             if code in {
                 "model_not_found",
@@ -509,6 +639,7 @@ class LlmCaller:
         messages: list,
         temperature: float,
         max_tokens: int,
+        seed: Optional[int],
     ) -> LLMResponse:
         """同一 provider 内按 candidate 列表逐个 model 尝试。
 
@@ -533,6 +664,7 @@ class LlmCaller:
                     messages=messages,
                     temperature=temperature,
                     max_tokens=max_tokens,
+                    seed=seed,
                 )
                 if len(tried) > 1:
                     logger.warning(
@@ -575,6 +707,7 @@ class LlmCaller:
         messages: list,
         temperature: float,
         max_tokens: int,
+        seed: Optional[int],
     ) -> LLMResponse:
         """单次 (provider, model) 调用 + reasoning model 自适应翻倍重试。
 
@@ -593,6 +726,7 @@ class LlmCaller:
             messages=messages,
             temperature=temperature,
             content_budget=max_tokens,
+            seed=seed,
         )
         choice = resp.choices[0] if resp.choices else None
         raw = (getattr(choice.message, "content", "") if choice else "") or ""
@@ -615,6 +749,7 @@ class LlmCaller:
                 messages=messages,
                 temperature=temperature,
                 content_budget=doubled,
+                seed=seed,
             )
             choice = resp.choices[0] if resp.choices else None
             raw = (getattr(choice.message, "content", "") if choice else "") or ""
@@ -643,6 +778,7 @@ class LlmCaller:
         messages: list,
         temperature: Optional[float],
         content_budget: int,
+        seed: Optional[int],
     ):
         """根据 capability 表直接构造合规参数，调一次 chat.completions。
 
@@ -670,6 +806,11 @@ class LlmCaller:
             params["temperature"] = temperature
         if cap.supports_json_response_format:
             params["response_format"] = {"type": "json_object"}
+        if seed is not None and cap.supports_seed:
+            if model.lower().startswith("qwen"):
+                params["extra_body"] = {"seed": seed}
+            else:
+                params["seed"] = seed
 
         try:
             return await client.chat.completions.create(**params)
@@ -695,6 +836,7 @@ class LlmCaller:
                 origin_token_key=token_key,
                 origin_param=param,
                 origin_code=code,
+                seed=seed if cap.supports_seed else None,
             )
 
     @staticmethod
@@ -708,6 +850,7 @@ class LlmCaller:
         origin_token_key: str,
         origin_param: str,
         origin_code: str,
+        seed: Optional[int],
     ):
         """capability 失配时的协议探测：≤3 次按「最大兼容 → 最小兼容」顺序重试。
 
@@ -719,7 +862,16 @@ class LlmCaller:
         base: dict[str, Any] = {"model": model, "messages": messages}
         if temperature is not None:
             base["temperature"] = temperature
+        base_with_seed = dict(base)
+        if seed is not None:
+            if model.lower().startswith("qwen"):
+                base_with_seed["extra_body"] = {"seed": seed}
+            else:
+                base_with_seed["seed"] = seed
         candidates = [
+            {**base_with_seed, alt_token_key: effective_budget, "response_format": {"type": "json_object"}},
+            {**base_with_seed, alt_token_key: effective_budget},
+            {**base_with_seed, origin_token_key: effective_budget},
             {**base, alt_token_key: effective_budget, "response_format": {"type": "json_object"}},
             {**base, alt_token_key: effective_budget},
             {**base, origin_token_key: effective_budget},
@@ -750,7 +902,7 @@ class LlmCaller:
 
 def _is_unsupported_param_400(param: str, code: str) -> bool:
     """是否属于「参数被 provider 白名单拒绝」类的 400（capability 应被纠正）。"""
-    if param in ("max_tokens", "max_completion_tokens", "response_format", "temperature"):
+    if param in ("max_tokens", "max_completion_tokens", "response_format", "temperature", "seed"):
         return True
     return code in ("unsupported_parameter", "unsupported_value")
 
@@ -791,6 +943,8 @@ def _classify_400(e: APIError) -> tuple[str, str]:
         param = "max_tokens"
     elif "response_format" in msg:
         param = "response_format"
+    elif "seed" in msg:
+        param = "seed"
     if "unsupported" in msg or "not supported" in msg:
         code = "unsupported_parameter"
     return param, code

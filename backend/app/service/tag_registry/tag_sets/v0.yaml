@@ -1,0 +1,177 @@
+version: v0.1.0
+description: "Shared-kernel baseline from docs/素材标签体系.md §1 §3 §4 §5"
+prompt_ver: "v0.1.0"
+scope:
+  script:
+    - dim: drama_tags
+      cardinality: multi
+      open_enum: true
+      values:
+        - 乡村
+        - 亲情
+        - 先婚后爱
+        - 剧情
+        - 历史古代
+        - 古代
+        - 古风权谋
+        - 大女主
+        - 大男主
+        - 奇幻脑洞
+        - 女强
+        - 女性成长
+        - 女频
+        - 婆媳
+        - 实拍
+        - 家庭伦理
+        - 年代
+        - 年代爱情
+        - 强者回归
+        - 总裁
+        - 恋爱
+        - 悬疑推理
+        - 战神
+        - 战神归来
+        - 打脸虐渣
+        - 无敌神医
+        - 极品亲戚
+        - 架空
+        - 沙雕漫
+        - 玄幻
+        - 玄幻仙侠
+        - 现代
+        - 现代言情
+        - 现言甜宠
+        - 真人AI
+        - 种田
+        - 穿越
+        - 系统
+        - 职场
+        - 脑洞
+        - 豪门恩怨
+        - 赘婿逆袭
+        - 逆袭
+        - 都市
+        - 都市日常
+        - 都市爱情
+        - 都市玄幻
+        - 重生
+        - 闪婚
+        - 马甲
+        - 黑道
+  plot_unit:
+    - dim: dialogue_density
+      cardinality: single
+      values: [dense, moderate, sparse, none]
+    - dim: speech_style
+      cardinality: single
+      values: [emotional, dramatic, narrative, comedic, none]
+    - dim: cta_type
+      cardinality: single
+      values: [curiosity, urgency, subscribe, none]
+    - dim: voiceover_type
+      cardinality: single
+      values: [character, narrator, mixed, none]
+    - dim: emotional_keywords
+      cardinality: single
+      values: [high, moderate, low, none]
+    - dim: keyword_theme
+      cardinality: single
+      values: [romance, power, family, comedy, none]
+
+    - dim: plot_hook
+      cardinality: single
+      values:
+        - identity_reveal
+        - reversal
+        - betrayal
+        - rescue
+        - punishment
+        - forced_marriage
+        - reunion
+        - secret_exposure
+        - conflict_escalation
+        - emotional_choice
+        - none
+    - dim: conflict_type
+      cardinality: single
+      values:
+        - status_gap
+        - family_conflict
+        - romantic_conflict
+        - workplace_conflict
+        - revenge
+        - survival_crisis
+        - misunderstanding
+        - moral_judgement
+        - none
+    - dim: story_stage
+      cardinality: single
+      values: [setup, trigger, escalation, climax, payoff, teaser, none]
+    - dim: relationship_arc
+      cardinality: single
+      values:
+        - enemies_to_lovers
+        - power_flip
+        - chase_and_reject
+        - reunion_after_separation
+        - protection
+        - betrayal_and_revenge
+        - family_reconciliation
+        - none
+    - dim: payoff_type
+      cardinality: single
+      values:
+        - face_slapping
+        - counterattack
+        - reveal_power
+        - romantic_payoff
+        - justice_served
+        - cliffhanger
+        - comic_relief
+        - none
+    - dim: emotional_driver
+      cardinality: single
+      values:
+        - humiliation
+        - jealousy
+        - regret
+        - pity
+        - desire
+        - anger
+        - fear
+        - tenderness
+        - curiosity
+        - none
+
+    - dim: business_content_archetype
+      cardinality: single
+      values:
+        - power_payoff
+        - relationship_payoff
+        - survival_suspense
+        - workplace_counter
+        - comedy_light
+        - unclear
+    - dim: business_conflict_bucket
+      cardinality: single
+      values: [relationship_power, survival, workplace, none]
+    - dim: business_payoff_bucket
+      cardinality: single
+      values:
+        - face_slap_counter
+        - power_reveal
+        - emotional_romance
+        - rescue_protection
+        - suspense_cliffhanger
+        - justice_punishment
+        - comedy
+        - none
+    - dim: business_emotion_bucket
+      cardinality: single
+      values:
+        - anger_humiliation
+        - curiosity_suspense
+        - fear_crisis
+        - warm_regret_pity
+        - desire_jealousy
+        - neutral

@@ -1,0 +1,155 @@
+version: v1.0.0
+extends: v0.1.0
+description: "Web-novel/short-drama script-only extension from docs/2026-05-26-剧本标签体系设计决策.md §4.2"
+prompt_ver: "v1.0.0"
+scope:
+  script:
+    - dim: gender_axis
+      cardinality: single
+      values: [male_lead, female_lead, dual_lead, unclear]
+    - dim: world_setting
+      cardinality: single
+      values:
+        - modern_urban
+        - modern_workplace
+        - modern_rural
+        - ancient_palace
+        - ancient_jianghu
+        - ancient_folk
+        - xianxia
+        - xuanhuan
+        - apocalypse
+        - system_flow
+        - rebirth
+        - transmigration
+        - school
+        - mixed
+    - dim: protagonist_archetype
+      cardinality: single
+      values:
+        - war_god_return
+        - son_in_law_counter
+        - reborn_revenge
+        - system_holder
+        - transmigrator
+        - hidden_heir
+        - big_female
+        - ceo_dominant
+        - sweet_pet
+        - genius_doctor
+        - weak_to_strong
+        - nanny_disguise
+        - unclear
+    - dim: antagonist_archetype
+      cardinality: single
+      values:
+        - evil_female_rival
+        - scumbag_male
+        - evil_relatives
+        - corrupt_ceo
+        - hidden_boss
+        - black_society
+        - corrupt_official
+        - ancient_villain
+        - mixed
+        - none
+    - dim: pacing_mode
+      cardinality: single
+      values: [high_density_conflict, medium_density, slow_build, mixed]
+    - dim: paid_break_pattern
+      cardinality: single
+      values: [no_break, ep_end_cliffhanger, mid_break, three_stage_break, dense_break]
+    - dim: story_arc_template
+      cardinality: single
+      values:
+        - three_act_underdog_revenge
+        - rebirth_step_on_old_line
+        - system_progression
+        - sweet_romance_progression
+        - reunion_after_misunderstanding
+        - crisis_solving
+        - family_reconciliation
+        - court_struggle
+        - mixed
+        - unclear
+
+  character:
+    - dim: character_archetype
+      cardinality: single
+      values:
+        - weak_start_hidden_strong
+        - invincible_dominant
+        - cold_arrogant
+        - naive_warm
+        - scheming_lotus
+        - comic_relief
+        - family_burden
+        - absolute_villain
+        - grey_villain
+        - mentor_elder
+        - tool_npc
+    - dim: character_role_in_arc
+      cardinality: single
+      values: [actor, target, blocker, helper, mentor, catalyst, observer, comic_relief]
+    - dim: character_arc_type
+      cardinality: single
+      values:
+        - power_growth
+        - moral_growth
+        - redemption
+        - corruption
+        - static
+        - identity_reveal
+        - relational_growth
+        - tragic_fall
+    - dim: character_agency_level
+      cardinality: single
+      values: [high, medium, low]
+
+  relationship:
+    - dim: relationship_type
+      cardinality: single
+      values:
+        - romance
+        - family
+        - rival
+        - ally
+        - authority
+        - mentor
+        - deception
+        - blood_oath
+        - friendship
+        - servant
+    - dim: relationship_polarity
+      cardinality: single
+      values: [positive, negative, mixed, unstable]
+    - dim: relationship_dynamic_arc
+      cardinality: single
+      values:
+        - enemies_to_lovers
+        - forced_marriage_to_real_love
+        - friends_to_lovers
+        - lovers_to_strangers
+        - master_to_betrayal
+        - rivals_to_allies
+        - family_estrangement_to_reconciliation
+        - persistent_conflict
+        - persistent_support
+        - none
+    - dim: relationship_triangle
+      cardinality: single
+      values: [love_triangle, rivalry_triangle, family_triangle, none]
+
+  episode:
+    - dim: episode_opening_type
+      cardinality: single
+      values: [hook_in_3s, setup_first, recap_then_hook, cliffhanger_resolve, flashback]
+    - dim: episode_end_hook
+      cardinality: single
+      values: [cliffhanger, twist, payoff_then_setup, promise, question, none]
+    - dim: intra_episode_peak_count
+      cardinality: single
+      values: ["0", "1", "2", "3_plus"]
+    - dim: paid_break_position
+      cardinality: single
+      values: [ep_end, ep_two_third, ep_mid, none]

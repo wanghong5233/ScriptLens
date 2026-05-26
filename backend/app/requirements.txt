@@ -55,6 +55,14 @@ openpyxl
 python-pptx
 python-docx
 markdown
+pyyaml
+jinja2
+
+# ---------------- 稳定性评测框架（Batch 0） ----------------
+krippendorff
+scikit-learn
+sentence-transformers
+pytest
 
 # ---------------- 导出渲染 ----------------
 # F3：剧本导出 PDF；用 STSong-Light CID 字体支持中文，无需额外字体文件
