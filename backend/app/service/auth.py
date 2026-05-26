@@ -243,8 +243,6 @@ def register_user(username: str, password: str):
     """
     from utils.password import hash_password
     
-    # 配置日志
-    logging.basicConfig(level=logging.INFO)
     logger = logging.getLogger(__name__)
     
     logger.info(f"开始注册用户: {username}")

@@ -47,6 +47,9 @@ uvicorn_access_logger = logging.getLogger("uvicorn.access")
 if not any(isinstance(f, HealthAccessLogFilter) for f in uvicorn_access_logger.filters):
     uvicorn_access_logger.addFilter(HealthAccessLogFilter())
 
+for logger_name in ("httpx", "httpcore", "openai", "urllib3"):
+    logging.getLogger(logger_name).setLevel(logging.WARNING)
+
 
 @app.middleware("http")
 async def dispatch(request: Request, call_next):
@@ -55,7 +58,7 @@ async def dispatch(request: Request, call_next):
     request_id_var.set(request_id)
 
     if not is_health_request:
-        log.info(f"Request started: {request.method} {request.url.path}")
+        log.debug(f"Request started: {request.method} {request.url.path}")
 
     start_time = time.time()
     status_code = DEFAULT_ERROR_STATUS_CODE
@@ -70,7 +73,7 @@ async def dispatch(request: Request, call_next):
     finally:
         process_time = (time.time() - start_time) * MILLISECONDS_PER_SECOND
         if not is_health_request:
-            log.info(
+            log.debug(
                 f"Request finished in {process_time:.2f}ms. "
                 f"Status code: {response.status_code if 'response' in locals() else status_code}"
             )

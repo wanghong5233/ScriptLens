@@ -182,7 +182,7 @@ async def demo_entry(
                     )
                 )
                 _log_db.commit()
-                _logger.info("demo_entry logged: ip=%s", client_ip)
+                _logger.debug("demo_entry logged: ip=%s", client_ip)
             except Exception as e:
                 _log_db.rollback()
                 _logger.warning("demo_entry failed to log: %s", e)
