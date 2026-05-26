@@ -136,3 +136,68 @@ def write_per_dim_json(reports: dict[str, DimStabilityReport], dir_path: str) ->
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+
+
+def _cohen_kappa_pair(left: list[str], right: list[str]) -> float:
+    if not left or not right or len(left) != len(right):
+        return 0.0
+    try:
+        from sklearn.metrics import cohen_kappa_score
+
+        return float(cohen_kappa_score(left, right))
+    except Exception:
+        same = sum(1 for a, b in zip(left, right) if a == b)
+        return same / len(left)
+
+
+def write_baseline_comparison(
+    reports: dict[str, DimStabilityReport],
+    rule_baseline_outputs: dict[str, dict[str, dict[str, str]]],
+    *,
+    path: str | None = None,
+) -> str:
+    """Build markdown appendix for `LLM vs rule baseline` comparisons.
+
+    Expected `rule_baseline_outputs` shape:
+    {
+      "<dim>": {
+        "llm": {"target_id": "value", ...},
+        "rule": {"target_id": "value", ...}
+      }
+    }
+    """
+    lines = [
+        "## LLM vs Rule Baseline",
+        "",
+        "| dim | n | PAR | kappa | llm_verdict |",
+        "| --- | ---: | ---: | ---: | --- |",
+    ]
+    for dim in sorted(rule_baseline_outputs.keys()):
+        payload = rule_baseline_outputs.get(dim) or {}
+        llm_map = payload.get("llm") or {}
+        rule_map = payload.get("rule") or {}
+        target_ids = sorted(set(llm_map.keys()) & set(rule_map.keys()))
+        llm_vec = [str(llm_map[t]) for t in target_ids if str(llm_map[t])]
+        rule_vec = [str(rule_map[t]) for t in target_ids if str(rule_map[t])]
+        # align after empty-value filter
+        if len(llm_vec) != len(rule_vec):
+            pair_vec = [(str(llm_map[t]), str(rule_map[t])) for t in target_ids if str(llm_map[t]) and str(rule_map[t])]
+            llm_vec = [x for x, _ in pair_vec]
+            rule_vec = [y for _, y in pair_vec]
+
+        n = len(llm_vec)
+        if n == 0:
+            par = 0.0
+            kappa = 0.0
+        else:
+            par = sum(1 for a, b in zip(llm_vec, rule_vec) if a == b) / n
+            kappa = _cohen_kappa_pair(llm_vec, rule_vec)
+        verdict = reports.get(dim).verdict if dim in reports else "-"
+        lines.append(f"| {dim} | {n} | {par:.3f} | {kappa:.3f} | {verdict} |")
+
+    markdown = "\n".join(lines)
+    if path:
+        p = Path(path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(markdown, encoding="utf-8")
+    return markdown

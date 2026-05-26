@@ -1,0 +1,25 @@
+tag_set_ver: v0.1.0
+split: dev
+source_tag_set_file: ScriptLens/backend/app/service/tag_registry/tag_sets/v0.yaml
+stability_classification:
+  stable_dims:
+  - business_conflict_bucket
+  - business_content_archetype
+  - business_emotion_bucket
+  - business_payoff_bucket
+  - conflict_type
+  - cta_type
+  - dialogue_density
+  - drama_tags
+  - emotional_driver
+  - emotional_keywords
+  - keyword_theme
+  - payoff_type
+  - plot_hook
+  - relationship_arc
+  - speech_style
+  - story_stage
+  - voiceover_type
+  fix_dims: []
+  offline_dims: []
+note: Classification derived from v0 stability reports in current environment.

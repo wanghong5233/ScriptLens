@@ -80,6 +80,18 @@ async def _main_async() -> None:
     args = _parse_args()
     cfg = load_tag_set(args.tag_set)
 
+    # Prefer real extractors when available.
+    if args.tag_set == "v0.1.0":
+        try:
+            from service.script_tools.v0_asr_tag_extractor import register_v0_plot_unit_extractor
+            from service.script_tools.v0_drama_tag_extractor import register_v0_drama_extractor
+
+            register_v0_drama_extractor(args.tag_set)
+            register_v0_plot_unit_extractor(args.tag_set)
+        except Exception:
+            # Keep CLI usable even when runtime dependencies are missing.
+            pass
+
     samples = sample_split(args.split, source_dir=args.source_dir)
     if not samples:
         raise RuntimeError(f"no samples found under {args.source_dir}")

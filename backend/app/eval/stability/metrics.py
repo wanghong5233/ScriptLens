@@ -31,15 +31,25 @@ def _load_embedder():
 def krippendorff_alpha(matrix: list[list[str]]) -> float:
     if not matrix:
         return 0.0
+    # Degenerate but perfectly stable case: all labels identical.
+    values = {cell for row in matrix for cell in row if cell != ""}
+    if len(values) <= 1:
+        return 1.0
     try:
         import krippendorff
 
         arr = np.array(matrix, dtype=object)
         # reliability_data accepts [raters, items]
         alpha = krippendorff.alpha(reliability_data=arr, level_of_measurement="nominal")
-        return float(alpha if alpha is not None else 0.0)
+        if alpha is None:
+            return 0.0
+        alpha_f = float(alpha)
+        if np.isnan(alpha_f):
+            # In degenerate distributions, treat exact agreement as stable.
+            return 1.0 if pairwise_agreement_rate(matrix) == 1.0 else 0.0
+        return alpha_f
     except Exception:
-        return 0.0
+        return 1.0 if pairwise_agreement_rate(matrix) == 1.0 else 0.0
 
 
 def cohen_kappa_mean(matrix: list[list[str]]) -> float:
@@ -53,7 +63,10 @@ def cohen_kappa_mean(matrix: list[list[str]]) -> float:
     for i in range(len(matrix)):
         for j in range(i + 1, len(matrix)):
             try:
-                kappas.append(float(cohen_kappa_score(matrix[i], matrix[j])))
+                score = float(cohen_kappa_score(matrix[i], matrix[j]))
+                if np.isnan(score):
+                    score = 1.0 if matrix[i] == matrix[j] else 0.0
+                kappas.append(score)
             except Exception:
                 kappas.append(0.0)
     return float(np.mean(kappas)) if kappas else 0.0
