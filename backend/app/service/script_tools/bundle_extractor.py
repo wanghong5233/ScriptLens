@@ -50,6 +50,10 @@ def _cache_put(key: tuple[str, str, int, str, str], payload: dict[str, Any]) -> 
         _PAYLOAD_CACHE.popitem(last=False)
 
 
+def _env_disable_cache() -> bool:
+    return os.getenv("SM_STABILITY_DISABLE_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _fallback_single(values: list[str], key_seed: str, *, default: str = "none") -> str:
     if not values:
         return default
@@ -332,12 +336,15 @@ async def extract_bundle(
     variant: str = "a",
     caller: LlmCaller | None = None,
     persist: bool = True,
+    use_cache: bool = True,
     engine: Engine = default_engine,
 ) -> dict[str, Any]:
     cache_key = (bundle_id, target_id, seed, variant, tag_set_ver)
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    cache_enabled = bool(use_cache) and not _env_disable_cache()
+    if cache_enabled:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
     cfg = load_tag_set(tag_set_ver)
     bundle = cfg.get_bundle(bundle_id)
@@ -421,6 +428,7 @@ async def extract_bundle(
             seed=seed,
             tier=ModelTier.PRIMARY,
             max_tokens=1024 if len(bundle.dims) > 4 else 768,
+            use_cache=cache_enabled,
         )
         raw = resp.parsed if isinstance(resp.parsed, dict) else {}
         model_ver = resp.model
@@ -507,7 +515,8 @@ async def extract_bundle(
         "__scope": bundle.scope,
         "__model_ver": model_ver,
     }
-    _cache_put(cache_key, payload)
+    if cache_enabled:
+        _cache_put(cache_key, payload)
     return payload
 
 
@@ -522,6 +531,7 @@ async def extract_by_scope(
     prompt_ver: str,
     seed: int,
     variant: str,
+    use_cache: bool = True,
 ) -> dict[str, Any]:
     cfg = load_tag_set(tag_set_ver)
     dim = _dim_from_prompt_ver(prompt_ver)
@@ -534,6 +544,7 @@ async def extract_by_scope(
         tag_set_ver=tag_set_ver,
         seed=seed,
         variant=variant,
+        use_cache=use_cache,
         persist=True,
     )
 

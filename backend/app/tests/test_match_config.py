@@ -11,9 +11,13 @@ def test_gate_lists_do_not_overlap() -> None:
             seen.add(dim)
 
 
-def test_empty_gate_table_is_safe() -> None:
-    assert list_entries() == ()
-    for gate in SharedGate:
-        assert list_dims_by_gate(gate) == ()
+def test_gate_table_lookup_is_safe() -> None:
+    entries = list_entries()
+    assert len(entries) >= 1
+    shared_dims = list_dims_by_gate(SharedGate.STABLE_SHARED)
+    assert "dialogue_density" in shared_dims
+    entry = get_entry("dialogue_density")
+    assert entry is not None
+    assert entry.gate == SharedGate.STABLE_SHARED
     assert get_entry("world_setting") is None
 

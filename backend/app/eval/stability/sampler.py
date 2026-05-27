@@ -63,10 +63,29 @@ def sample_split(
     split: SplitName,
     n_scripts: int = 10,
     n_episodes_per_script: int = 5,
-    source_dir: str = "ScriptLens/eval/爆款短剧剧本（完整本）",
+    source_dir: str = "ScriptLens/eval/ai漫剧剧本数据集/完整本",
     seed: int = 42,
+    script_ids: list[str] | None = None,
 ) -> list[StabilitySample]:
     files = _list_script_files(source_dir)
+    if script_ids is not None:
+        file_by_stem = {path.stem: path for path in files}
+        chosen_ids = script_ids[:n_scripts] if n_scripts > 0 else list(script_ids)
+        out: list[StabilitySample] = []
+        for script_id in chosen_ids:
+            file_path = file_by_stem.get(script_id)
+            genre_slice = _guess_genre_slice_from_name(script_id)
+            out.append(
+                StabilitySample(
+                    split=split,
+                    script_id=script_id,
+                    script_path=str(file_path) if file_path is not None else "",
+                    drama_genre_slice=genre_slice,
+                    episodes_sampled=list(range(1, n_episodes_per_script + 1)),
+                )
+            )
+        return out
+
     if not files:
         return []
 

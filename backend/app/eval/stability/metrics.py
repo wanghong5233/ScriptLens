@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import math
 from collections import Counter
 from functools import lru_cache
+from statistics import NormalDist
 from typing import Iterable
 
 import numpy as np
@@ -163,3 +165,29 @@ def majority_vote(values_by_run: list[list[str]]) -> list[str]:
             continue
         out.append(Counter(candidates).most_common(1)[0][0])
     return out
+
+
+def stable_count_and_wilson(matrix: list[list[str]], confidence: float = 0.95) -> tuple[int, int, float]:
+    if not matrix:
+        return 0, 0, 0.0
+    n_samples = max((len(row) for row in matrix), default=0)
+    if n_samples <= 0:
+        return 0, 0, 0.0
+
+    stable_count = 0
+    for col in range(n_samples):
+        values = [row[col] if len(row) > col else "" for row in matrix]
+        if not values:
+            continue
+        if all(value == values[0] for value in values):
+            stable_count += 1
+
+    if n_samples == 0:
+        return 0, 0, 0.0
+    p_hat = stable_count / n_samples
+    z = NormalDist().inv_cdf(0.5 + confidence / 2)
+    denom = 1 + (z**2) / n_samples
+    center = p_hat + (z**2) / (2 * n_samples)
+    margin = z * math.sqrt((p_hat * (1 - p_hat) + (z**2) / (4 * n_samples)) / n_samples)
+    lower = (center - margin) / denom
+    return n_samples, stable_count, max(0.0, float(lower))

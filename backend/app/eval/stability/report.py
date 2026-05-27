@@ -13,6 +13,7 @@ from eval.stability.metrics import (
     macro_f1_against_gold,
     majority_vote,
     pairwise_agreement_rate,
+    stable_count_and_wilson,
 )
 from eval.stability.runner import RunResult
 
@@ -24,6 +25,9 @@ class DimStabilityReport:
     inter_alpha: float
     kappa_mean: float
     par: float
+    n_samples: int
+    stable_count: int
+    wilson_lower: float
     cosine: float
     macro_f1: Optional[float]
     verdict: str  # online | fix | offline
@@ -64,10 +68,11 @@ def aggregate(
         inter = rr.matrix("inter")
 
         intra_alpha = krippendorff_alpha(intra)
-        inter_alpha = krippendorff_alpha(inter)
+        inter_alpha = krippendorff_alpha(inter) if inter else intra_alpha
         kappa = cohen_kappa_mean(intra)
         par = pairwise_agreement_rate(intra)
         cosine = cosine_similarity_enum(intra)
+        n_samples, stable_count, wilson_lower = stable_count_and_wilson(intra)
 
         mv = majority_vote(intra)
         gold_vec = gold.get(dim)
@@ -83,6 +88,9 @@ def aggregate(
             inter_alpha=inter_alpha,
             kappa_mean=kappa,
             par=par,
+            n_samples=n_samples,
+            stable_count=stable_count,
+            wilson_lower=wilson_lower,
             cosine=cosine,
             macro_f1=macro_f1,
             verdict=_verdict(intra_alpha, inter_alpha, kappa, par),
@@ -106,15 +114,16 @@ def write_markdown(
     lines = [
         f"# Stability Report ({tag_set_ver} / {split})",
         "",
-        "| dim | intra_alpha | inter_alpha | kappa | PAR | cosine | macro_f1 | verdict |",
-        "| --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |",
+        "| dim | intra_alpha | inter_alpha | kappa | PAR | stable | Wilson95Lower | cosine | macro_f1 | verdict |",
+        "| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |",
     ]
     for dim in sorted(reports.keys()):
         r = reports[dim]
         f1_str = f"{r.macro_f1:.3f}" if r.macro_f1 is not None else "-"
+        stable = f"{r.stable_count}/{r.n_samples}" if r.n_samples > 0 else "0/0"
         lines.append(
             f"| {dim} | {r.intra_alpha:.3f} | {r.inter_alpha:.3f} | {r.kappa_mean:.3f} | "
-            f"{r.par:.3f} | {r.cosine:.3f} | {f1_str} | {r.verdict} |"
+            f"{r.par:.3f} | {stable} | {r.wilson_lower:.3f} | {r.cosine:.3f} | {f1_str} | {r.verdict} |"
         )
 
     lines.append("")

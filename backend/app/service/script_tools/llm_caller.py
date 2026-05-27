@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -438,6 +439,9 @@ class LlmCaller:
         - seed 参与输入 hash
         - 命中缓存时不发 LLM 请求
         """
+        env_disables_cache = os.getenv("SM_STABILITY_DISABLE_CACHE", "").strip().lower() in {"1", "true", "yes", "on"}
+        cache_enabled = bool(use_cache) and not env_disables_cache
+
         input_hash = self._build_input_hash(
             prompt=prompt,
             system_message=system_message,
@@ -449,7 +453,7 @@ class LlmCaller:
             tier=tier,
         )
 
-        if use_cache:
+        if cache_enabled:
             cached = await LlmCache.get(input_hash)
             if cached is not None:
                 return LLMResponse(
@@ -468,7 +472,7 @@ class LlmCaller:
             system_message=system_message,
             seed=seed,
         )
-        if use_cache:
+        if cache_enabled:
             await LlmCache.put(
                 input_hash,
                 model_ver=resp.model,

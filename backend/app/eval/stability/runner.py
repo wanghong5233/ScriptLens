@@ -10,11 +10,11 @@ from typing import Any, Awaitable, Callable
 
 from sqlalchemy import text
 
+from eval.stability.experiment_dir import ExperimentDir
 from service.tag_registry.loader import get_prompt_ver
 from utils.database import engine as default_engine
 
-
-ExtractorFn = Callable[[str, str, str, int, str], Awaitable[dict[str, Any]]]
+ExtractorFn = Callable[..., Awaitable[dict[str, Any]]]
 
 
 class ExtractorRegistry:
@@ -47,7 +47,7 @@ class StabilityTask:
 @dataclass
 class RunTrace:
     run_type: str  # intra|inter
-    run_key: str   # seed:42 or variant:b
+    run_key: str   # rep:0 or variant:b
     target_values: dict[str, str] = field(default_factory=dict)
 
 
@@ -68,7 +68,7 @@ class RunResult:
         targets = self.target_ids()
         matrix: list[list[str]] = []
         for run in runs:
-            row = [run.target_values.get(t, "") for t in targets]
+            row = [run.target_values.get(target_id, "") for target_id in targets]
             matrix.append(row)
         return matrix
 
@@ -124,6 +124,29 @@ def _persist_run(
         )
 
 
+def _target_script_id(scope: str, target_id: str) -> str:
+    if scope == "script":
+        return target_id
+    if scope == "episode" and "::ep::" in target_id:
+        return target_id.partition("::ep::")[0]
+    table_by_scope = {
+        "plot_unit": "plot_units",
+        "character": "character_entities",
+        "relationship": "character_relationships",
+    }
+    table = table_by_scope.get(scope)
+    if table is None:
+        return target_id
+    with default_engine.connect() as conn:
+        row = conn.execute(
+            text(f"SELECT script_id::text AS script_id FROM scriptlens.{table} WHERE id::text = :tid LIMIT 1"),
+            {"tid": target_id},
+        ).mappings().first()
+    if row and row.get("script_id"):
+        return str(row["script_id"])
+    return target_id
+
+
 async def _run_once(
     *,
     task: StabilityTask,
@@ -131,6 +154,10 @@ async def _run_once(
     extractor: ExtractorFn,
     seed: int,
     variant: str,
+    rep: int,
+    script_id: str,
+    use_cache: bool,
+    exp_dir: ExperimentDir | None,
 ) -> str:
     prompt_ver = get_prompt_ver(task.tag_set_ver, task.dim, variant=variant)
     input_hash = _hash_payload(
@@ -145,27 +172,46 @@ async def _run_once(
     )
     started = time.perf_counter()
     try:
-        payload = await extractor(target_id, task.tag_set_ver, prompt_ver, seed, variant)
+        try:
+            payload = await extractor(target_id, task.tag_set_ver, prompt_ver, seed, variant, use_cache=use_cache)
+        except TypeError:
+            payload = await extractor(target_id, task.tag_set_ver, prompt_ver, seed, variant)
         value = str(payload.get(task.dim, ""))
         output_hash = _hash_payload({"value": value})
         elapsed_ms = int((time.perf_counter() - started) * 1000)
+        model_ver = str(payload.get("__model_ver", "unknown"))
         await asyncio.to_thread(
             _persist_run,
             task=task,
             scope_id=target_id,
             prompt_ver=prompt_ver,
-            model_ver=str(payload.get("__model_ver", "unknown")),
+            model_ver=model_ver,
             seed=seed,
             input_hash=input_hash,
             output_hash=output_hash,
             status="success",
             error=None,
-            metrics={"elapsed_ms": elapsed_ms, "variant": variant},
+            metrics={"elapsed_ms": elapsed_ms, "variant": variant, "rep": rep},
             started_at=started,
             finished_at=time.perf_counter(),
         )
+        if exp_dir is not None:
+            exp_dir.append_layer_b_raw(
+                script_id,
+                task.scope,
+                task.dim,
+                rep,
+                target_id,
+                value,
+                {
+                    "model_ver": model_ver,
+                    "elapsed_ms": elapsed_ms,
+                    "seed": seed,
+                    "prompt_ver": prompt_ver,
+                },
+            )
         return value
-    except Exception as e:
+    except Exception as exc:
         elapsed_ms = int((time.perf_counter() - started) * 1000)
         await asyncio.to_thread(
             _persist_run,
@@ -177,49 +223,97 @@ async def _run_once(
             input_hash=input_hash,
             output_hash=None,
             status="failed",
-            error=f"{type(e).__name__}: {e}",
-            metrics={"elapsed_ms": elapsed_ms, "variant": variant},
+            error=f"{type(exc).__name__}: {exc}",
+            metrics={"elapsed_ms": elapsed_ms, "variant": variant, "rep": rep},
             started_at=started,
             finished_at=time.perf_counter(),
         )
         raise
 
 
-async def run_intra_pss(task: StabilityTask, seeds: tuple[int, ...] = (42, 123, 456, 789, 1011)) -> RunResult:
+async def run_intra_pss(
+    task: StabilityTask,
+    *,
+    seed: int = 42,
+    n_repeats: int = 5,
+    exp_dir: ExperimentDir | None = None,
+    use_cache: bool = False,
+) -> RunResult:
     extractor = ExtractorRegistry.get(task.tag_set_ver, task.scope)
     result = RunResult(task=task)
-    for seed in seeds:
-        trace = RunTrace(run_type="intra", run_key=f"seed:{seed}")
-        for target_id in task.targets:
-            trace.target_values[target_id] = await _run_once(
-                task=task,
-                target_id=target_id,
-                extractor=extractor,
-                seed=seed,
-                variant="a",
+
+    script_to_targets: dict[str, list[str]] = {}
+    for target_id in task.targets:
+        script_id = _target_script_id(task.scope, target_id)
+        script_to_targets.setdefault(script_id, []).append(target_id)
+
+    for rep in range(n_repeats):
+        trace = RunTrace(run_type="intra", run_key=f"rep:{rep}")
+        for script_id, target_ids in script_to_targets.items():
+            existing = exp_dir.layer_b_value_map(script_id, task.scope, task.dim, rep) if exp_dir is not None else {}
+            rep_done = (
+                exp_dir.is_layer_b_done(
+                    script_id,
+                    task.scope,
+                    task.dim,
+                    rep,
+                    target_count=len(target_ids),
+                )
+                if exp_dir is not None
+                else False
             )
+            if rep_done:
+                for target_id in target_ids:
+                    trace.target_values[target_id] = str(existing.get(target_id, ""))
+                continue
+
+            for target_id in target_ids:
+                if target_id in existing:
+                    trace.target_values[target_id] = str(existing[target_id])
+                    continue
+                trace.target_values[target_id] = await _run_once(
+                    task=task,
+                    target_id=target_id,
+                    extractor=extractor,
+                    seed=seed,
+                    variant="a",
+                    rep=rep,
+                    script_id=script_id,
+                    use_cache=use_cache,
+                    exp_dir=exp_dir,
+                )
         result.intra_runs.append(trace)
     return result
 
 
-async def run_inter_pss(task: StabilityTask, variants: tuple[str, ...] = ("a", "b", "c"), seed: int = 42) -> RunResult:
+async def run_inter_pss(
+    task: StabilityTask,
+    variants: tuple[str, ...] = ("a", "b", "c"),
+    seed: int = 42,
+    use_cache: bool = False,
+) -> RunResult:
     extractor = ExtractorRegistry.get(task.tag_set_ver, task.scope)
     result = RunResult(task=task)
     for variant in variants:
         trace = RunTrace(run_type="inter", run_key=f"variant:{variant}")
         for target_id in task.targets:
+            script_id = _target_script_id(task.scope, target_id)
             trace.target_values[target_id] = await _run_once(
                 task=task,
                 target_id=target_id,
                 extractor=extractor,
                 seed=seed,
                 variant=variant,
+                rep=0,
+                script_id=script_id,
+                use_cache=use_cache,
+                exp_dir=None,
             )
         result.inter_runs.append(trace)
     return result
 
 
 async def run_full(task: StabilityTask) -> RunResult:
-    intra = await run_intra_pss(task)
-    inter = await run_inter_pss(task)
+    intra = await run_intra_pss(task, seed=42, n_repeats=5, exp_dir=None, use_cache=False)
+    inter = await run_inter_pss(task, seed=42, use_cache=False)
     return RunResult(task=task, intra_runs=intra.intra_runs, inter_runs=inter.inter_runs)
