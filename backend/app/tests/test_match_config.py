@@ -11,10 +11,9 @@ def test_gate_lists_do_not_overlap() -> None:
             seen.add(dim)
 
 
-def test_get_entry_round_trip() -> None:
-    for entry in list_entries():
-        resolved = get_entry(entry.dim)
-        assert resolved is not None
-        assert resolved.dim == entry.dim
-        assert resolved.gate == entry.gate
+def test_empty_gate_table_is_safe() -> None:
+    assert list_entries() == ()
+    for gate in SharedGate:
+        assert list_dims_by_gate(gate) == ()
+    assert get_entry("world_setting") is None
 
