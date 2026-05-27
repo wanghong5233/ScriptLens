@@ -80,28 +80,51 @@ def build_view(
 
 
 def _derive_rewrite_seeds(report: ReportPayload, *, max_seeds: int = 3) -> List[RewriteSeed]:
-    """从报告里按"最值得改"规则挑出 N 个改写候选。
+    """优先使用 Batch 3 improvement_actions 生成 rewrite seeds，兼容旧链路回退。"""
+    evaluation = report.evaluation
+    if evaluation and evaluation.rewrite_seeds:
+        seeds: List[RewriteSeed] = []
+        for raw in evaluation.rewrite_seeds[:max_seeds]:
+            if not isinstance(raw, dict):
+                continue
+            evidence_refs = raw.get("evidence_refs") if isinstance(raw.get("evidence_refs"), list) else []
+            scene_id = str(raw.get("scene_id") or "").strip()
+            scene_label = str(raw.get("scene_label") or "").strip() or None
+            if not scene_id and evidence_refs:
+                first = evidence_refs[0] if isinstance(evidence_refs[0], dict) else {}
+                scene_id = str(first.get("scene_id") or "").strip()
+                scene_label = scene_label or str(first.get("scene_label") or "").strip() or None
+            if not scene_id:
+                continue
+            seeds.append(
+                RewriteSeed(
+                    id=str(raw.get("id") or "").strip() or None,
+                    dimension=str(raw.get("dimension") or ""),
+                    signal_key=str(raw.get("signal_key") or ""),
+                    scene_id=scene_id,
+                    scene_label=scene_label,
+                    issue=str(raw.get("issue") or "").strip() or "改写优化项",
+                    target=str(raw.get("target") or "").strip(),
+                    action_steps=[str(item) for item in raw.get("action_steps") or [] if str(item).strip()],
+                    evidence_refs=[item for item in evidence_refs if isinstance(item, dict)],
+                    estimated_lift=raw.get("estimated_lift") if isinstance(raw.get("estimated_lift"), dict) else {},
+                    evidence_ref_id=str(raw.get("evidence_ref_id") or "").strip() or None,
+                )
+            )
+        if seeds:
+            return seeds
 
-    选择规则（docs/08-evaluation-framework.md + docs/03-system-mental-model.md §6）：
-      - 维度入选条件：score 是数字且 <7（五力维度）
-      - 排序：score 升序（最低分先改）
-      - 每个入选维度取其第一条 evidence_ref（该维度的 top-1 证据）
-      - 同一 scene 不重复（同 scene 多维问题只挑最低分那一个，避免噪音）
-      - 合规问题不进改写候选——合规违规需人工二次审核，不交给 LLM 改写
-    """
     if not report.scorecard or not report.evidence_refs:
         return []
 
     evi_by_id: Dict[str, ReportEvidenceRef] = {ref.id: ref for ref in report.evidence_refs}
-
-    candidates: List[Tuple[int, ReportScorecardItem]] = []
+    candidates: List[Tuple[float, ReportScorecardItem]] = []
     for sc in report.scorecard:
         if sc.score is None or sc.score >= 7:
             continue
         if not sc.evidence_ref_ids:
             continue
-        candidates.append((sc.score, sc))
-
+        candidates.append((float(sc.score), sc))
     candidates.sort(key=lambda t: t[0])
 
     seeds: List[RewriteSeed] = []
@@ -109,13 +132,8 @@ def _derive_rewrite_seeds(report: ReportPayload, *, max_seeds: int = 3) -> List[
     for _, sc in candidates:
         if len(seeds) >= max_seeds:
             break
-        evi = next(
-            (evi_by_id[rid] for rid in sc.evidence_ref_ids if rid in evi_by_id),
-            None,
-        )
-        if evi is None:
-            continue
-        if evi.scene_id in used_scenes:
+        evi = next((evi_by_id[rid] for rid in sc.evidence_ref_ids if rid in evi_by_id), None)
+        if evi is None or evi.scene_id in used_scenes:
             continue
         used_scenes.add(evi.scene_id)
         seeds.append(

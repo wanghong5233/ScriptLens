@@ -1,0 +1,22 @@
+signal_key: opening_speed
+template_version: v3.0.0
+tiers:
+  poor:
+    issue_template: "主冲突出现偏晚（首钩子位置 {opening_index}/{total_units}），开场抓力不足。"
+    target_template: "前 5% plot_unit 内完成主目标 + 冲突钩子露出。"
+    action_steps_template:
+      - "把当前首钩子前移到第 1 个 plot_unit，保留原因果链。"
+      - "在开场 60 字内补主角目标、阻力与失败代价。"
+      - "删去重复铺垫对白，保证首个冲突在本场上半段落地。"
+    estimated_lift_rule:
+      pacing: 1.5
+      story: 0.6
+  weak:
+    issue_template: "开场节奏偏慢（首钩子位置 {opening_index}/{total_units}），前段推进感不足。"
+    target_template: "在前 10% plot_unit 内明确冲突触发点。"
+    action_steps_template:
+      - "压缩开场背景说明，把核心冲突提前 1 个 plot_unit。"
+      - "将无推进对白改为动作化信息披露。"
+    estimated_lift_rule:
+      pacing: 0.8
+      story: 0.3

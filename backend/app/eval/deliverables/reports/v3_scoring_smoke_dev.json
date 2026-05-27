@@ -1,0 +1,4109 @@
+{
+  "script_id": "bdf4bc68-282b-45fb-ae85-e1bd9273d20c",
+  "title": "《冷面霸总：甜心小娇妻太会撩》1-100集",
+  "decision": {
+    "label": "not_recommended",
+    "confidence": "high",
+    "one_sentence_reason": "内容合规存在阻断项，需先完成整改。",
+    "summary": "内容合规存在阻断项，需先完成整改。",
+    "decision_inputs": {
+      "overall_score": 6.691,
+      "genre_scope": "default",
+      "normalized_weights": {
+        "story": 0.2,
+        "character": 0.2,
+        "concept": 0.15,
+        "emotion": 0.2,
+        "pacing": 0.15,
+        "dialogue": 0.1
+      },
+      "poor_dimensions": [],
+      "weak_core_dimensions": [],
+      "compliance_status": "blocked",
+      "dimensions": [
+        {
+          "dimension": "story",
+          "score": 7.125,
+          "tier": "good",
+          "confidence": "high",
+          "coverage_ratio": 1.0,
+          "primary_dimension": "story",
+          "signal_refs": [
+            {
+              "signal_key": "logline_clear",
+              "score": 6.5,
+              "value": "部分情节线索清晰，但整体故事主线缺乏明确的统一性。",
+              "source": "llm",
+              "confidence": 0.85,
+              "weight_in_dim": 0.15,
+              "primary_dimension": null,
+              "evidence_refs": [
+                {
+                  "unit_id": "unit#1",
+                  "description": "hook=forced_marriage 清晰地设定了故事起点，但未明确后续发展。"
+                },
+                {
+                  "unit_id": "unit#24",
+                  "description": "hook=none 和 conflict=none 导致该单元逻辑不清晰。"
+                }
+              ]
+            },
+            {
+              "signal_key": "causal_link_density",
+              "score": 5.0,
+              "value": "因果关系在部分情节中较为松散，缺乏紧密连接。",
+              "source": "llm",
+              "confidence": 0.75,
+              "weight_in_dim": 0.2,
+              "primary_dimension": null,
+              "evidence_refs": [
+                {
+                  "unit_id": "unit#3",
+                  "description": "hook=betrayal 和 payoff=comic_relief 之间的因果关系不够自然。"
+                },
+                {
+                  "unit_id": "unit#18",
+                  "description": "conflict=none 使得因果链条断裂。"
+                }
+              ]
+            },
+            {
+              "signal_key": "structural_completeness",
+              "score": 10.0,
+              "value": {
+                "matched_blocks": 4,
+                "present_stages": [
+                  "climax",
+                  "escalation",
+                  "payoff",
+                  "setup",
+                  "teaser",
+                  "trigger"
+                ]
+              },
+              "source": "rule",
+              "confidence": 0.85,
+              "weight_in_dim": 0.2,
+              "primary_dimension": "story",
+              "evidence_refs": [
+                {
+                  "plot_unit_id": "15fc65d4-643b-4fee-8aff-9527b35fd639",
+                  "value": "teaser"
+                },
+                {
+                  "plot_unit_id": "6e180d0b-f2ff-4960-ba74-8491931d41ef",
+                  "value": "setup"
+                },
+                {
+                  "plot_unit_id": "eec601fc-3ba2-4ad5-afd3-c705ec4dc752",
+                  "value": "payoff"
+                }
+              ]
+            },
+            {
+              "signal_key": "reversal_effectiveness",
+              "score": 10.0,
+              "value": {
+                "reversal_hooks": 3589,
+                "payoff_boosters": 4124,
+                "intensity": 37.9262
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.15,
+              "primary_dimension": "story",
+              "evidence_refs": [
+                {
+                  "plot_unit_id": "6e180d0b-f2ff-4960-ba74-8491931d41ef",
+                  "value": "secret_exposure"
+                },
+                {
+                  "plot_unit_id": "228d6af5-f1bb-41d1-8f98-2578bfaecb79",
+                  "value": "betrayal"
+                },
+                {
+                  "plot_unit_id": "eec601fc-3ba2-4ad5-afd3-c705ec4dc752",
+                  "value": "secret_exposure"
+                },
+                {
+                  "plot_unit_id": "208f9030-adcb-45eb-8c03-4ccff88a52c4",
+                  "value": "betrayal"
+                }
+              ]
+            },
+            {
+              "signal_key": "event_sequence_coherence",
+              "score": 7.0,
+              "value": "事件序列基本连贯，但存在跳跃和突兀之处。",
+              "source": "llm",
+              "confidence": 0.8,
+              "weight_in_dim": 0.15,
+              "primary_dimension": null,
+              "evidence_refs": [
+                {
+                  "unit_id": "unit#9",
+                  "description": "hook=reversal 和 payoff=face_slapping 的过渡合理，符合预期。"
+                },
+                {
+                  "unit_id": "unit#22",
+                  "description": "conflict=none 导致事件序列出现断层。"
+                }
+              ]
+            },
+            {
+              "signal_key": "ending_resolution",
+              "score": 4.0,
+              "value": "结局解决感不足，许多冲突未得到充分收尾。",
+              "source": "llm",
+              "confidence": 0.7,
+              "weight_in_dim": 0.1,
+              "primary_dimension": null,
+              "evidence_refs": [
+                {
+                  "unit_id": "unit#10",
+                  "description": "payoff=none 表明该集未能有效解决冲突。"
+                },
+                {
+                  "unit_id": "unit#35",
+                  "description": "payoff=none 再次显示结局缺乏解决感。"
+                }
+              ]
+            },
+            {
+              "signal_key": "plot_unit_count_per_ep",
+              "score": 4.0,
+              "value": {
+                "avg_units_per_episode": 1.49
+              },
+              "source": "rule",
+              "confidence": 0.9,
+              "weight_in_dim": 0.05,
+              "primary_dimension": "story",
+              "evidence_refs": []
+            }
+          ],
+          "reason": "story weighted aggregation over 7 signals"
+        },
+        {
+          "dimension": "character",
+          "score": 5.416,
+          "tier": "weak",
+          "confidence": "high",
+          "coverage_ratio": 1.0,
+          "primary_dimension": "character",
+          "signal_refs": [
+            {
+              "signal_key": "protagonist_identifiable",
+              "score": 10.0,
+              "value": {
+                "entity_count": 34,
+                "protagonist_count": 1
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": [
+                {
+                  "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+                }
+              ]
+            },
+            {
+              "signal_key": "protagonist_agency",
+              "score": 1.0,
+              "value": {
+                "high_or_medium_ratio": 0.0
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": [
+                {
+                  "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+                }
+              ]
+            },
+            {
+              "signal_key": "motivation_clarity",
+              "score": 3.0,
+              "value": "moderate",
+              "source": "llm",
+              "confidence": 0.85,
+              "weight_in_dim": 0.15,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "decision_setup_rate",
+              "score": 6.22,
+              "value": {
+                "setup_ratio": 0.7774
+              },
+              "source": "rule",
+              "confidence": 0.65,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "ooc_rate",
+              "score": 3.61,
+              "value": {
+                "ooc_ratio": 0.639
+              },
+              "source": "rule",
+              "confidence": 0.55,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "antagonist_quality",
+              "score": 9.0,
+              "value": {
+                "antagonist_count": 1,
+                "negative_relationship_count": 14
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "relationship_conflict_strength",
+              "score": 6.33,
+              "value": {
+                "conflict_ratio": 0.6333
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": [
+                {
+                  "relationship_id": "3aefdb9f-f0ab-4f2c-a470-21de9ccfe830"
+                },
+                {
+                  "relationship_id": "94cc7069-5f51-438e-a838-f4a98a1765fc"
+                },
+                {
+                  "relationship_id": "9bd0366d-f89a-4ba5-8dad-06feb3abeda3"
+                },
+                {
+                  "relationship_id": "9f1893bc-f0b2-413c-bc28-0d99d3c67c23"
+                }
+              ]
+            },
+            {
+              "signal_key": "relationship_arc_change",
+              "score": 8.5,
+              "value": {
+                "dynamic_ratio": 0.8333
+              },
+              "source": "rule",
+              "confidence": 0.7,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "character",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "ensemble_distinctiveness",
+              "score": 4.0,
+              "value": "high",
+              "source": "llm",
+              "confidence": 0.9,
+              "weight_in_dim": 0.1,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "character_consistency",
+              "score": 2.0,
+              "value": "low",
+              "source": "llm",
+              "confidence": 0.8,
+              "weight_in_dim": 0.05,
+              "primary_dimension": null,
+              "evidence_refs": []
+            }
+          ],
+          "reason": "character weighted aggregation over 10 signals"
+        },
+        {
+          "dimension": "concept",
+          "score": 4.636,
+          "tier": "weak",
+          "confidence": "high",
+          "coverage_ratio": 1.0,
+          "primary_dimension": "concept",
+          "signal_refs": [
+            {
+              "signal_key": "drama_tags_confidence",
+              "score": 6.0,
+              "value": {
+                "avg_confidence": 0.6,
+                "tag_count": 66
+              },
+              "source": "rule",
+              "confidence": 0.85,
+              "weight_in_dim": 0.2,
+              "primary_dimension": "concept",
+              "evidence_refs": [
+                {
+                  "dim": "drama_tags",
+                  "value": "大女主"
+                },
+                {
+                  "dim": "drama_tags",
+                  "value": "乡村"
+                },
+                {
+                  "dim": "drama_tags",
+                  "value": "女频"
+                }
+              ]
+            },
+            {
+              "signal_key": "genre_market_fit",
+              "score": 3.18,
+              "value": {
+                "mainstream_ratio": 0.3182,
+                "matched": [
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻",
+                  "玄幻"
+                ]
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.2,
+              "primary_dimension": "concept",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "core_value_clarity",
+              "score": 3.0,
+              "value": "moderate",
+              "source": "llm",
+              "confidence": 0.85,
+              "weight_in_dim": 0.2,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "differentiation",
+              "score": 4.0,
+              "value": "high",
+              "source": "llm",
+              "confidence": 0.9,
+              "weight_in_dim": 0.2,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "early_genre_signal",
+              "score": 9.0,
+              "value": {
+                "hit": true,
+                "window_units": 29
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "concept",
+              "evidence_refs": [
+                {
+                  "plot_unit_id": "15fc65d4-643b-4fee-8aff-9527b35fd639"
+                }
+              ]
+            },
+            {
+              "signal_key": "commercial_communicability",
+              "score": 5.0,
+              "value": "very_high",
+              "source": "llm",
+              "confidence": 0.95,
+              "weight_in_dim": 0.1,
+              "primary_dimension": null,
+              "evidence_refs": []
+            }
+          ],
+          "reason": "concept weighted aggregation over 6 signals"
+        },
+        {
+          "dimension": "emotion",
+          "score": 7.345,
+          "tier": "good",
+          "confidence": "high",
+          "coverage_ratio": 1.0,
+          "primary_dimension": "emotion",
+          "signal_refs": [
+            {
+              "signal_key": "payoff_density",
+              "score": 10.0,
+              "value": {
+                "density": 67.84,
+                "payoff_count": 6784
+              },
+              "source": "rule",
+              "confidence": 0.85,
+              "weight_in_dim": 0.15,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "emotional_driver_distribution",
+              "score": 9.17,
+              "value": {
+                "distribution": {
+                  "anger": 0.0913,
+                  "curiosity": 0.0834,
+                  "desire": 0.1659,
+                  "fear": 0.1648,
+                  "humiliation": 0.1281,
+                  "jealousy": 0.0814,
+                  "pity": 0.0635,
+                  "regret": 0.0924,
+                  "tenderness": 0.1291
+                }
+              },
+              "source": "rule",
+              "confidence": 0.7,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "emotional_variety",
+              "score": 9.78,
+              "value": {
+                "entropy": 3.0987,
+                "normalized_entropy": 0.9775
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "emotional_contrast",
+              "score": 9.0,
+              "value": {
+                "has_positive": true,
+                "has_negative": true
+              },
+              "source": "rule",
+              "confidence": 0.7,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "dry_streak_max",
+              "score": 3.0,
+              "value": {
+                "max_streak_units": 29
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.15,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "episode_end_hook_rate",
+              "score": 10.0,
+              "value": {
+                "hook_rate": 3.1,
+                "hook_count": 310
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "paid_break_potential",
+              "score": 10.0,
+              "value": {
+                "break_rate": 2.72,
+                "signal_count": 272
+              },
+              "source": "rule",
+              "confidence": 0.7,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "emotion",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "empathy_signal",
+              "score": 3.0,
+              "value": "moderate",
+              "source": "llm",
+              "confidence": 0.85,
+              "weight_in_dim": 0.2,
+              "primary_dimension": null,
+              "evidence_refs": [
+                {
+                  "reason": "forced marriage hook introduces relational tension, creating potential for audience empathy.",
+                  "unit_id": "unit#1"
+                },
+                {
+                  "reason": "betrayal and survival crisis evoke strong emotional responses, enhancing viewer connection.",
+                  "unit_id": "unit#6"
+                },
+                {
+                  "reason": "emotional choice amidst romantic conflict deepens character investment.",
+                  "unit_id": "unit#12"
+                },
+                {
+                  "reason": "face-slapping payoff in a romantic conflict can elicit cathartic audience reactions.",
+                  "unit_id": "unit#27"
+                },
+                {
+                  "reason": "betrayal paired with romantic conflict offers opportunities for empathetic engagement.",
+                  "unit_id": "unit#35"
+                }
+              ]
+            }
+          ],
+          "reason": "emotion weighted aggregation over 8 signals"
+        },
+        {
+          "dimension": "pacing",
+          "score": 8.329,
+          "tier": "excellent",
+          "confidence": "high",
+          "coverage_ratio": 1.0,
+          "primary_dimension": "pacing",
+          "signal_refs": [
+            {
+              "signal_key": "opening_speed",
+              "score": 10.0,
+              "value": {
+                "opening_index": 1,
+                "total_units": 149
+              },
+              "source": "rule",
+              "confidence": 0.85,
+              "weight_in_dim": 0.12,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "plot_unit_density",
+              "score": 3.0,
+              "value": {
+                "units_per_episode": 1.49
+              },
+              "source": "rule",
+              "confidence": 0.9,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "narrative_intensity_distribution",
+              "score": 10.0,
+              "value": {
+                "intensity_avg": 5.8993,
+                "intensity_max": 8
+              },
+              "source": "rule",
+              "confidence": 0.85,
+              "weight_in_dim": 0.12,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "intensity_cv",
+              "score": 10.0,
+              "value": {
+                "cv": 0.5191
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "middle_sag",
+              "score": 10.0,
+              "value": {
+                "middle_ratio": 1.2544
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "downtime_penalty",
+              "score": 2.0,
+              "value": {
+                "longest_low_intensity_streak": 29
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.08,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "dialogue_action_ratio",
+              "score": 7.11,
+              "value": {
+                "dense_ratio": 0.1144,
+                "sparse_ratio": 0.403
+              },
+              "source": "rule",
+              "confidence": 0.65,
+              "weight_in_dim": 0.08,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "beats_per_episode",
+              "score": 10.0,
+              "value": {
+                "beats_per_episode": 64.51
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "effective_narrative_rate",
+              "score": 10.0,
+              "value": {
+                "effective_ratio": 0.8054
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "scene_length_distribution",
+              "score": 9.0,
+              "value": {
+                "cv": 0.5544,
+                "scene_count": 215
+              },
+              "source": "rule",
+              "confidence": 0.7,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "pacing",
+              "evidence_refs": []
+            }
+          ],
+          "reason": "pacing weighted aggregation over 10 signals"
+        },
+        {
+          "dimension": "dialogue",
+          "score": 7.694,
+          "tier": "good",
+          "confidence": "high",
+          "coverage_ratio": 1.0,
+          "primary_dimension": "dialogue",
+          "signal_refs": [
+            {
+              "signal_key": "dialogue_density",
+              "score": 6.58,
+              "value": {
+                "dense_ratio": 0.1144,
+                "moderate_ratio": 0.4826,
+                "sparse_ratio": 0.403
+              },
+              "source": "rule",
+              "confidence": 0.8,
+              "weight_in_dim": 0.15,
+              "primary_dimension": "dialogue",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "dialogue_efficiency",
+              "score": 7.0,
+              "value": "moderate",
+              "source": "llm",
+              "confidence": 0.85,
+              "weight_in_dim": 0.15,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "character_voice_distinction",
+              "score": 9.0,
+              "value": "high",
+              "source": "llm",
+              "confidence": 0.95,
+              "weight_in_dim": 0.15,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "qa_coherence",
+              "score": 8.0,
+              "value": "high",
+              "source": "llm",
+              "confidence": 0.9,
+              "weight_in_dim": 0.1,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "topic_focus",
+              "score": 9.77,
+              "value": {
+                "dialogue_scene_ratio": 0.9767
+              },
+              "source": "rule",
+              "confidence": 0.45,
+              "weight_in_dim": 0.1,
+              "primary_dimension": "dialogue",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "qa_relevance",
+              "score": 6.0,
+              "value": "moderate",
+              "source": "llm",
+              "confidence": 0.8,
+              "weight_in_dim": 0.1,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "subtext_or_conflict",
+              "score": 5.0,
+              "value": "low_to_moderate",
+              "source": "llm",
+              "confidence": 0.75,
+              "weight_in_dim": 0.1,
+              "primary_dimension": null,
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "voiceover_fit",
+              "score": 10.0,
+              "value": {
+                "narrator_ratio": 0.0,
+                "mixed_ratio": 0.0
+              },
+              "source": "rule",
+              "confidence": 0.7,
+              "weight_in_dim": 0.08,
+              "primary_dimension": "dialogue",
+              "evidence_refs": []
+            },
+            {
+              "signal_key": "brevity_ratio",
+              "score": 9.0,
+              "value": {
+                "avg_line_length": 19.244
+              },
+              "source": "rule",
+              "confidence": 0.75,
+              "weight_in_dim": 0.07,
+              "primary_dimension": "dialogue",
+              "evidence_refs": []
+            }
+          ],
+          "reason": "dialogue weighted aggregation over 9 signals"
+        }
+      ],
+      "raw_decision": "not_recommended"
+    }
+  },
+  "decision_reason": "内容合规存在阻断项，需先完成整改。",
+  "overall_score": 6.691,
+  "summary": "内容合规存在阻断项，需先完成整改。",
+  "must_read_scene_ids": [],
+  "scorecard": [
+    {
+      "dimension": "story",
+      "score": 7.125,
+      "tier": "good",
+      "confidence": "high",
+      "coverage_ratio": 1.0,
+      "signal_refs": [
+        {
+          "signal_key": "logline_clear",
+          "score": 6.5,
+          "value": "部分情节线索清晰，但整体故事主线缺乏明确的统一性。",
+          "source": "llm",
+          "confidence": 0.85,
+          "weight_in_dim": 0.15,
+          "primary_dimension": null,
+          "evidence_refs": [
+            {
+              "unit_id": "unit#1",
+              "description": "hook=forced_marriage 清晰地设定了故事起点，但未明确后续发展。"
+            },
+            {
+              "unit_id": "unit#24",
+              "description": "hook=none 和 conflict=none 导致该单元逻辑不清晰。"
+            }
+          ]
+        },
+        {
+          "signal_key": "causal_link_density",
+          "score": 5.0,
+          "value": "因果关系在部分情节中较为松散，缺乏紧密连接。",
+          "source": "llm",
+          "confidence": 0.75,
+          "weight_in_dim": 0.2,
+          "primary_dimension": null,
+          "evidence_refs": [
+            {
+              "unit_id": "unit#3",
+              "description": "hook=betrayal 和 payoff=comic_relief 之间的因果关系不够自然。"
+            },
+            {
+              "unit_id": "unit#18",
+              "description": "conflict=none 使得因果链条断裂。"
+            }
+          ]
+        },
+        {
+          "signal_key": "structural_completeness",
+          "score": 10.0,
+          "value": {
+            "matched_blocks": 4,
+            "present_stages": [
+              "climax",
+              "escalation",
+              "payoff",
+              "setup",
+              "teaser",
+              "trigger"
+            ]
+          },
+          "source": "rule",
+          "confidence": 0.85,
+          "weight_in_dim": 0.2,
+          "primary_dimension": "story",
+          "evidence_refs": [
+            {
+              "plot_unit_id": "15fc65d4-643b-4fee-8aff-9527b35fd639",
+              "value": "teaser"
+            },
+            {
+              "plot_unit_id": "6e180d0b-f2ff-4960-ba74-8491931d41ef",
+              "value": "setup"
+            },
+            {
+              "plot_unit_id": "eec601fc-3ba2-4ad5-afd3-c705ec4dc752",
+              "value": "payoff"
+            }
+          ]
+        },
+        {
+          "signal_key": "reversal_effectiveness",
+          "score": 10.0,
+          "value": {
+            "reversal_hooks": 3589,
+            "payoff_boosters": 4124,
+            "intensity": 37.9262
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.15,
+          "primary_dimension": "story",
+          "evidence_refs": [
+            {
+              "plot_unit_id": "6e180d0b-f2ff-4960-ba74-8491931d41ef",
+              "value": "secret_exposure"
+            },
+            {
+              "plot_unit_id": "228d6af5-f1bb-41d1-8f98-2578bfaecb79",
+              "value": "betrayal"
+            },
+            {
+              "plot_unit_id": "eec601fc-3ba2-4ad5-afd3-c705ec4dc752",
+              "value": "secret_exposure"
+            },
+            {
+              "plot_unit_id": "208f9030-adcb-45eb-8c03-4ccff88a52c4",
+              "value": "betrayal"
+            }
+          ]
+        },
+        {
+          "signal_key": "event_sequence_coherence",
+          "score": 7.0,
+          "value": "事件序列基本连贯，但存在跳跃和突兀之处。",
+          "source": "llm",
+          "confidence": 0.8,
+          "weight_in_dim": 0.15,
+          "primary_dimension": null,
+          "evidence_refs": [
+            {
+              "unit_id": "unit#9",
+              "description": "hook=reversal 和 payoff=face_slapping 的过渡合理，符合预期。"
+            },
+            {
+              "unit_id": "unit#22",
+              "description": "conflict=none 导致事件序列出现断层。"
+            }
+          ]
+        },
+        {
+          "signal_key": "ending_resolution",
+          "score": 4.0,
+          "value": "结局解决感不足，许多冲突未得到充分收尾。",
+          "source": "llm",
+          "confidence": 0.7,
+          "weight_in_dim": 0.1,
+          "primary_dimension": null,
+          "evidence_refs": [
+            {
+              "unit_id": "unit#10",
+              "description": "payoff=none 表明该集未能有效解决冲突。"
+            },
+            {
+              "unit_id": "unit#35",
+              "description": "payoff=none 再次显示结局缺乏解决感。"
+            }
+          ]
+        },
+        {
+          "signal_key": "plot_unit_count_per_ep",
+          "score": 4.0,
+          "value": {
+            "avg_units_per_episode": 1.49
+          },
+          "source": "rule",
+          "confidence": 0.9,
+          "weight_in_dim": 0.05,
+          "primary_dimension": "story",
+          "evidence_refs": []
+        }
+      ],
+      "reason": "story weighted aggregation over 7 signals",
+      "evidence_ref_ids": []
+    },
+    {
+      "dimension": "character",
+      "score": 5.416,
+      "tier": "weak",
+      "confidence": "high",
+      "coverage_ratio": 1.0,
+      "signal_refs": [
+        {
+          "signal_key": "protagonist_identifiable",
+          "score": 10.0,
+          "value": {
+            "entity_count": 34,
+            "protagonist_count": 1
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": [
+            {
+              "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+            }
+          ]
+        },
+        {
+          "signal_key": "protagonist_agency",
+          "score": 1.0,
+          "value": {
+            "high_or_medium_ratio": 0.0
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": [
+            {
+              "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+            }
+          ]
+        },
+        {
+          "signal_key": "motivation_clarity",
+          "score": 3.0,
+          "value": "moderate",
+          "source": "llm",
+          "confidence": 0.85,
+          "weight_in_dim": 0.15,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "decision_setup_rate",
+          "score": 6.22,
+          "value": {
+            "setup_ratio": 0.7774
+          },
+          "source": "rule",
+          "confidence": 0.65,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "ooc_rate",
+          "score": 3.61,
+          "value": {
+            "ooc_ratio": 0.639
+          },
+          "source": "rule",
+          "confidence": 0.55,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "antagonist_quality",
+          "score": 9.0,
+          "value": {
+            "antagonist_count": 1,
+            "negative_relationship_count": 14
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "relationship_conflict_strength",
+          "score": 6.33,
+          "value": {
+            "conflict_ratio": 0.6333
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": [
+            {
+              "relationship_id": "3aefdb9f-f0ab-4f2c-a470-21de9ccfe830"
+            },
+            {
+              "relationship_id": "94cc7069-5f51-438e-a838-f4a98a1765fc"
+            },
+            {
+              "relationship_id": "9bd0366d-f89a-4ba5-8dad-06feb3abeda3"
+            },
+            {
+              "relationship_id": "9f1893bc-f0b2-413c-bc28-0d99d3c67c23"
+            }
+          ]
+        },
+        {
+          "signal_key": "relationship_arc_change",
+          "score": 8.5,
+          "value": {
+            "dynamic_ratio": 0.8333
+          },
+          "source": "rule",
+          "confidence": 0.7,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "character",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "ensemble_distinctiveness",
+          "score": 4.0,
+          "value": "high",
+          "source": "llm",
+          "confidence": 0.9,
+          "weight_in_dim": 0.1,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "character_consistency",
+          "score": 2.0,
+          "value": "low",
+          "source": "llm",
+          "confidence": 0.8,
+          "weight_in_dim": 0.05,
+          "primary_dimension": null,
+          "evidence_refs": []
+        }
+      ],
+      "reason": "character weighted aggregation over 10 signals",
+      "evidence_ref_ids": []
+    },
+    {
+      "dimension": "concept",
+      "score": 4.636,
+      "tier": "weak",
+      "confidence": "high",
+      "coverage_ratio": 1.0,
+      "signal_refs": [
+        {
+          "signal_key": "drama_tags_confidence",
+          "score": 6.0,
+          "value": {
+            "avg_confidence": 0.6,
+            "tag_count": 66
+          },
+          "source": "rule",
+          "confidence": 0.85,
+          "weight_in_dim": 0.2,
+          "primary_dimension": "concept",
+          "evidence_refs": [
+            {
+              "dim": "drama_tags",
+              "value": "大女主"
+            },
+            {
+              "dim": "drama_tags",
+              "value": "乡村"
+            },
+            {
+              "dim": "drama_tags",
+              "value": "女频"
+            }
+          ]
+        },
+        {
+          "signal_key": "genre_market_fit",
+          "score": 3.18,
+          "value": {
+            "mainstream_ratio": 0.3182,
+            "matched": [
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻",
+              "玄幻"
+            ]
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.2,
+          "primary_dimension": "concept",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "core_value_clarity",
+          "score": 3.0,
+          "value": "moderate",
+          "source": "llm",
+          "confidence": 0.85,
+          "weight_in_dim": 0.2,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "differentiation",
+          "score": 4.0,
+          "value": "high",
+          "source": "llm",
+          "confidence": 0.9,
+          "weight_in_dim": 0.2,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "early_genre_signal",
+          "score": 9.0,
+          "value": {
+            "hit": true,
+            "window_units": 29
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "concept",
+          "evidence_refs": [
+            {
+              "plot_unit_id": "15fc65d4-643b-4fee-8aff-9527b35fd639"
+            }
+          ]
+        },
+        {
+          "signal_key": "commercial_communicability",
+          "score": 5.0,
+          "value": "very_high",
+          "source": "llm",
+          "confidence": 0.95,
+          "weight_in_dim": 0.1,
+          "primary_dimension": null,
+          "evidence_refs": []
+        }
+      ],
+      "reason": "concept weighted aggregation over 6 signals",
+      "evidence_ref_ids": []
+    },
+    {
+      "dimension": "emotion",
+      "score": 7.345,
+      "tier": "good",
+      "confidence": "high",
+      "coverage_ratio": 1.0,
+      "signal_refs": [
+        {
+          "signal_key": "payoff_density",
+          "score": 10.0,
+          "value": {
+            "density": 67.84,
+            "payoff_count": 6784
+          },
+          "source": "rule",
+          "confidence": 0.85,
+          "weight_in_dim": 0.15,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "emotional_driver_distribution",
+          "score": 9.17,
+          "value": {
+            "distribution": {
+              "anger": 0.0913,
+              "curiosity": 0.0834,
+              "desire": 0.1659,
+              "fear": 0.1648,
+              "humiliation": 0.1281,
+              "jealousy": 0.0814,
+              "pity": 0.0635,
+              "regret": 0.0924,
+              "tenderness": 0.1291
+            }
+          },
+          "source": "rule",
+          "confidence": 0.7,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "emotional_variety",
+          "score": 9.78,
+          "value": {
+            "entropy": 3.0987,
+            "normalized_entropy": 0.9775
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "emotional_contrast",
+          "score": 9.0,
+          "value": {
+            "has_positive": true,
+            "has_negative": true
+          },
+          "source": "rule",
+          "confidence": 0.7,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "dry_streak_max",
+          "score": 3.0,
+          "value": {
+            "max_streak_units": 29
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.15,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "episode_end_hook_rate",
+          "score": 10.0,
+          "value": {
+            "hook_rate": 3.1,
+            "hook_count": 310
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "paid_break_potential",
+          "score": 10.0,
+          "value": {
+            "break_rate": 2.72,
+            "signal_count": 272
+          },
+          "source": "rule",
+          "confidence": 0.7,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "emotion",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "empathy_signal",
+          "score": 3.0,
+          "value": "moderate",
+          "source": "llm",
+          "confidence": 0.85,
+          "weight_in_dim": 0.2,
+          "primary_dimension": null,
+          "evidence_refs": [
+            {
+              "reason": "forced marriage hook introduces relational tension, creating potential for audience empathy.",
+              "unit_id": "unit#1"
+            },
+            {
+              "reason": "betrayal and survival crisis evoke strong emotional responses, enhancing viewer connection.",
+              "unit_id": "unit#6"
+            },
+            {
+              "reason": "emotional choice amidst romantic conflict deepens character investment.",
+              "unit_id": "unit#12"
+            },
+            {
+              "reason": "face-slapping payoff in a romantic conflict can elicit cathartic audience reactions.",
+              "unit_id": "unit#27"
+            },
+            {
+              "reason": "betrayal paired with romantic conflict offers opportunities for empathetic engagement.",
+              "unit_id": "unit#35"
+            }
+          ]
+        }
+      ],
+      "reason": "emotion weighted aggregation over 8 signals",
+      "evidence_ref_ids": []
+    },
+    {
+      "dimension": "pacing",
+      "score": 8.329,
+      "tier": "excellent",
+      "confidence": "high",
+      "coverage_ratio": 1.0,
+      "signal_refs": [
+        {
+          "signal_key": "opening_speed",
+          "score": 10.0,
+          "value": {
+            "opening_index": 1,
+            "total_units": 149
+          },
+          "source": "rule",
+          "confidence": 0.85,
+          "weight_in_dim": 0.12,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "plot_unit_density",
+          "score": 3.0,
+          "value": {
+            "units_per_episode": 1.49
+          },
+          "source": "rule",
+          "confidence": 0.9,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "narrative_intensity_distribution",
+          "score": 10.0,
+          "value": {
+            "intensity_avg": 5.8993,
+            "intensity_max": 8
+          },
+          "source": "rule",
+          "confidence": 0.85,
+          "weight_in_dim": 0.12,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "intensity_cv",
+          "score": 10.0,
+          "value": {
+            "cv": 0.5191
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "middle_sag",
+          "score": 10.0,
+          "value": {
+            "middle_ratio": 1.2544
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "downtime_penalty",
+          "score": 2.0,
+          "value": {
+            "longest_low_intensity_streak": 29
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.08,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "dialogue_action_ratio",
+          "score": 7.11,
+          "value": {
+            "dense_ratio": 0.1144,
+            "sparse_ratio": 0.403
+          },
+          "source": "rule",
+          "confidence": 0.65,
+          "weight_in_dim": 0.08,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "beats_per_episode",
+          "score": 10.0,
+          "value": {
+            "beats_per_episode": 64.51
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "effective_narrative_rate",
+          "score": 10.0,
+          "value": {
+            "effective_ratio": 0.8054
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "scene_length_distribution",
+          "score": 9.0,
+          "value": {
+            "cv": 0.5544,
+            "scene_count": 215
+          },
+          "source": "rule",
+          "confidence": 0.7,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "pacing",
+          "evidence_refs": []
+        }
+      ],
+      "reason": "pacing weighted aggregation over 10 signals",
+      "evidence_ref_ids": []
+    },
+    {
+      "dimension": "dialogue",
+      "score": 7.694,
+      "tier": "good",
+      "confidence": "high",
+      "coverage_ratio": 1.0,
+      "signal_refs": [
+        {
+          "signal_key": "dialogue_density",
+          "score": 6.58,
+          "value": {
+            "dense_ratio": 0.1144,
+            "moderate_ratio": 0.4826,
+            "sparse_ratio": 0.403
+          },
+          "source": "rule",
+          "confidence": 0.8,
+          "weight_in_dim": 0.15,
+          "primary_dimension": "dialogue",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "dialogue_efficiency",
+          "score": 7.0,
+          "value": "moderate",
+          "source": "llm",
+          "confidence": 0.85,
+          "weight_in_dim": 0.15,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "character_voice_distinction",
+          "score": 9.0,
+          "value": "high",
+          "source": "llm",
+          "confidence": 0.95,
+          "weight_in_dim": 0.15,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "qa_coherence",
+          "score": 8.0,
+          "value": "high",
+          "source": "llm",
+          "confidence": 0.9,
+          "weight_in_dim": 0.1,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "topic_focus",
+          "score": 9.77,
+          "value": {
+            "dialogue_scene_ratio": 0.9767
+          },
+          "source": "rule",
+          "confidence": 0.45,
+          "weight_in_dim": 0.1,
+          "primary_dimension": "dialogue",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "qa_relevance",
+          "score": 6.0,
+          "value": "moderate",
+          "source": "llm",
+          "confidence": 0.8,
+          "weight_in_dim": 0.1,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "subtext_or_conflict",
+          "score": 5.0,
+          "value": "low_to_moderate",
+          "source": "llm",
+          "confidence": 0.75,
+          "weight_in_dim": 0.1,
+          "primary_dimension": null,
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "voiceover_fit",
+          "score": 10.0,
+          "value": {
+            "narrator_ratio": 0.0,
+            "mixed_ratio": 0.0
+          },
+          "source": "rule",
+          "confidence": 0.7,
+          "weight_in_dim": 0.08,
+          "primary_dimension": "dialogue",
+          "evidence_refs": []
+        },
+        {
+          "signal_key": "brevity_ratio",
+          "score": 9.0,
+          "value": {
+            "avg_line_length": 19.244
+          },
+          "source": "rule",
+          "confidence": 0.75,
+          "weight_in_dim": 0.07,
+          "primary_dimension": "dialogue",
+          "evidence_refs": []
+        }
+      ],
+      "reason": "dialogue weighted aggregation over 9 signals",
+      "evidence_ref_ids": []
+    }
+  ],
+  "compliance": {
+    "status": "blocked",
+    "level": "high_risk",
+    "score": 1,
+    "tier": "poor",
+    "confidence": "low",
+    "reason": "命中 2 处广电红线（suicide_method），不建议发布",
+    "evidence_ref_ids": [
+      "deb9c700-4986-4a1d-ba71-c21a6d6065e7",
+      "f3db67a5-8fd2-4d3e-9d45-b2a2c343a1a8",
+      "059d5e69-06a1-4e21-86b5-6ab432fa361f",
+      "4894412b-c18e-47b4-b48a-650fda5cdaf9",
+      "4bbed0a9-12dc-43c3-bef4-4a0f28f9d422"
+    ],
+    "hits": [
+      {
+        "scene_id": "deb9c700-4986-4a1d-ba71-c21a6d6065e7",
+        "scene_no": "49-3",
+        "episode_no": 49,
+        "level": "high_risk",
+        "category": "suicide_method",
+        "matched_term": "割腕",
+        "confirmed_by_llm": true,
+        "evidence_line_range": [
+          6,
+          7
+        ],
+        "excerpt": "49-3\n日\n内\n医院/何思思病房\n人物：鹿鸣何思思\n▲何思思靠在病床上，手握匕首，试探着想割腕。狠了几次都狠不下\n心。\n鹿鸣：你在干什么？\n何思思（惊吓一瞬，立马装伤心）：我连孩子都保护不了，我还活着\n干什么！\n鹿鸣（从何思思手里拿过匕首｜判定：角色有明确的割腕自杀意图和动作，属于真实违规内容。"
+      },
+      {
+        "scene_id": "f3db67a5-8fd2-4d3e-9d45-b2a2c343a1a8",
+        "scene_no": "78-1",
+        "episode_no": 78,
+        "level": "high_risk",
+        "category": "suicide_method",
+        "matched_term": "割腕",
+        "confirmed_by_llm": true,
+        "evidence_line_range": [
+          16,
+          18
+        ],
+        "excerpt": "第78 集：\n78-1\n日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣\n鹿正林鹿正云\n鹿鸣手下N 个\n鹿正云：鹿鸣，就算我要鹿家的股权怎么了？老娘也姓鹿！\n鹿鸣：但鹿氏集团是我母亲徐雅清一手创建！你没资格要！（逼近鹿\n正云）而你居然还想害死我母亲｜判定：场景中明确描述了鹿正林准备割腕自杀的行为，属于真实出现的违规内容。"
+      },
+      {
+        "scene_id": "059d5e69-06a1-4e21-86b5-6ab432fa361f",
+        "scene_no": "56-1",
+        "episode_no": 56,
+        "level": "medium_risk",
+        "category": "violence_chain",
+        "matched_term": "暴打",
+        "confirmed_by_llm": true,
+        "evidence_line_range": [
+          7,
+          14
+        ],
+        "excerpt": "第56 集\n56-1\n日内\n酒店/房间\n人物：余小茜王子诺徐雅清司机\n王子诺手下\n▲徐雅清司机被黑衣人暴打。\n司机（求饶）：别打了别打了，（头也不抬就跪下）求你们在宽限我\n几天，我保证会还钱。\n▲司机看到两人的脚走来，在他眼皮底下站定，抬头｜判定：场景中明确描述了暴打、踹出画面及哀嚎求饶等暴力行为，属于真实违规内容。"
+      },
+      {
+        "scene_id": "4894412b-c18e-47b4-b48a-650fda5cdaf9",
+        "scene_no": "65-2",
+        "episode_no": 65,
+        "level": "medium_risk",
+        "category": "violence_chain",
+        "matched_term": "暴打",
+        "confirmed_by_llm": true,
+        "evidence_line_range": [
+          7,
+          14
+        ],
+        "excerpt": "65-2\n日内\n鹿家别墅/客厅\n人物：鹿鸣鹿鸣助手\n何思思情人\n鹿鸣手下\n▲何思思情人被鹿鸣手下暴打的哀号连连。\n鹿鸣坐在沙发上，冷眼看着。\n▲手下将何思思情人拖到鹿鸣面前，想起来却没站起来。\n何思思情人（不明所以带着哭腔）：我也没得罪你，｜判定：明确描述了暴力行为，包括暴打、踹等具体动作，构成违规。"
+      },
+      {
+        "scene_id": "4bbed0a9-12dc-43c3-bef4-4a0f28f9d422",
+        "scene_no": "98-3",
+        "episode_no": 98,
+        "level": "medium_risk",
+        "category": "wealth_worship",
+        "matched_term": "穷鬼",
+        "confirmed_by_llm": true,
+        "evidence_line_range": [
+          7,
+          7
+        ],
+        "excerpt": "98-3\n夜\n内\n仓库\n人物：余小茜鹿鸣\n柴欣悦王子诺（乔装余小茜）护士（男子）\n柴欣悦：叛徒！见钱眼开的穷鬼！（冲余小茜）还有你！别以为你回\n到谢家，就能证明你有多高贵！一辈子都洗不掉身上那股穷酸味！暴\n发户就是暴发户！\n▲余小茜抬脚就要｜判定：直接使用‘穷鬼’一词进行侮辱，属于真实违规内容。"
+      },
+      {
+        "scene_id": "b6d6b070-e7fa-457b-80ff-fd4dc4d2402b",
+        "scene_no": "5-1",
+        "episode_no": 5,
+        "level": "low_risk",
+        "category": "minor_violence",
+        "matched_term": "拳头",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第5 集：\n5-1\n日\n外\n酒店/门口\n人物：余小茜余常德鲁昌鲁昌手下谢凯（余小茜爷爷）谢凯助手\n鲁昌（一脚将余常德踹翻）：你以为你跑的了？*的！敢耍我！\n余常德：昌哥，昌哥你听我说，我真没耍你啊。\n鲁昌：没耍我，那人呢！害的老子白等了一晚"
+      },
+      {
+        "scene_id": "3f202480-15ff-48f0-beb4-44c8d1c13b90",
+        "scene_no": "9-1",
+        "episode_no": 9,
+        "level": "low_risk",
+        "category": "innuendo",
+        "matched_term": "壁咚",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第9 集：\n9-1\n日\n外\n鹿家别墅/院子\n人物：余小茜鹿鸣何思思徐雅清\n余小茜：你信不信，与我何干！\n▲余小茜说话的同时，一把推开鹿鸣，鹿鸣当即后退两步才站稳，一\n脸震惊的愣在当场。\n何思思（扶住鹿鸣）：鹿鸣你没事吧？（见鹿鸣摇头，柔声发"
+      },
+      {
+        "scene_id": "b2c3eebc-1b12-48b2-b6ab-7cdf87a67017",
+        "scene_no": "11-2",
+        "episode_no": 11,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "废物",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "11-2\n日\n内\n酒店/鲁昌房间\n人物：何思思鲁昌鲁昌手下\n鲁昌（一脚踢在男子身上）：废物！让你找个像样的女人，咋就这么\n难！\n何思思（出现）：我可以帮你找啊。\n鲁昌（上下打量，邪笑）：不用找了，我看啊，你就挺合适。\n▲众手下笑，鲁昌说着话"
+      },
+      {
+        "scene_id": "648504f1-57cc-47c0-a64c-75aa7043ec6d",
+        "scene_no": "12-1",
+        "episode_no": 12,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱货",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第12 集：\n12-1\n日\n内\n酒店/鲁昌房间\n人物：何思思鲁昌鲁昌手下\n▲鲁昌反手一嘴巴打在何思思脸上。\n鲁昌：你这么有诚意的送上门来，不要白不要嘛。\n▲鲁昌说着就奔着何思思扑上去。一把扯下何思思肩上的衣服。\n何思思（尖叫一声求饶）：你想"
+      },
+      {
+        "scene_id": "c5470839-340d-4ea5-ae93-07c9c5446c1b",
+        "scene_no": "13-1",
+        "episode_no": 13,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第13 集：\n13-1\n日\n内\n鹿家别墅/客厅\n人物：余小茜徐雅清鹿正林鹿正云\n鹿正云：好呀你这个贱人竟然敢打我！看我今个不弄死你的！\n▲鹿正云说着就要打徐雅清，手刚抬起来，就被余小茜攥住手腕。\n▲余小茜用力一甩，鹿正云当即被甩了出去，跌跌"
+      },
+      {
+        "scene_id": "f371c9dd-2910-4082-9c10-3ca12c388050",
+        "scene_no": "14-1",
+        "episode_no": 14,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第14 集\n14-1\n日\n内\n医院/病房\n人物：余小茜鹿鸣\n鹿正林鹿正云\n鹿鸣（怒喝）：到底怎么回事？\n鹿正云（指向余小茜）：是她！鹿鸣，就是她跟你妈要钱，然后还推\n倒你妈。\n▲余小茜惊愕，手指着自己，百口莫辩。\n鹿鸣（一把揪住余小茜的衣领"
+      },
+      {
+        "scene_id": "965d7417-72d9-4c8f-97ab-e9fb4dd91478",
+        "scene_no": "15-1",
+        "episode_no": 15,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第15 集\n15-1\n日\n内\n医院/病房\n人物：余小茜鹿鸣鹿正林鹿正云徐雅清司机\n家嫂李芬\n医生：这里面含有卡纳霉素，长期过量服用会导致人体肾衰竭，相当\n于致人死亡的毒药。\n鹿鸣：余小茜，现在你还有什么要狡辩的吗？\n▲余小茜震惊过后冷静下来"
+      },
+      {
+        "scene_id": "515a4b95-b2ee-4760-bf6b-94213a54b10b",
+        "scene_no": "17-4",
+        "episode_no": 17,
+        "level": "low_risk",
+        "category": "innuendo",
+        "matched_term": "壁咚",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "17-4\n夜内\n医院/走廊\n人物：余小茜鹿鸣\n▲鹿鸣小心翼翼试探的晃着胳膊。\n余小茜（看不惯）：医生说了没事，大男人别那么矫情。\n▲余小茜刚说完，就被鹿鸣推倒在墙上。\n余小茜（生气）：你干什么？（忽然娇媚）动不动就对人家这样，是\n想和我上演"
+      },
+      {
+        "scene_id": "a8317d3e-e9eb-459b-b711-b08d31744e85",
+        "scene_no": "22-1",
+        "episode_no": 22,
+        "level": "low_risk",
+        "category": "minor_violence",
+        "matched_term": "拳头",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第22 集\n22-1\n夜内\n酒店/房间\n人物：余小茜鹿鸣鲁昌鲁昌手下\n余小茜（咳嗽着想推开鲁昌）：你..走开..别碰我..\n鲁昌：不碰你，还怎么跟你道歉呢宝贝。\n▲话音刚落，鲁昌被鹿鸣从身后猛然拉起，然后一拳头打在脸上，差\n点摔倒在地。\n鲁"
+      },
+      {
+        "scene_id": "3f4927fe-4ea9-4679-9e06-06e721d34888",
+        "scene_no": "36-2",
+        "episode_no": 36,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "36-2\n日\n内\n鹿正林别墅/客厅\n人物：何思思刘敏（何思思妈妈）鹿正林\n▲何思思坐在地上，背靠着沙发，抱着垃圾桶狂吐。\n何思思（虚脱无力）：余小茜，我恨...（你字没说出来，又开始吐）\n你...\n▲刘敏一手挽着鹿正林，一手拎着许多购物袋，"
+      },
+      {
+        "scene_id": "22c42c6a-2657-4b7c-8eb7-b2071ff53b1c",
+        "scene_no": "38-1",
+        "episode_no": 38,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱货",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第38 集：\n38- 1\n日外街道\n人物：余小茜余常德何思思刘敏\n黑衣男子\n▲余小茜直接晕倒在男子怀里。\n▲余常德看到赶忙跑过来，转瞬一脸谄媚的笑。\n余常德：我任务完成了。\n▲镜头拉开，刘敏和何思思正站在男子身边。\n刘敏：你还真是个好爹！卖"
+      },
+      {
+        "scene_id": "7f25894c-0cf1-4a2d-b974-a088a00a40bb",
+        "scene_no": "42-1",
+        "episode_no": 42,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第42 集\n42-1\n日内\n医院/何思思病房\n人物：余小茜\n鹿鸣何思思刘敏\n▲鹿鸣扯着余小茜胳膊，迫使她坐在椅子上，然后居高临下怒视余小\n茜。\n鹿鸣：我一直以为我母亲重伤昏迷，未必是你所为，所以才没送你去\n坐牢。没想到你竟然真这么阴毒，连没"
+      },
+      {
+        "scene_id": "97ae045e-0e08-4a7c-b608-088b78b12052",
+        "scene_no": "43-1",
+        "episode_no": 43,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第43 集：\n43-1\n日内\n医院/何思思病房\n人物：何思思刘敏\n何思思（捂着肚子，委屈）：妈，我怎么就成真怀孕了？\n刘敏：我可怜的女儿。（抱住何思思，转瞬变脸盯着何思思）女儿，\n这个孩子不能留。\n何思思（疑惑）：如果我有自己的孩子，那余小"
+      },
+      {
+        "scene_id": "f3a9a082-187f-40d3-8036-239465baafd6",
+        "scene_no": "46-1",
+        "episode_no": 46,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱货",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第46 集：\n46-1\n日外\n商场广场/休息长椅\n人物：余小茜\n何思思\n何思思（生气）：要不是你贪得无厌，巴结鹿鸣妈，勾引鹿鸣，我又\n怎么会做那些！\n余小茜：所以说，云峰酒店那一夜果真是你一手安排的。\n何思思：没错，从头到尾都是我干的！你贱"
+      },
+      {
+        "scene_id": "2753379b-0cad-446c-b68b-7f679b01168e",
+        "scene_no": "47-1",
+        "episode_no": 47,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第47 集：\n47-1\n日外\n商场广场/休息长椅\n人物：余小茜鹿鸣何思思\n黑衣男子\n余小茜：那我就不辩了！\n▲余小茜说话的同时，再次扇了何思思一个耳光。\n何思思：贱人！你！\n▲何思思要发飙，却见鹿鸣下车走来，立马靠近余小茜，手顺势抓住\n余小"
+      },
+      {
+        "scene_id": "27dc9594-7aa5-4124-85e0-2fc3a2832f6e",
+        "scene_no": "50-2",
+        "episode_no": 50,
+        "level": "low_risk",
+        "category": "minor_violence",
+        "matched_term": "拳头",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "50-2\n日\n外\n公园/休息亭子\n人物：余小茜\n鹿鸣王子诺\n▲余小茜坐在长椅上，鹿鸣突然出现，一把拎起余小茜。\n鹿鸣（有些心虚）：你...为什么不去照顾我母亲？不去跟何思思赔\n罪？你也是当母亲的人，为什么（口是心非）这么恶毒？\n▲余小茜满脸"
+      },
+      {
+        "scene_id": "033b77d7-1258-4599-b564-1167a884379a",
+        "scene_no": "52-1",
+        "episode_no": 52,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "去死",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第52 集\n52-1\n日\n内\n医院/病房门口\n人物：余小茜鹿鸣徐雅清何思思\n▲余小茜再次震惊。\n▲（闪回N 年前）\n（1）小鹿鸣：你...叫什么名字？\n小余小茜：我好几个名字，你叫我什么呢？\n小鹿鸣：甜椒，甜甜的，辣辣的。\n小余小茜：甜椒？"
+      },
+      {
+        "scene_id": "b67fcc4a-7343-4694-8f45-e74d3e574c73",
+        "scene_no": "59-1",
+        "episode_no": 59,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "废物",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第59 集：\n59-1\n日内\n鹿正林别墅/客厅\n人物：鹿正云鹿正林刘敏何思思\n▲鹿正云说着撸袖子就薅住刘敏头发。刘敏啊的一声尖叫，顺势也揪\n住鹿正云的头发。\n鹿正云：你松开我老贱蹄子老妖妇！\n刘敏：你先松开，黄脸婆老娘们！\n▲两人一边嚎叫一"
+      },
+      {
+        "scene_id": "96f4e591-70aa-4952-b92b-13fccee1e15b",
+        "scene_no": "69-2",
+        "episode_no": 69,
+        "level": "low_risk",
+        "category": "innuendo",
+        "matched_term": "扑倒",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "69-2\n日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣何思思鹿鸣手下\n▲别墅大门向两边打开。\n▲鹿鸣带着众手下走进来。\n▲何思思从沙发上豁然起身，撒着娇迎上去。\n何思思（满脸堆笑）：鹿鸣，你回来了。\n鹿鸣：何思思！\n▲鹿鸣将何思思与男人的所有照"
+      },
+      {
+        "scene_id": "a566db77-6bca-4ed7-bd96-7aea44187ed5",
+        "scene_no": "70-1",
+        "episode_no": 70,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第70 集：\n70-1 日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣何思思鹿鸣手下\n何思思（转脸就怒瞪余小茜）：贱人，你笑什么笑！（哀求鹿鸣）鹿\n鸣你说话呀？你是不是原谅我了？\n鹿鸣：我只想确定一件事。（何思思猛点头）云峰酒店那晚，到底是\n不是"
+      },
+      {
+        "scene_id": "487827b7-e669-4709-9455-bbd82eba3593",
+        "scene_no": "71-1",
+        "episode_no": 71,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱货",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第71 集：\n71-1\n日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣何思思鹿鸣手下\n何思思：惊喜不？（看鹿鸣，假装想想）还有...很多，（见鹿鸣要\n发飙）哎，你妈那事跟我没关系啊。\n鹿鸣：我知道不是余小茜做的，但怎么也没想到是你所为？你为了什\n"
+      },
+      {
+        "scene_id": "5ca35a26-f181-4bc9-abbb-86b6f5b974a7",
+        "scene_no": "72-1",
+        "episode_no": 72,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "畜生",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第72 集：\n72-1\n日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣何思思鹿鸣手下\n何思思：余常德是鲍同杀的，跟我有什么关系。\n余小茜：我说过鲍同杀人了吗？\n何思思（怔住）：你...\n余小茜：何思思，我一直以为你的手段只限于绿茶。没想到你为了陷"
+      },
+      {
+        "scene_id": "15506ad1-404d-455f-87ee-bc1783d5e075",
+        "scene_no": "73-1",
+        "episode_no": 73,
+        "level": "low_risk",
+        "category": "minor_violence",
+        "matched_term": "拳头",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第73 集：\n73-1\n日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣王子诺\n▲两人对视，余小茜反应过来，立即后退。\n余小茜（狡辩）：有人骂徐阿姨的儿子，我看不惯而已。（假装不屑）\n你不比自作多情。\n鹿鸣：我相信我的感觉，你喜欢我。\n余小茜：感觉"
+      },
+      {
+        "scene_id": "06e7ea73-ff64-4dba-9bfe-2f749fac8cc7",
+        "scene_no": "77-3",
+        "episode_no": 77,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "废物",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "77-3\n日内\n鹿正林别墅/客厅\n人物余小茜鹿鸣\n鹿正林鹿正云\n鹿鸣手下N 个\n▲鹿正林稳坐在沙发上看着鹿正云心急如焚的来回走。\n鹿正云：刘敏何思思娘俩都出事了，鹿鸣肯定不会放过我。怎么办怎\n么办？（坐在鹿正林身边）你倒是拿个主意呀？\n鹿正"
+      },
+      {
+        "scene_id": "f3db67a5-8fd2-4d3e-9d45-b2a2c343a1a8",
+        "scene_no": "78-1",
+        "episode_no": 78,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "废物",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第78 集：\n78-1\n日内\n鹿正林别墅/客厅\n人物：余小茜鹿鸣\n鹿正林鹿正云\n鹿鸣手下N 个\n鹿正云：鹿鸣，就算我要鹿家的股权怎么了？老娘也姓鹿！\n鹿鸣：但鹿氏集团是我母亲徐雅清一手创建！你没资格要！（逼近鹿\n正云）而你居然还想害死我母亲"
+      },
+      {
+        "scene_id": "1b7bf562-9738-4202-8355-28b2c0d82175",
+        "scene_no": "82-3",
+        "episode_no": 82,
+        "level": "low_risk",
+        "category": "minor_violence",
+        "matched_term": "拳头",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "82-3\n日外\n医院/天台\n人物：余小茜鹿鸣王子诺\n▲王子诺狠狠一拳打在鹿鸣脸上，没等鹿鸣站稳，紧跟着又是一拳。\n鹿鸣（站稳）：是我连累小茜了。我该打。\n▲王子诺再次举起拳头要打，却又恨恨的放下。\n王子诺：因为你鹿鸣，小茜一次次受伤！所以从"
+      },
+      {
+        "scene_id": "a28102aa-0da4-496d-b880-dbe8e1b5f3df",
+        "scene_no": "90-1",
+        "episode_no": 90,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "畜生",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "第90 集：\n90-1\n日内\n谢家别墅/客厅\n人物：鹿鸣王子诺谢海龙谢二夫人谢凯谢凯助手众手下厨师\n▲鹿鸣揪住谢海龙的衣领，直接狠狠的摔在地上。\n谢二夫人啊~的一声蹲下扶谢海龙。\n谢二夫人：你怎么样啊？摔疼了吗？\n王子诺：被打一下，你就知道"
+      },
+      {
+        "scene_id": "203d347f-224a-4b3f-9fde-ca50fc6d2f4f",
+        "scene_no": "92-4",
+        "episode_no": 92,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "废物",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "92-4\n夜内\n酒店/宴会厅走廊\n人物：余小茜柴欣悦\n服务员\n▲余小茜看到柴欣悦在趾高气昂的扇服务员的脸。\n柴欣悦：废物！这么点事都办不好！\n（闪回完）"
+      },
+      {
+        "scene_id": "4bbed0a9-12dc-43c3-bef4-4a0f28f9d422",
+        "scene_no": "98-3",
+        "episode_no": 98,
+        "level": "low_risk",
+        "category": "vulgar_language",
+        "matched_term": "贱人",
+        "confirmed_by_llm": false,
+        "evidence_line_range": null,
+        "excerpt": "98-3\n夜\n内\n仓库\n人物：余小茜鹿鸣\n柴欣悦王子诺（乔装余小茜）护士（男子）\n柴欣悦：叛徒！见钱眼开的穷鬼！（冲余小茜）还有你！别以为你回\n到谢家，就能证明你有多高贵！一辈子都洗不掉身上那股穷酸味！暴\n发户就是暴发户！\n▲余小茜抬脚就要"
+      }
+    ]
+  },
+  "evidence_refs": [],
+  "highlights": [],
+  "coverage_card": null,
+  "beat_sheet": null,
+  "character_graph": null,
+  "pacing_curve": [
+    {
+      "episode_no": 1,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 0,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 2,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "regret": 1,
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 3,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "jealousy": 1,
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 4,
+      "plot_unit_count": 3,
+      "intensity_avg": 7.6667,
+      "intensity_max": 8,
+      "hooks": 3,
+      "payoffs": 3,
+      "conflicts": 3,
+      "drivers_distribution": {
+        "curiosity": 1,
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 5,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 6,
+      "plot_unit_count": 2,
+      "intensity_avg": 6.0,
+      "intensity_max": 7,
+      "hooks": 2,
+      "payoffs": 1,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 7,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 8,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "regret": 1,
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 9,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 10,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 11,
+      "plot_unit_count": 3,
+      "intensity_avg": 7.0,
+      "intensity_max": 8,
+      "hooks": 3,
+      "payoffs": 3,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "humiliation": 1,
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 12,
+      "plot_unit_count": 3,
+      "intensity_avg": 7.3333,
+      "intensity_max": 8,
+      "hooks": 3,
+      "payoffs": 3,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "regret": 1,
+        "desire": 1,
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 13,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 14,
+      "plot_unit_count": 1,
+      "intensity_avg": 4.0,
+      "intensity_max": 4,
+      "hooks": 0,
+      "payoffs": 1,
+      "conflicts": 0,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 15,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.5,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "pity": 1
+      }
+    },
+    {
+      "episode_no": 16,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 17,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1,
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 18,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 19,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "regret": 1
+      }
+    },
+    {
+      "episode_no": 20,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "regret": 1,
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 21,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 22,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 0,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 23,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 24,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 25,
+      "plot_unit_count": 2,
+      "intensity_avg": 6.0,
+      "intensity_max": 7,
+      "hooks": 2,
+      "payoffs": 1,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 26,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 27,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 28,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1,
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 29,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 30,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 31,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "jealousy": 1,
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 32,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 33,
+      "plot_unit_count": 1,
+      "intensity_avg": 6.0,
+      "intensity_max": 6,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 0,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 34,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 35,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 36,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 37,
+      "plot_unit_count": 3,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 3,
+      "payoffs": 3,
+      "conflicts": 3,
+      "drivers_distribution": {
+        "pity": 1,
+        "anger": 1,
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 38,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "pity": 1,
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 39,
+      "plot_unit_count": 1,
+      "intensity_avg": 6.0,
+      "intensity_max": 6,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 0,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 40,
+      "plot_unit_count": 1,
+      "intensity_avg": 7.0,
+      "intensity_max": 7,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 41,
+      "plot_unit_count": 1,
+      "intensity_avg": 6.0,
+      "intensity_max": 6,
+      "hooks": 0,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 42,
+      "plot_unit_count": 1,
+      "intensity_avg": 7.0,
+      "intensity_max": 7,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 43,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "fear": 1,
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 44,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 45,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 46,
+      "plot_unit_count": 1,
+      "intensity_avg": 6.0,
+      "intensity_max": 6,
+      "hooks": 0,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 47,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 48,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "regret": 1
+      }
+    },
+    {
+      "episode_no": 49,
+      "plot_unit_count": 2,
+      "intensity_avg": 5.5,
+      "intensity_max": 6,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "regret": 1,
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 50,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 0,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 51,
+      "plot_unit_count": 2,
+      "intensity_avg": 6.5,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 1,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "fear": 2
+      }
+    },
+    {
+      "episode_no": 52,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "tenderness": 2
+      }
+    },
+    {
+      "episode_no": 53,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "humiliation": 1,
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 54,
+      "plot_unit_count": 3,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 3,
+      "payoffs": 3,
+      "conflicts": 3,
+      "drivers_distribution": {
+        "pity": 1,
+        "regret": 1,
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 55,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 56,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 57,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 0,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "regret": 1
+      }
+    },
+    {
+      "episode_no": 58,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.5,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 59,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 60,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "humiliation": 1,
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 61,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 62,
+      "plot_unit_count": 2,
+      "intensity_avg": 6.5,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 1,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "desire": 2
+      }
+    },
+    {
+      "episode_no": 63,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 64,
+      "plot_unit_count": 3,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 3,
+      "payoffs": 3,
+      "conflicts": 3,
+      "drivers_distribution": {
+        "fear": 1,
+        "tenderness": 1,
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 65,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "pity": 1
+      }
+    },
+    {
+      "episode_no": 66,
+      "plot_unit_count": 2,
+      "intensity_avg": 6.0,
+      "intensity_max": 7,
+      "hooks": 2,
+      "payoffs": 1,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 67,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "desire": 1,
+        "regret": 1
+      }
+    },
+    {
+      "episode_no": 68,
+      "plot_unit_count": 2,
+      "intensity_avg": 6.5,
+      "intensity_max": 7,
+      "hooks": 1,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "anger": 1
+      }
+    },
+    {
+      "episode_no": 69,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "tenderness": 1,
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 70,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "pity": 1
+      }
+    },
+    {
+      "episode_no": 71,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 72,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 73,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "humiliation": 1
+      }
+    },
+    {
+      "episode_no": 74,
+      "plot_unit_count": 1,
+      "intensity_avg": 6.0,
+      "intensity_max": 6,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 0,
+      "drivers_distribution": {
+        "tenderness": 1
+      }
+    },
+    {
+      "episode_no": 75,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 76,
+      "plot_unit_count": 2,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "humiliation": 2
+      }
+    },
+    {
+      "episode_no": 77,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 2,
+      "conflicts": 2,
+      "drivers_distribution": {
+        "curiosity": 1,
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 78,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 0,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "fear": 1
+      }
+    },
+    {
+      "episode_no": 79,
+      "plot_unit_count": 1,
+      "intensity_avg": 5.0,
+      "intensity_max": 5,
+      "hooks": 1,
+      "payoffs": 0,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1
+      }
+    },
+    {
+      "episode_no": 80,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "pity": 1
+      }
+    },
+    {
+      "episode_no": 81,
+      "plot_unit_count": 1,
+      "intensity_avg": 8.0,
+      "intensity_max": 8,
+      "hooks": 1,
+      "payoffs": 1,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "curiosity": 1
+      }
+    },
+    {
+      "episode_no": 82,
+      "plot_unit_count": 2,
+      "intensity_avg": 7.0,
+      "intensity_max": 8,
+      "hooks": 2,
+      "payoffs": 2,
+      "conflicts": 1,
+      "drivers_distribution": {
+        "desire": 1,
+        "jealousy": 1
+      }
+    },
+    {
+      "episode_no": 83,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 84,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 85,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 86,
+      "plot_unit_count": 3,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 87,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 88,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 89,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 90,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 91,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 92,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 93,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 94,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 95,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 96,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 97,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 98,
+      "plot_unit_count": 2,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 99,
+      "plot_unit_count": 3,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    },
+    {
+      "episode_no": 100,
+      "plot_unit_count": 1,
+      "intensity_avg": 0.0,
+      "intensity_max": 0,
+      "hooks": 0,
+      "payoffs": 0,
+      "conflicts": 0,
+      "drivers_distribution": {}
+    }
+  ],
+  "evaluation": {
+    "dimensions": [
+      {
+        "key": "story",
+        "label": "story",
+        "score": 7.125,
+        "tier": "good",
+        "confidence": "high",
+        "reason": "story weighted aggregation over 7 signals",
+        "signal_refs": [
+          {
+            "signal_key": "logline_clear",
+            "score": 6.5,
+            "value": "部分情节线索清晰，但整体故事主线缺乏明确的统一性。",
+            "source": "llm",
+            "confidence": 0.85,
+            "weight_in_dim": 0.15,
+            "primary_dimension": null,
+            "evidence_refs": [
+              {
+                "unit_id": "unit#1",
+                "description": "hook=forced_marriage 清晰地设定了故事起点，但未明确后续发展。"
+              },
+              {
+                "unit_id": "unit#24",
+                "description": "hook=none 和 conflict=none 导致该单元逻辑不清晰。"
+              }
+            ]
+          },
+          {
+            "signal_key": "causal_link_density",
+            "score": 5.0,
+            "value": "因果关系在部分情节中较为松散，缺乏紧密连接。",
+            "source": "llm",
+            "confidence": 0.75,
+            "weight_in_dim": 0.2,
+            "primary_dimension": null,
+            "evidence_refs": [
+              {
+                "unit_id": "unit#3",
+                "description": "hook=betrayal 和 payoff=comic_relief 之间的因果关系不够自然。"
+              },
+              {
+                "unit_id": "unit#18",
+                "description": "conflict=none 使得因果链条断裂。"
+              }
+            ]
+          },
+          {
+            "signal_key": "structural_completeness",
+            "score": 10.0,
+            "value": {
+              "matched_blocks": 4,
+              "present_stages": [
+                "climax",
+                "escalation",
+                "payoff",
+                "setup",
+                "teaser",
+                "trigger"
+              ]
+            },
+            "source": "rule",
+            "confidence": 0.85,
+            "weight_in_dim": 0.2,
+            "primary_dimension": "story",
+            "evidence_refs": [
+              {
+                "plot_unit_id": "15fc65d4-643b-4fee-8aff-9527b35fd639",
+                "value": "teaser"
+              },
+              {
+                "plot_unit_id": "6e180d0b-f2ff-4960-ba74-8491931d41ef",
+                "value": "setup"
+              },
+              {
+                "plot_unit_id": "eec601fc-3ba2-4ad5-afd3-c705ec4dc752",
+                "value": "payoff"
+              }
+            ]
+          },
+          {
+            "signal_key": "reversal_effectiveness",
+            "score": 10.0,
+            "value": {
+              "reversal_hooks": 3589,
+              "payoff_boosters": 4124,
+              "intensity": 37.9262
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.15,
+            "primary_dimension": "story",
+            "evidence_refs": [
+              {
+                "plot_unit_id": "6e180d0b-f2ff-4960-ba74-8491931d41ef",
+                "value": "secret_exposure"
+              },
+              {
+                "plot_unit_id": "228d6af5-f1bb-41d1-8f98-2578bfaecb79",
+                "value": "betrayal"
+              },
+              {
+                "plot_unit_id": "eec601fc-3ba2-4ad5-afd3-c705ec4dc752",
+                "value": "secret_exposure"
+              },
+              {
+                "plot_unit_id": "208f9030-adcb-45eb-8c03-4ccff88a52c4",
+                "value": "betrayal"
+              }
+            ]
+          },
+          {
+            "signal_key": "event_sequence_coherence",
+            "score": 7.0,
+            "value": "事件序列基本连贯，但存在跳跃和突兀之处。",
+            "source": "llm",
+            "confidence": 0.8,
+            "weight_in_dim": 0.15,
+            "primary_dimension": null,
+            "evidence_refs": [
+              {
+                "unit_id": "unit#9",
+                "description": "hook=reversal 和 payoff=face_slapping 的过渡合理，符合预期。"
+              },
+              {
+                "unit_id": "unit#22",
+                "description": "conflict=none 导致事件序列出现断层。"
+              }
+            ]
+          },
+          {
+            "signal_key": "ending_resolution",
+            "score": 4.0,
+            "value": "结局解决感不足，许多冲突未得到充分收尾。",
+            "source": "llm",
+            "confidence": 0.7,
+            "weight_in_dim": 0.1,
+            "primary_dimension": null,
+            "evidence_refs": [
+              {
+                "unit_id": "unit#10",
+                "description": "payoff=none 表明该集未能有效解决冲突。"
+              },
+              {
+                "unit_id": "unit#35",
+                "description": "payoff=none 再次显示结局缺乏解决感。"
+              }
+            ]
+          },
+          {
+            "signal_key": "plot_unit_count_per_ep",
+            "score": 4.0,
+            "value": {
+              "avg_units_per_episode": 1.49
+            },
+            "source": "rule",
+            "confidence": 0.9,
+            "weight_in_dim": 0.05,
+            "primary_dimension": "story",
+            "evidence_refs": []
+          }
+        ]
+      },
+      {
+        "key": "character",
+        "label": "character",
+        "score": 5.416,
+        "tier": "weak",
+        "confidence": "high",
+        "reason": "character weighted aggregation over 10 signals",
+        "signal_refs": [
+          {
+            "signal_key": "protagonist_identifiable",
+            "score": 10.0,
+            "value": {
+              "entity_count": 34,
+              "protagonist_count": 1
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": [
+              {
+                "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+              }
+            ]
+          },
+          {
+            "signal_key": "protagonist_agency",
+            "score": 1.0,
+            "value": {
+              "high_or_medium_ratio": 0.0
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": [
+              {
+                "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+              }
+            ]
+          },
+          {
+            "signal_key": "motivation_clarity",
+            "score": 3.0,
+            "value": "moderate",
+            "source": "llm",
+            "confidence": 0.85,
+            "weight_in_dim": 0.15,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "decision_setup_rate",
+            "score": 6.22,
+            "value": {
+              "setup_ratio": 0.7774
+            },
+            "source": "rule",
+            "confidence": 0.65,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "ooc_rate",
+            "score": 3.61,
+            "value": {
+              "ooc_ratio": 0.639
+            },
+            "source": "rule",
+            "confidence": 0.55,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "antagonist_quality",
+            "score": 9.0,
+            "value": {
+              "antagonist_count": 1,
+              "negative_relationship_count": 14
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "relationship_conflict_strength",
+            "score": 6.33,
+            "value": {
+              "conflict_ratio": 0.6333
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": [
+              {
+                "relationship_id": "3aefdb9f-f0ab-4f2c-a470-21de9ccfe830"
+              },
+              {
+                "relationship_id": "94cc7069-5f51-438e-a838-f4a98a1765fc"
+              },
+              {
+                "relationship_id": "9bd0366d-f89a-4ba5-8dad-06feb3abeda3"
+              },
+              {
+                "relationship_id": "9f1893bc-f0b2-413c-bc28-0d99d3c67c23"
+              }
+            ]
+          },
+          {
+            "signal_key": "relationship_arc_change",
+            "score": 8.5,
+            "value": {
+              "dynamic_ratio": 0.8333
+            },
+            "source": "rule",
+            "confidence": 0.7,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "character",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "ensemble_distinctiveness",
+            "score": 4.0,
+            "value": "high",
+            "source": "llm",
+            "confidence": 0.9,
+            "weight_in_dim": 0.1,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "character_consistency",
+            "score": 2.0,
+            "value": "low",
+            "source": "llm",
+            "confidence": 0.8,
+            "weight_in_dim": 0.05,
+            "primary_dimension": null,
+            "evidence_refs": []
+          }
+        ]
+      },
+      {
+        "key": "concept",
+        "label": "concept",
+        "score": 4.636,
+        "tier": "weak",
+        "confidence": "high",
+        "reason": "concept weighted aggregation over 6 signals",
+        "signal_refs": [
+          {
+            "signal_key": "drama_tags_confidence",
+            "score": 6.0,
+            "value": {
+              "avg_confidence": 0.6,
+              "tag_count": 66
+            },
+            "source": "rule",
+            "confidence": 0.85,
+            "weight_in_dim": 0.2,
+            "primary_dimension": "concept",
+            "evidence_refs": [
+              {
+                "dim": "drama_tags",
+                "value": "大女主"
+              },
+              {
+                "dim": "drama_tags",
+                "value": "乡村"
+              },
+              {
+                "dim": "drama_tags",
+                "value": "女频"
+              }
+            ]
+          },
+          {
+            "signal_key": "genre_market_fit",
+            "score": 3.18,
+            "value": {
+              "mainstream_ratio": 0.3182,
+              "matched": [
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻",
+                "玄幻"
+              ]
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.2,
+            "primary_dimension": "concept",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "core_value_clarity",
+            "score": 3.0,
+            "value": "moderate",
+            "source": "llm",
+            "confidence": 0.85,
+            "weight_in_dim": 0.2,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "differentiation",
+            "score": 4.0,
+            "value": "high",
+            "source": "llm",
+            "confidence": 0.9,
+            "weight_in_dim": 0.2,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "early_genre_signal",
+            "score": 9.0,
+            "value": {
+              "hit": true,
+              "window_units": 29
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "concept",
+            "evidence_refs": [
+              {
+                "plot_unit_id": "15fc65d4-643b-4fee-8aff-9527b35fd639"
+              }
+            ]
+          },
+          {
+            "signal_key": "commercial_communicability",
+            "score": 5.0,
+            "value": "very_high",
+            "source": "llm",
+            "confidence": 0.95,
+            "weight_in_dim": 0.1,
+            "primary_dimension": null,
+            "evidence_refs": []
+          }
+        ]
+      },
+      {
+        "key": "emotion",
+        "label": "emotion",
+        "score": 7.345,
+        "tier": "good",
+        "confidence": "high",
+        "reason": "emotion weighted aggregation over 8 signals",
+        "signal_refs": [
+          {
+            "signal_key": "payoff_density",
+            "score": 10.0,
+            "value": {
+              "density": 67.84,
+              "payoff_count": 6784
+            },
+            "source": "rule",
+            "confidence": 0.85,
+            "weight_in_dim": 0.15,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "emotional_driver_distribution",
+            "score": 9.17,
+            "value": {
+              "distribution": {
+                "anger": 0.0913,
+                "curiosity": 0.0834,
+                "desire": 0.1659,
+                "fear": 0.1648,
+                "humiliation": 0.1281,
+                "jealousy": 0.0814,
+                "pity": 0.0635,
+                "regret": 0.0924,
+                "tenderness": 0.1291
+              }
+            },
+            "source": "rule",
+            "confidence": 0.7,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "emotional_variety",
+            "score": 9.78,
+            "value": {
+              "entropy": 3.0987,
+              "normalized_entropy": 0.9775
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "emotional_contrast",
+            "score": 9.0,
+            "value": {
+              "has_positive": true,
+              "has_negative": true
+            },
+            "source": "rule",
+            "confidence": 0.7,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "dry_streak_max",
+            "score": 3.0,
+            "value": {
+              "max_streak_units": 29
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.15,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "episode_end_hook_rate",
+            "score": 10.0,
+            "value": {
+              "hook_rate": 3.1,
+              "hook_count": 310
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "paid_break_potential",
+            "score": 10.0,
+            "value": {
+              "break_rate": 2.72,
+              "signal_count": 272
+            },
+            "source": "rule",
+            "confidence": 0.7,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "emotion",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "empathy_signal",
+            "score": 3.0,
+            "value": "moderate",
+            "source": "llm",
+            "confidence": 0.85,
+            "weight_in_dim": 0.2,
+            "primary_dimension": null,
+            "evidence_refs": [
+              {
+                "reason": "forced marriage hook introduces relational tension, creating potential for audience empathy.",
+                "unit_id": "unit#1"
+              },
+              {
+                "reason": "betrayal and survival crisis evoke strong emotional responses, enhancing viewer connection.",
+                "unit_id": "unit#6"
+              },
+              {
+                "reason": "emotional choice amidst romantic conflict deepens character investment.",
+                "unit_id": "unit#12"
+              },
+              {
+                "reason": "face-slapping payoff in a romantic conflict can elicit cathartic audience reactions.",
+                "unit_id": "unit#27"
+              },
+              {
+                "reason": "betrayal paired with romantic conflict offers opportunities for empathetic engagement.",
+                "unit_id": "unit#35"
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "key": "pacing",
+        "label": "pacing",
+        "score": 8.329,
+        "tier": "excellent",
+        "confidence": "high",
+        "reason": "pacing weighted aggregation over 10 signals",
+        "signal_refs": [
+          {
+            "signal_key": "opening_speed",
+            "score": 10.0,
+            "value": {
+              "opening_index": 1,
+              "total_units": 149
+            },
+            "source": "rule",
+            "confidence": 0.85,
+            "weight_in_dim": 0.12,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "plot_unit_density",
+            "score": 3.0,
+            "value": {
+              "units_per_episode": 1.49
+            },
+            "source": "rule",
+            "confidence": 0.9,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "narrative_intensity_distribution",
+            "score": 10.0,
+            "value": {
+              "intensity_avg": 5.8993,
+              "intensity_max": 8
+            },
+            "source": "rule",
+            "confidence": 0.85,
+            "weight_in_dim": 0.12,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "intensity_cv",
+            "score": 10.0,
+            "value": {
+              "cv": 0.5191
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "middle_sag",
+            "score": 10.0,
+            "value": {
+              "middle_ratio": 1.2544
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "downtime_penalty",
+            "score": 2.0,
+            "value": {
+              "longest_low_intensity_streak": 29
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.08,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "dialogue_action_ratio",
+            "score": 7.11,
+            "value": {
+              "dense_ratio": 0.1144,
+              "sparse_ratio": 0.403
+            },
+            "source": "rule",
+            "confidence": 0.65,
+            "weight_in_dim": 0.08,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "beats_per_episode",
+            "score": 10.0,
+            "value": {
+              "beats_per_episode": 64.51
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "effective_narrative_rate",
+            "score": 10.0,
+            "value": {
+              "effective_ratio": 0.8054
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "scene_length_distribution",
+            "score": 9.0,
+            "value": {
+              "cv": 0.5544,
+              "scene_count": 215
+            },
+            "source": "rule",
+            "confidence": 0.7,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "pacing",
+            "evidence_refs": []
+          }
+        ]
+      },
+      {
+        "key": "dialogue",
+        "label": "dialogue",
+        "score": 7.694,
+        "tier": "good",
+        "confidence": "high",
+        "reason": "dialogue weighted aggregation over 9 signals",
+        "signal_refs": [
+          {
+            "signal_key": "dialogue_density",
+            "score": 6.58,
+            "value": {
+              "dense_ratio": 0.1144,
+              "moderate_ratio": 0.4826,
+              "sparse_ratio": 0.403
+            },
+            "source": "rule",
+            "confidence": 0.8,
+            "weight_in_dim": 0.15,
+            "primary_dimension": "dialogue",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "dialogue_efficiency",
+            "score": 7.0,
+            "value": "moderate",
+            "source": "llm",
+            "confidence": 0.85,
+            "weight_in_dim": 0.15,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "character_voice_distinction",
+            "score": 9.0,
+            "value": "high",
+            "source": "llm",
+            "confidence": 0.95,
+            "weight_in_dim": 0.15,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "qa_coherence",
+            "score": 8.0,
+            "value": "high",
+            "source": "llm",
+            "confidence": 0.9,
+            "weight_in_dim": 0.1,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "topic_focus",
+            "score": 9.77,
+            "value": {
+              "dialogue_scene_ratio": 0.9767
+            },
+            "source": "rule",
+            "confidence": 0.45,
+            "weight_in_dim": 0.1,
+            "primary_dimension": "dialogue",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "qa_relevance",
+            "score": 6.0,
+            "value": "moderate",
+            "source": "llm",
+            "confidence": 0.8,
+            "weight_in_dim": 0.1,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "subtext_or_conflict",
+            "score": 5.0,
+            "value": "low_to_moderate",
+            "source": "llm",
+            "confidence": 0.75,
+            "weight_in_dim": 0.1,
+            "primary_dimension": null,
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "voiceover_fit",
+            "score": 10.0,
+            "value": {
+              "narrator_ratio": 0.0,
+              "mixed_ratio": 0.0
+            },
+            "source": "rule",
+            "confidence": 0.7,
+            "weight_in_dim": 0.08,
+            "primary_dimension": "dialogue",
+            "evidence_refs": []
+          },
+          {
+            "signal_key": "brevity_ratio",
+            "score": 9.0,
+            "value": {
+              "avg_line_length": 19.244
+            },
+            "source": "rule",
+            "confidence": 0.75,
+            "weight_in_dim": 0.07,
+            "primary_dimension": "dialogue",
+            "evidence_refs": []
+          }
+        ]
+      }
+    ],
+    "risk_flags": [],
+    "rewrite_seeds": [
+      {
+        "id": "77dd87b7-dec1-4217-96d0-4be872009bab",
+        "dimension": "character",
+        "signal_key": "protagonist_agency",
+        "issue": "主角存在决策，但关键时刻的主动性表达不足。",
+        "target": "提升主角“主动提出-执行-反馈”的完整链条。",
+        "action_steps": [
+          "增强主角发起动作的台词或行为。",
+          "补一条结果反馈，展示主角决策影响。"
+        ],
+        "evidence_refs": [
+          {
+            "character_id": "dc343073-6c11-4af6-9059-a7904e8e81c1"
+          }
+        ],
+        "estimated_lift": {
+          "character": 0.8,
+          "story": 0.2
+        }
+      }
+    ]
+  },
+  "risk_flags": [],
+  "dry_run": true,
+  "latest_run": {}
+}

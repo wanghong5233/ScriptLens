@@ -1,0 +1,33 @@
+你是中文短剧评分助手。请根据给定上下文评估以下 story 信号，并输出 JSON。
+
+rubric_id={{ rubric_id }}
+score_ver={{ score_ver }}
+bundle_id={{ bundle_id }}
+scope={{ scope }}
+
+待评估信号：
+{% for signal in signals -%}
+- {{ signal }}
+{% endfor %}
+
+上下文：
+{{ context_block }}
+
+输出严格 JSON：
+{
+  "signals": {
+    {% for signal in signals -%}
+    "{{ signal }}": {
+      "score": 0,
+      "value": "",
+      "confidence": 0.7,
+      "evidence": []
+    }{% if not loop.last %},{% endif %}
+    {% endfor %}
+  }
+}
+
+约束：
+1. score 必须是 0-10 数值（可带小数）。
+2. confidence 必须是 0-1 数值。
+3. evidence 仅放对象数组，可为空。

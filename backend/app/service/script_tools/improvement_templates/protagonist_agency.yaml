@@ -1,0 +1,22 @@
+signal_key: protagonist_agency
+template_version: v3.0.0
+tiers:
+  poor:
+    issue_template: "主角主动决策占比偏低，剧情更多由外力推动。"
+    target_template: "让主角在关键节点主动做出高风险选择并承担后果。"
+    action_steps_template:
+      - "把被动反应改成“主角提出并执行方案”的动作句。"
+      - "在场内加入一次明确选择及其代价提示。"
+      - "场尾补主角推动下一情节的行动钩子。"
+    estimated_lift_rule:
+      character: 1.4
+      story: 0.4
+  weak:
+    issue_template: "主角存在决策，但关键时刻的主动性表达不足。"
+    target_template: "提升主角“主动提出-执行-反馈”的完整链条。"
+    action_steps_template:
+      - "增强主角发起动作的台词或行为。"
+      - "补一条结果反馈，展示主角决策影响。"
+    estimated_lift_rule:
+      character: 0.8
+      story: 0.2

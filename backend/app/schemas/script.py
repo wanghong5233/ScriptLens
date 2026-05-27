@@ -147,11 +147,11 @@ class ReportProgressResponse(BaseModel):
 # ============================================================
 
 
-# 阅文五力（docs/08-evaluation-framework.md §3）；compliance 独立成 ReportPayload.compliance
-DimensionName = Literal["story", "character", "concept", "emotion", "pacing"]
+# 阅文六维（Batch 3）；compliance 独立成 ReportPayload.compliance
+DimensionName = Literal["story", "character", "concept", "emotion", "pacing", "dialogue"]
 DecisionLabel = Literal["recommend_continue", "cautious_continue", "not_recommended"]
 ConfidenceLevel = Literal["high", "medium", "low"]
-DimensionLevel = Literal["high", "medium", "low"]
+TierName = Literal["excellent", "good", "weak", "poor", "insufficient"]
 ComplianceLevel = Literal["high_risk", "medium_risk", "low_risk", "clean"]
 
 
@@ -162,26 +162,27 @@ class ReportDecision(BaseModel):
     confidence: ConfidenceLevel
     one_sentence_reason: str
     summary: str = Field("", description="3-5 句剧本概览")
+    decision_inputs: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportScorecardItem(BaseModel):
     """阅文五力 scorecard 的一项（docs/08-evaluation-framework.md §3）。
 
-    失败模式：上游信号缺失 → score=null/level=null/reason 写明缺什么。
+    失败模式：上游信号缺失 → score=null/tier=insufficient/reason 写明缺什么。
     前端展示规则：score 为 null 时不画分数条，只显示 reason。
     """
 
     dimension: DimensionName
-    score: Optional[int] = Field(
+    score: Optional[float] = Field(
         None,
         ge=0,
         le=10,
-        description="0-10；上游信号缺失或维度不可评时为 null（不能伪造默认值）",
+        description="0-10；coverage 不足时可为 null",
     )
-    level: Optional[DimensionLevel] = Field(
-        None,
-        description="档位 high/medium/low；score=null 时同步为 null",
-    )
+    tier: TierName = "insufficient"
+    confidence: ConfidenceLevel = "low"
+    coverage_ratio: Optional[float] = Field(None, ge=0, le=1)
+    signal_refs: List[Dict[str, Any]] = Field(default_factory=list)
     reason: str
     evidence_ref_ids: List[str] = Field(default_factory=list)
 
@@ -196,6 +197,9 @@ class ReportCompliance(BaseModel):
     dimension: Literal["compliance"] = "compliance"
     score: Optional[int] = Field(None, ge=0, le=10)
     level: Optional[ComplianceLevel] = None
+    tier: TierName = "insufficient"
+    confidence: ConfidenceLevel = "low"
+    status: Literal["pass", "warn", "blocked"] = "pass"
     reason: str = ""
     evidence_ref_ids: List[str] = Field(default_factory=list)
 
@@ -388,20 +392,24 @@ class CharacterGraph(BaseModel):
 
 class PacingCurvePoint(BaseModel):
     episode_no: int
-    scene_count: int = 0
-    event_count: int = 0
+    plot_unit_count: int = 0
+    intensity_avg: float = Field(0.0, ge=0, le=8)
+    intensity_max: int = Field(0, ge=0, le=8)
     hooks: int = 0
-    twists: int = 0
-    reward_events: int = 0
-    sentiment: float = Field(0.0, ge=-1.0, le=1.0)
+    payoffs: int = 0
+    conflicts: int = 0
+    drivers_distribution: Dict[str, int] = Field(default_factory=dict)
 
 
 class EvaluationDimension(BaseModel):
     key: DimensionName
     label: str
-    score: Optional[int] = Field(None, ge=0, le=10)
-    level: Optional[DimensionLevel] = None
+    score: Optional[float] = Field(None, ge=0, le=10)
+    tier: TierName = "insufficient"
+    confidence: ConfidenceLevel = "low"
+    coverage_ratio: Optional[float] = Field(None, ge=0, le=1)
     reason: str
+    signal_refs: List[Dict[str, Any]] = Field(default_factory=list)
     evidence_ref_ids: List[str] = Field(default_factory=list)
 
 
@@ -422,7 +430,7 @@ class ReportPayload(BaseModel):
         None,
         ge=0,
         le=10,
-        description="5 维加权聚合；当 ≥3 维评分证据不足时为 null（rubric §6）",
+        description="6 维加权聚合；当关键维证据不足时可为 null",
     )
     summary: str = Field("", description="冗余字段：与 decision.summary 一致")
     must_read_scene_ids: List[str] = Field(
@@ -537,8 +545,8 @@ class RewriteRequest(BaseModel):
 
     scene_id: str = Field(..., description="目标场景 ID（来自 /scenes 列表）")
     target_dimension: Literal[
-        "story", "character", "concept", "emotion", "pacing"
-    ] = Field(..., description="改写聚焦维度（阅文五力）")
+        "story", "character", "concept", "emotion", "pacing", "dialogue"
+    ] = Field(..., description="改写聚焦维度（阅文六维）")
     issue: str = Field(..., min_length=1, max_length=500, description="问题描述（如'动机不成立'）")
 
 
@@ -603,11 +611,20 @@ class RewriteSeed(BaseModel):
     rewritten_excerpt / diff / rationale 由用户在 chat 触发 propose_rewrite_tool 实时生产。
     """
 
+    id: Optional[str] = None
     dimension: DimensionName
-    scene_id: str
+    signal_key: str = ""
+    scene_id: Optional[str] = None
     scene_label: Optional[str] = None
     issue: str = Field(..., description="一句话点明该场该维度的问题；派生自 scorecard.reason 第一句")
-    evidence_ref_id: str = Field(..., description="对应报告里的某条证据，用于在编辑器联动高亮")
+    target: str = ""
+    action_steps: List[str] = Field(default_factory=list)
+    evidence_refs: List[Dict[str, Any]] = Field(default_factory=list)
+    estimated_lift: Dict[str, float] = Field(default_factory=dict)
+    evidence_ref_id: Optional[str] = Field(
+        None,
+        description="兼容字段：旧链路的单证据引用 ID",
+    )
 
 
 class RewriteTaskStatus(BaseModel):
@@ -644,7 +661,7 @@ class ViewResponse(BaseModel):
         None,
         ge=0,
         le=10,
-        description="5 维加权聚合；当 ≥3 维评分证据不足时为 null（rubric §6）",
+        description="6 维加权聚合；当关键维证据不足时可为 null",
     )
     summary: str
     scorecard: List[ReportScorecardItem]

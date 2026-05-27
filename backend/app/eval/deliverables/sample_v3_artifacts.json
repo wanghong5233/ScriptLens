@@ -1,0 +1,115 @@
+{
+  "artifact_version": "v3.0.0-dev",
+  "script_id": "bdf4bc68-282b-45fb-ae85-e1bd9273d20c",
+  "title": "《冷面霸总：甜心小娇妻太会撩》1-100集",
+  "rubric_version": "v3.0.0",
+  "tag_set_ver": "v1.0.0",
+  "sources": {
+    "signals_full": "eval/deliverables/reports/v3_signal_extraction_dev.json",
+    "scoring_smoke_full": "eval/deliverables/reports/v3_scoring_smoke_dev.json",
+    "stability_full": "eval/deliverables/reports/v3_scoring_stability_dev.json",
+    "acceptance_full": "eval/deliverables/reports/batch3_acceptance.json"
+  },
+  "signals": {
+    "total": 50,
+    "rule_count": 34,
+    "llm_count": 16,
+    "coverage_by_dimension": {
+      "story": 1.0,
+      "character": 1.0,
+      "concept": 1.0,
+      "emotion": 1.0,
+      "pacing": 1.0,
+      "dialogue": 1.0
+    },
+    "samples": {
+      "logline_clear": {
+        "source": "llm",
+        "score": 6.5,
+        "confidence": 0.8
+      },
+      "structural_completeness": {
+        "source": "rule",
+        "score": 10.0,
+        "confidence": 0.85
+      },
+      "protagonist_agency": {
+        "source": "rule",
+        "score": 1.0,
+        "confidence": 0.75
+      },
+      "dialogue_efficiency": {
+        "source": "llm",
+        "score": 7.0,
+        "confidence": 0.85
+      }
+    }
+  },
+  "dimension_scores": [
+    {
+      "dimension": "story",
+      "score": 7.125,
+      "tier": "good",
+      "confidence": "high"
+    },
+    {
+      "dimension": "character",
+      "score": 5.416,
+      "tier": "weak",
+      "confidence": "high"
+    },
+    {
+      "dimension": "concept",
+      "score": 4.636,
+      "tier": "weak",
+      "confidence": "high"
+    },
+    {
+      "dimension": "emotion",
+      "score": 7.345,
+      "tier": "good",
+      "confidence": "high"
+    },
+    {
+      "dimension": "pacing",
+      "score": 8.329,
+      "tier": "excellent",
+      "confidence": "high"
+    },
+    {
+      "dimension": "dialogue",
+      "score": 7.694,
+      "tier": "good",
+      "confidence": "high"
+    }
+  ],
+  "decision": {
+    "label": "not_recommended",
+    "confidence": "high",
+    "one_sentence_reason": "内容合规存在阻断项，需先完成整改。",
+    "overall_score": 6.691
+  },
+  "actions": [
+    {
+      "id": "77dd87b7-dec1-4217-96d0-4be872009bab",
+      "dimension": "character",
+      "signal_key": "protagonist_agency",
+      "issue": "主角存在决策，但关键时刻的主动性表达不足。",
+      "target": "提升主角“主动提出-执行-反馈”的完整链条。",
+      "action_steps": [
+        "增强主角发起动作的台词或行为。",
+        "补一条结果反馈，展示主角决策影响。"
+      ],
+      "estimated_lift": {
+        "character": 0.8,
+        "story": 0.2
+      }
+    }
+  ],
+  "scoring_run_metadata": {
+    "dry_run": true,
+    "persistence_ready": false,
+    "seed": 42,
+    "notes": "当前环境未创建 scoring_runs/script_scores/scoring_improvement_actions 表，评分链路以 dry-run 方式完成并输出完整报告结构。"
+  }
+}

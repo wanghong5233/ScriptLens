@@ -1,9 +1,0 @@
-{
-  "reports": [
-    "v1_stability_dev_script.md",
-    "v1_stability_dev_episode.md",
-    "v1_stability_dev_character.md",
-    "v1_stability_dev_relationship.md",
-    "v0_regression_after_v1.md"
-  ]
-}

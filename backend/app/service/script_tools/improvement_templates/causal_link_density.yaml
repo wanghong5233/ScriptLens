@@ -1,0 +1,22 @@
+signal_key: causal_link_density
+template_version: v3.0.0
+tiers:
+  poor:
+    issue_template: "关键事件的因果承接不清，观众难以理解“为什么发生下一步”。"
+    target_template: "每个关键动作前补齐可追溯触发条件，形成清晰因果链。"
+    action_steps_template:
+      - "在该场开头补一句承接前情的触发信息（人物动机/外部压力）。"
+      - "把结果句改为“行为 -> 后果”结构，显式连接到下一场。"
+      - "删除与主因果链无关的插叙内容。"
+    estimated_lift_rule:
+      story: 1.2
+      character: 0.4
+  weak:
+    issue_template: "事件因果存在跳步，关键转折的理由表达偏弱。"
+    target_template: "补足转折前后两端的触发与反馈。"
+    action_steps_template:
+      - "在转折前增加一句动机或限制条件。"
+      - "在场尾加一条明确后果，指向下一场冲突。"
+    estimated_lift_rule:
+      story: 0.7
+      character: 0.2

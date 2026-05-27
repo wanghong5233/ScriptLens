@@ -1,158 +1,121 @@
-"""无 LLM 节奏聚合：每集事件密度 + 情感弧。
-
-该模块只做可解释的统计，不做主观评分。它给前端故事页画 pacing curve，
-不替代 5 维 `pacing` 评分。
-"""
+"""Pacing curve v3: plot_unit 强度序列聚合。"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Any
 
 from sqlalchemy.engine import Engine
 
-from service.script_tools.reward_extractor import RewardEvent
-from service.script_tools.scene_repo import get_all_scenes
+from service.script_tools.signal_catalog import SignalContext, build_signal_context
+from service.script_tools.signal_catalog.rule_signals.pacing import narrative_intensity
 from utils.database import engine as default_engine
 
 
 @dataclass
 class PacingPoint:
     episode_no: int
-    scene_count: int
-    event_count: int
+    plot_unit_count: int
+    intensity_avg: float
+    intensity_max: int
     hooks: int
-    twists: int
-    reward_events: int
-    sentiment: float
+    payoffs: int
+    conflicts: int
+    drivers_distribution: dict[str, int]
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "episode_no": self.episode_no,
-            "scene_count": self.scene_count,
-            "event_count": self.event_count,
+            "plot_unit_count": self.plot_unit_count,
+            "intensity_avg": self.intensity_avg,
+            "intensity_max": self.intensity_max,
             "hooks": self.hooks,
-            "twists": self.twists,
-            "reward_events": self.reward_events,
-            "sentiment": self.sentiment,
+            "payoffs": self.payoffs,
+            "conflicts": self.conflicts,
+            "drivers_distribution": self.drivers_distribution,
         }
 
 
-_HOOK_TERMS = (
-    "离婚",
-    "重生",
-    "穿越",
-    "死亡",
-    "绝症",
-    "背叛",
-    "羞辱",
-    "怀孕",
-    "替嫁",
-    "身份",
-    "秘密",
-    "真相",
-)
+def _non_none(value: str) -> bool:
+    text = (value or "").strip().lower()
+    return bool(text and text != "none")
 
-_TWIST_EVENT_TYPES = {
-    "reversal",
-    "identity_reveal",
-    "scheme_exposed",
-}
 
-_POSITIVE_TERMS = (
-    "赢",
-    "成功",
-    "团圆",
-    "原谅",
-    "相认",
-    "保护",
-    "幸福",
-    "逆袭",
-    "真相大白",
-    "反击",
-)
+def aggregate_pacing_curve_v3(ctx: SignalContext) -> list[dict[str, Any]]:
+    buckets: dict[int, list[dict[str, Any]]] = {}
+    for unit in ctx.plot_units:
+        ep = unit.get("episode_no")
+        if ep is None:
+            continue
+        buckets.setdefault(int(ep), []).append(unit)
 
-_NEGATIVE_TERMS = (
-    "哭",
-    "死",
-    "恨",
-    "骗",
-    "背叛",
-    "羞辱",
-    "痛苦",
-    "绝望",
-    "威胁",
-    "下跪",
-)
+    if not buckets and ctx.plot_units:
+        buckets[1] = list(ctx.plot_units)
+    if not buckets:
+        return []
+
+    out: list[dict[str, Any]] = []
+    for episode_no in sorted(buckets.keys()):
+        units = buckets[episode_no]
+        intensity_series: list[int] = []
+        hooks = 0
+        payoffs = 0
+        conflicts = 0
+        drivers_distribution: dict[str, int] = {}
+        for unit in units:
+            unit_id = str(unit.get("id") or "").strip()
+            if not unit_id:
+                continue
+            intensity_series.append(narrative_intensity(ctx, unit_id))
+
+            plot_hook = str(ctx.unit_value(unit_id, "plot_hook", default="none"))
+            payoff_type = str(ctx.unit_value(unit_id, "payoff_type", default="none"))
+            conflict_type = str(ctx.unit_value(unit_id, "conflict_type", default="none"))
+            emotional_driver = str(ctx.unit_value(unit_id, "emotional_driver", default="none"))
+
+            if _non_none(plot_hook):
+                hooks += 1
+            if _non_none(payoff_type):
+                payoffs += 1
+            if _non_none(conflict_type):
+                conflicts += 1
+            if _non_none(emotional_driver):
+                drivers_distribution[emotional_driver] = drivers_distribution.get(emotional_driver, 0) + 1
+
+        plot_unit_count = len(intensity_series)
+        if plot_unit_count <= 0:
+            point = PacingPoint(
+                episode_no=episode_no,
+                plot_unit_count=0,
+                intensity_avg=0.0,
+                intensity_max=0,
+                hooks=hooks,
+                payoffs=payoffs,
+                conflicts=conflicts,
+                drivers_distribution=drivers_distribution,
+            )
+        else:
+            point = PacingPoint(
+                episode_no=episode_no,
+                plot_unit_count=plot_unit_count,
+                intensity_avg=round(sum(intensity_series) / plot_unit_count, 4),
+                intensity_max=max(intensity_series),
+                hooks=hooks,
+                payoffs=payoffs,
+                conflicts=conflicts,
+                drivers_distribution=drivers_distribution,
+            )
+        out.append(point.to_dict())
+    return out
 
 
 def aggregate_pacing_curve(
     *,
     script_id: str,
-    reward_events: List[RewardEvent],
+    reward_events: list[Any] | None = None,
     engine: Engine = default_engine,
-) -> List[dict]:
-    """按集聚合节奏曲线。
-
-    `reward_events` 已由 reward_extractor 二级判定过滤，适合作为事件密度基础。
-    hook 与 sentiment 用规则统计，保证该模块可重复、可解释、无额外 LLM 成本。
-    """
-    scenes = get_all_scenes(script_id=script_id, engine=engine)
-    if not scenes:
-        return []
-
-    episode_nos = sorted({s.episode_no for s in scenes if s.episode_no is not None})
-    if not episode_nos:
-        episode_nos = [1]
-
-    scenes_by_episode: Dict[int, list] = {ep: [] for ep in episode_nos}
-    for scene in scenes:
-        ep = scene.episode_no if scene.episode_no is not None else episode_nos[0]
-        scenes_by_episode.setdefault(ep, []).append(scene)
-
-    reward_by_episode: Dict[int, List[RewardEvent]] = {ep: [] for ep in scenes_by_episode}
-    for event in reward_events:
-        ep = event.episode_no if event.episode_no is not None else episode_nos[0]
-        reward_by_episode.setdefault(ep, []).append(event)
-
-    points: List[PacingPoint] = []
-    for ep in sorted(scenes_by_episode):
-        ep_scenes = scenes_by_episode[ep]
-        ep_events = reward_by_episode.get(ep, [])
-        hooks = _count_hooks(ep_scenes)
-        twists = sum(1 for ev in ep_events if ev.event_type in _TWIST_EVENT_TYPES)
-        reward_count = len(ep_events)
-        points.append(
-            PacingPoint(
-                episode_no=ep,
-                scene_count=len(ep_scenes),
-                event_count=hooks + twists + reward_count,
-                hooks=hooks,
-                twists=twists,
-                reward_events=reward_count,
-                sentiment=_episode_sentiment(ep_scenes),
-            )
-        )
-    return [p.to_dict() for p in points]
-
-
-def _count_hooks(scenes: list) -> int:
-    count = 0
-    for scene in scenes[:3]:
-        text = scene.text or ""
-        if any(term in text for term in _HOOK_TERMS):
-            count += 1
-    return count
-
-
-def _episode_sentiment(scenes: list) -> float:
-    text = "\n".join((s.text or "") for s in scenes)
-    if not text:
-        return 0.0
-    pos = sum(text.count(term) for term in _POSITIVE_TERMS)
-    neg = sum(text.count(term) for term in _NEGATIVE_TERMS)
-    total = pos + neg
-    if total == 0:
-        return 0.0
-    score = (pos - neg) / total
-    return round(max(-1.0, min(1.0, score)), 3)
+) -> list[dict[str, Any]]:
+    """Backward-compatible wrapper, now backed by plot_unit intensity series."""
+    _ = reward_events  # retained signature only; v3 no longer depends on reward events.
+    ctx = build_signal_context(script_id=script_id, engine=engine)
+    return aggregate_pacing_curve_v3(ctx)

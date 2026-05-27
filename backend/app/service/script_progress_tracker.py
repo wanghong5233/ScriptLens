@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-# 6 个流水线阶段，与 service.script_report_service.generate_report 一一对应。
+# 7 个流水线阶段，与 service.script_report_service.generate_report 一一对应。
 # (id, label, description) —— description 用于前端 tooltip / 下方解说，
 # 让用户明白每一步在做什么，而不是单纯看见一堆 spinner。
 _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
@@ -41,33 +41,33 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
     ),
     (
         "extracting_rewards",
-        "扫描爽点事件",
-        "LLM 通读全剧，抽取反转 / 打脸 / 逆袭 / 觉醒等关键事件，供「爽点密度」「节奏控制」共用",
+        "确保 v1 标签就绪",
+        "检查并补齐 plot_unit_tags / character_entities / relationship / drama_tags，缺失时触发 bundle_extractor",
     ),
     (
         "extracting_narrative",
-        "提炼故事 / 人物 / 合规",
-        "并行生成 30 秒速览卡、三幕节拍、人物关系图、动机决策回扫、合规审核（五力评分依赖的基础信号）",
+        "计算派生信号",
+        "按 rubric 的 rule + llm bundles 统一计算信号集合，作为六维聚合输入",
     ),
     (
         "scoring_dimensions",
-        "阅文五力评分",
-        "基于上一步的基础信号并行评估故事力 / 人物力 / 题材力 / 情感力 / 叙事力（docs/08-evaluation-framework.md §3）",
+        "六维聚合与分档",
+        "dimension_aggregator 聚合后做 genre_weights 与 percentile tier，得到 tier/confidence/coverage",
     ),
     (
         "aggregating_decision",
         "汇总整体决策",
-        "综合五力评分 + 合规等级生成决策卡（recommend / cautious / not_recommended）和一句话理由",
+        "合规评分接入决策矩阵，输出最终 decision 与 decision_inputs",
     ),
     (
         "building_evidence",
-        "提取关键证据",
-        "为每个评分挂载来源场次的原文片段（≤90 字 quote），让分数可追溯",
+        "生成节奏曲线与改写动作",
+        "按 plot_unit 强度序列构建 pacing_curve，并基于弱信号模板生成 improvement_actions",
     ),
     (
         "persisting",
         "写入数据库",
-        "报告 + 证据片段事务落库；旧报告先 DELETE，再写新版本",
+        "事务写入 scoring_runs / script_scores / scoring_improvement_actions / reports.decision_payload",
     ),
 ]
 
@@ -101,7 +101,7 @@ class _ProgressTracker:
         self._stale_seconds = 300  # 5 分钟未更新视为过期，触发 GC
 
     def start(self, script_id: str) -> None:
-        """流水线起步时调一次：清空旧快照，写入 6 阶段 pending 列表。"""
+        """流水线起步时调一次：清空旧快照，写入阶段 pending 列表。"""
         now = time.time()
         with self._lock:
             self._gc_locked(now)

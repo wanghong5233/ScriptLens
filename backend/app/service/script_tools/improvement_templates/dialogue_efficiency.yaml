@@ -1,0 +1,22 @@
+signal_key: dialogue_efficiency
+template_version: v3.0.0
+tiers:
+  poor:
+    issue_template: "台词信息密度偏低，存在重复解释与低价值对白。"
+    target_template: "提高单位台词的信息增量，保证每轮对话推动关系或剧情。"
+    action_steps_template:
+      - "删除重复表达，将同义句合并为一句关键信息。"
+      - "把说明性旁白改为角色目的驱动的对话。"
+      - "每段对话尾句增加推进动作或冲突升级。"
+    estimated_lift_rule:
+      dialogue: 1.4
+      pacing: 0.4
+  weak:
+    issue_template: "台词效率一般，少量句子未承载有效推进。"
+    target_template: "压缩冗余对白并强化关键信息表达。"
+    action_steps_template:
+      - "删去无推进闲聊句，保留冲突与目标相关台词。"
+      - "把模糊表达替换为可执行的行动指令。"
+    estimated_lift_rule:
+      dialogue: 0.8
+      pacing: 0.2

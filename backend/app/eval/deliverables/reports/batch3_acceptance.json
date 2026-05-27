@@ -1,0 +1,242 @@
+{
+  "rubric_version": "v3.0.0",
+  "scripts_requested": [
+    "bdf4bc68-282b-45fb-ae85-e1bd9273d20c",
+    "ee554932-5598-4847-8b84-531615aac619",
+    "30ac6331-4844-41be-ae3d-9511e60d186a"
+  ],
+  "scripts_evaluated": 3,
+  "failed_scripts": {},
+  "thresholds": {
+    "decoupling": 0.6,
+    "overall_variance": 0.05,
+    "dimension_variance": 0.1,
+    "actionability": 0.7
+  },
+  "decoupling": {
+    "dimensions": [
+      "story",
+      "character",
+      "concept",
+      "emotion",
+      "pacing",
+      "dialogue"
+    ],
+    "corr_matrix": [
+      [
+        1.0,
+        -0.7644596680476148,
+        -0.7116157105542057,
+        -0.4974168079678222,
+        -0.14229960271570466,
+        0.9930043758994845
+      ],
+      [
+        -0.7644596680476149,
+        0.9999999999999999,
+        0.09107531371725947,
+        -0.1790050188064695,
+        -0.5293288347716535,
+        -0.8352330379825469
+      ],
+      [
+        -0.7116157105542056,
+        0.09107531371725948,
+        1.0,
+        0.9634563568215356,
+        0.7966819484055631,
+        -0.6236798934849513
+      ],
+      [
+        -0.4974168079678223,
+        -0.17900501880646946,
+        0.9634563568215355,
+        1.0,
+        0.929465778725905,
+        -0.3915034069108739
+      ],
+      [
+        -0.14229960271570466,
+        -0.5293288347716534,
+        0.7966819484055632,
+        0.929465778725905,
+        1.0,
+        -0.02442817191694387
+      ],
+      [
+        0.9930043758994846,
+        -0.8352330379825469,
+        -0.6236798934849513,
+        -0.3915034069108739,
+        -0.024428171916943867,
+        1.0
+      ]
+    ],
+    "max_abs_offdiag": 0.9930043758994846
+  },
+  "stability": {
+    "script_id": "bdf4bc68-282b-45fb-ae85-e1bd9273d20c",
+    "rubric_version": "v3.0.0",
+    "genre_scope": "default",
+    "seeds": [
+      42,
+      123,
+      456,
+      789,
+      1011
+    ],
+    "runs": [
+      {
+        "seed": 42,
+        "overall_score": 6.691,
+        "dimension_scores": {
+          "story": 7.125,
+          "character": 5.416,
+          "concept": 4.636,
+          "emotion": 7.345,
+          "pacing": 8.329,
+          "dialogue": 7.694
+        },
+        "dimension_tiers": {
+          "story": "good",
+          "character": "weak",
+          "concept": "weak",
+          "emotion": "good",
+          "pacing": "excellent",
+          "dialogue": "good"
+        }
+      },
+      {
+        "seed": 123,
+        "overall_score": 6.691,
+        "dimension_scores": {
+          "story": 7.125,
+          "character": 5.416,
+          "concept": 4.636,
+          "emotion": 7.345,
+          "pacing": 8.329,
+          "dialogue": 7.694
+        },
+        "dimension_tiers": {
+          "story": "good",
+          "character": "weak",
+          "concept": "weak",
+          "emotion": "good",
+          "pacing": "excellent",
+          "dialogue": "good"
+        }
+      },
+      {
+        "seed": 456,
+        "overall_score": 6.691,
+        "dimension_scores": {
+          "story": 7.125,
+          "character": 5.416,
+          "concept": 4.636,
+          "emotion": 7.345,
+          "pacing": 8.329,
+          "dialogue": 7.694
+        },
+        "dimension_tiers": {
+          "story": "good",
+          "character": "weak",
+          "concept": "weak",
+          "emotion": "good",
+          "pacing": "excellent",
+          "dialogue": "good"
+        }
+      },
+      {
+        "seed": 789,
+        "overall_score": 6.646,
+        "dimension_scores": {
+          "story": 7.125,
+          "character": 5.416,
+          "concept": 4.636,
+          "emotion": 7.345,
+          "pacing": 8.329,
+          "dialogue": 7.244
+        },
+        "dimension_tiers": {
+          "story": "good",
+          "character": "weak",
+          "concept": "weak",
+          "emotion": "good",
+          "pacing": "excellent",
+          "dialogue": "good"
+        }
+      },
+      {
+        "seed": 1011,
+        "overall_score": 6.691,
+        "dimension_scores": {
+          "story": 7.125,
+          "character": 5.416,
+          "concept": 4.636,
+          "emotion": 7.345,
+          "pacing": 8.329,
+          "dialogue": 7.694
+        },
+        "dimension_tiers": {
+          "story": "good",
+          "character": "weak",
+          "concept": "weak",
+          "emotion": "good",
+          "pacing": "excellent",
+          "dialogue": "good"
+        }
+      }
+    ],
+    "overall_variance": 0.000323999999999999,
+    "dimension_variance": {
+      "story": 0.0,
+      "character": 0.0,
+      "concept": 0.0,
+      "emotion": 0.0,
+      "pacing": 0.0,
+      "dialogue": 0.032400000000000026
+    },
+    "thresholds": {
+      "overall": 0.05,
+      "dimension": 0.1
+    },
+    "checks": {
+      "overall_variance_le_threshold": true,
+      "dimension_variance_le_threshold": true
+    },
+    "all_pass": true
+  },
+  "actionability": {
+    "score": 0.6666666666666666,
+    "sample_size": 3,
+    "per_script_scores": [
+      1.0,
+      1.0,
+      0.0
+    ]
+  },
+  "rubric_compat": {
+    "compatible": true,
+    "mode": "BACKWARD",
+    "allow_breaking": false,
+    "issues": []
+  },
+  "signal_coverage": {
+    "story": 1.0,
+    "character": 1.0,
+    "concept": 1.0,
+    "emotion": 1.0,
+    "pacing": 1.0,
+    "dialogue": 1.0
+  },
+  "insufficient_dimensions": 0,
+  "checks": {
+    "dimension_decoupling_pass": false,
+    "stability_overall_variance_pass": true,
+    "stability_dimension_variance_pass": true,
+    "actionability_pass": false,
+    "rubric_compat_pass": true,
+    "report_generation_pass": true
+  },
+  "all_pass": false
+}

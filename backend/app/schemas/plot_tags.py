@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 TagSetVersion = Literal["v0.1.0", "v1.0.0", "v2.0.0"]
 TagSource = Literal["llm", "human_correction", "derived", "manual", "system"]
 RunStatus = Literal["pending", "success", "failed"]
+TierName = Literal["excellent", "good", "weak", "poor", "insufficient"]
 
 
 # drama_tags is an open enum in upstream systems.
@@ -479,16 +480,68 @@ class PlotUnitVideoMatchModel(BaseModel):
 class ScriptScoreModel(BaseModel):
     id: str
     script_id: str
+    run_id: str | None = None
     dimension: str
-    score: float
+    primary_dimension: str | None = None
+    score: float | None = None
     percentile: float | None = None
-    tier: str | None = None
+    tier: TierName | None = None
     confidence: float | None = None
+    coverage_ratio: float | None = None
     signals: dict = Field(default_factory=dict)
+    signal_refs: list[dict] = Field(default_factory=list)
     weights: dict = Field(default_factory=dict)
     tag_set_ver: TagSetVersion
     score_ver: str
     model_ver: str
+    created_at: datetime | None = None
+
+
+class RubricVersionModel(BaseModel):
+    id: str
+    version: str
+    status: str
+    base_weight: dict = Field(default_factory=dict)
+    genre_multiplier: dict = Field(default_factory=dict)
+    tier_cuts: dict = Field(default_factory=dict)
+    signal_catalog: dict = Field(default_factory=dict)
+    prompt_version: str | None = None
+    model_version: str | None = None
+    effective_at: datetime | None = None
+    deprecated_at: datetime | None = None
+    changelog: str | None = None
+    created_at: datetime | None = None
+
+
+class ScoringRunModel(BaseModel):
+    id: str
+    script_id: str
+    rubric_version: str
+    tag_set_ver: str | None = None
+    input_hash: str
+    genre_scope: str | None = None
+    episode_count: int | None = None
+    plot_unit_count: int | None = None
+    quality_flags: dict = Field(default_factory=dict)
+    model_versions: dict = Field(default_factory=dict)
+    prompt_versions: dict = Field(default_factory=dict)
+    status: str
+    error: str | None = None
+    created_at: datetime | None = None
+
+
+class ScoringImprovementActionModel(BaseModel):
+    id: str
+    run_id: str
+    script_id: str
+    dimension: str
+    signal_key: str
+    template_id: str | None = None
+    issue: str
+    target: str
+    action_steps: list[str] = Field(default_factory=list)
+    evidence_refs: list[dict] = Field(default_factory=list)
+    estimated_lift: dict = Field(default_factory=dict)
     created_at: datetime | None = None
 
 

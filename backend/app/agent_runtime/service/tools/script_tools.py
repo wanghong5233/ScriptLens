@@ -32,7 +32,7 @@ from ..script_vfs import ScriptVFS, ScriptVFSError
 logger = logging.getLogger(__name__)
 
 
-_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing", "compliance")
+_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing", "dialogue", "compliance")
 
 
 # ============================================================
@@ -751,7 +751,7 @@ def _scene_title(s: Dict[str, Any]) -> str:
 # 5. ReadScene / ProposeFullScriptPlan / RewriteScene（改写三件套）
 # ============================================================
 
-_REWRITE_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing")
+_REWRITE_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing", "dialogue")
 
 
 def _normalize_rewrite_dimensions(raw_dimensions: Any) -> List[str]:
@@ -1350,7 +1350,7 @@ class ProposeFullScriptPlanTool(BaseTool):
         if not dims:
             return ToolResult(
                 success=False,
-                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing",
+                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing/dialogue",
                 summary="缺 dimensions",
             )
         try:
@@ -1456,7 +1456,7 @@ class RewriteSceneTool(BaseTool):
         if not dims:
             return ToolResult(
                 success=False,
-                error="target_dimensions must be a non-empty subset of story/character/concept/emotion/pacing",
+                error="target_dimensions must be a non-empty subset of story/character/concept/emotion/pacing/dialogue",
                 summary="缺 target_dimensions",
             )
 
@@ -1640,7 +1640,7 @@ class PropDimensionRewriteTool(BaseTool):
         if not dims:
             return ToolResult(
                 success=False,
-                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing",
+                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing/dialogue",
                 summary="缺 dimensions",
             )
 

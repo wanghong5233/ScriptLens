@@ -1,0 +1,22 @@
+signal_key: dialogue_action_ratio
+template_version: v3.0.0
+tiers:
+  poor:
+    issue_template: "对白与行动比例失衡（dense={dense_ratio}, sparse={sparse_ratio}），叙事推进受阻。"
+    target_template: "对白段与动作段交替推进，保持节奏均衡。"
+    action_steps_template:
+      - "压缩连续解释性对白，插入可视化动作反馈。"
+      - "在冲突段优先保留动作决策，再用短句补信息。"
+      - "场尾加行动触发句，避免纯对白收束。"
+    estimated_lift_rule:
+      pacing: 1.0
+      dialogue: 0.6
+  weak:
+    issue_template: "对白/行动节奏略失衡，局部段落推进感偏弱。"
+    target_template: "提升对白和动作的交替节奏。"
+    action_steps_template:
+      - "对长对白段做拆分，并补动作锚点。"
+      - "每轮对话至少保留一处行为反馈。"
+    estimated_lift_rule:
+      pacing: 0.6
+      dialogue: 0.3

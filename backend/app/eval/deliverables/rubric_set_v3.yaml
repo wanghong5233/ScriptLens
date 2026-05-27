@@ -1,0 +1,173 @@
+rubric_id: v3.0.0
+status: industry_proxy
+description: ScriptLens batch3 six-dimension rubric
+extends: null
+breaking: false
+score_ver: v3.0.0
+
+base_weight:
+  story: 0.20
+  character: 0.20
+  concept: 0.15
+  emotion: 0.20
+  pacing: 0.15
+  dialogue: 0.10
+
+genre_multiplier:
+  战神_复仇_逆袭:
+    story: 1.00
+    character: 1.10
+    concept: 0.90
+    emotion: 1.20
+    pacing: 1.00
+    dialogue: 0.90
+  甜宠_爱情:
+    story: 0.95
+    character: 1.05
+    concept: 1.00
+    emotion: 1.25
+    pacing: 0.90
+    dialogue: 1.15
+  default:
+    story: 1.00
+    character: 1.00
+    concept: 1.00
+    emotion: 1.00
+    pacing: 1.00
+    dialogue: 1.00
+
+dimensions:
+  - id: story
+    signals:
+      - id: logline_clear
+        weight_in_dim: 0.15
+        source: llm
+        primary: true
+      - id: causal_link_density
+        weight_in_dim: 0.20
+        source: llm
+        primary: true
+      - id: structural_completeness
+        weight_in_dim: 0.20
+        source: rule
+        primary: true
+      - id: reversal_effectiveness
+        weight_in_dim: 0.15
+        source: rule
+        primary: true
+      - id: event_sequence_coherence
+        weight_in_dim: 0.15
+        source: llm
+      - id: ending_resolution
+        weight_in_dim: 0.10
+        source: llm
+      - id: plot_unit_count_per_ep
+        weight_in_dim: 0.05
+        source: rule
+  - id: character
+    signals:
+      - { id: protagonist_identifiable, weight_in_dim: 0.10, source: rule, primary: true }
+      - { id: protagonist_agency, weight_in_dim: 0.10, source: rule, primary: true }
+      - { id: motivation_clarity, weight_in_dim: 0.15, source: llm, primary: true }
+      - { id: decision_setup_rate, weight_in_dim: 0.10, source: rule }
+      - { id: ooc_rate, weight_in_dim: 0.10, source: rule }
+      - { id: antagonist_quality, weight_in_dim: 0.10, source: rule }
+      - { id: relationship_conflict_strength, weight_in_dim: 0.10, source: rule }
+      - { id: relationship_arc_change, weight_in_dim: 0.10, source: rule }
+      - { id: ensemble_distinctiveness, weight_in_dim: 0.10, source: llm }
+      - { id: character_consistency, weight_in_dim: 0.05, source: llm }
+  - id: concept
+    signals:
+      - { id: drama_tags_confidence, weight_in_dim: 0.20, source: rule, primary: true }
+      - { id: genre_market_fit, weight_in_dim: 0.20, source: rule, primary: true }
+      - { id: core_value_clarity, weight_in_dim: 0.20, source: llm, primary: true }
+      - { id: differentiation, weight_in_dim: 0.20, source: llm }
+      - { id: early_genre_signal, weight_in_dim: 0.10, source: rule }
+      - { id: commercial_communicability, weight_in_dim: 0.10, source: llm }
+  - id: emotion
+    signals:
+      - { id: payoff_density, weight_in_dim: 0.15, source: rule, primary: true }
+      - { id: emotional_driver_distribution, weight_in_dim: 0.10, source: rule }
+      - { id: emotional_variety, weight_in_dim: 0.10, source: rule }
+      - { id: emotional_contrast, weight_in_dim: 0.10, source: rule }
+      - { id: dry_streak_max, weight_in_dim: 0.15, source: rule, primary: true }
+      - { id: episode_end_hook_rate, weight_in_dim: 0.10, source: rule }
+      - { id: paid_break_potential, weight_in_dim: 0.10, source: rule }
+      - { id: empathy_signal, weight_in_dim: 0.20, source: llm, primary: true }
+  - id: pacing
+    signals:
+      - { id: opening_speed, weight_in_dim: 0.12, source: rule, primary: true }
+      - { id: plot_unit_density, weight_in_dim: 0.10, source: rule, primary: true }
+      - { id: narrative_intensity_distribution, weight_in_dim: 0.12, source: rule, primary: true }
+      - { id: intensity_cv, weight_in_dim: 0.10, source: rule }
+      - { id: middle_sag, weight_in_dim: 0.10, source: rule, primary: true }
+      - { id: downtime_penalty, weight_in_dim: 0.08, source: rule }
+      - { id: dialogue_action_ratio, weight_in_dim: 0.08, source: rule }
+      - { id: beats_per_episode, weight_in_dim: 0.10, source: rule }
+      - { id: effective_narrative_rate, weight_in_dim: 0.10, source: rule }
+      - { id: scene_length_distribution, weight_in_dim: 0.10, source: rule }
+  - id: dialogue
+    signals:
+      - { id: dialogue_density, weight_in_dim: 0.15, source: rule, primary: true }
+      - { id: dialogue_efficiency, weight_in_dim: 0.15, source: llm, primary: true }
+      - { id: character_voice_distinction, weight_in_dim: 0.15, source: llm, primary: true }
+      - { id: qa_coherence, weight_in_dim: 0.10, source: llm }
+      - { id: topic_focus, weight_in_dim: 0.10, source: rule }
+      - { id: qa_relevance, weight_in_dim: 0.10, source: llm }
+      - { id: subtext_or_conflict, weight_in_dim: 0.10, source: llm }
+      - { id: voiceover_fit, weight_in_dim: 0.08, source: rule }
+      - { id: brevity_ratio, weight_in_dim: 0.07, source: rule }
+
+tier_cuts:
+  default:
+    story: { p25: 4.0, p50: 6.0, p75: 8.0 }
+    character: { p25: 4.0, p50: 6.0, p75: 8.0 }
+    concept: { p25: 4.0, p50: 6.0, p75: 8.0 }
+    emotion: { p25: 4.0, p50: 6.0, p75: 8.0 }
+    pacing: { p25: 4.0, p50: 6.0, p75: 8.0 }
+    dialogue: { p25: 4.0, p50: 6.0, p75: 8.0 }
+  战神_复仇_逆袭:
+    story: { p25: 4.2, p50: 6.2, p75: 8.1 }
+    character: { p25: 4.1, p50: 6.1, p75: 8.0 }
+    concept: { p25: 3.8, p50: 5.8, p75: 7.8 }
+    emotion: { p25: 4.3, p50: 6.3, p75: 8.3 }
+    pacing: { p25: 4.0, p50: 6.0, p75: 8.0 }
+    dialogue: { p25: 3.6, p50: 5.6, p75: 7.6 }
+
+llm_bundles:
+  - id: v3_story_llm
+    scope: script
+    prompt: prompts/v3/story_llm.jinja
+    signals:
+      - logline_clear
+      - causal_link_density
+      - event_sequence_coherence
+      - ending_resolution
+  - id: v3_character_llm
+    scope: script
+    prompt: prompts/v3/character_llm.jinja
+    signals:
+      - motivation_clarity
+      - ensemble_distinctiveness
+      - character_consistency
+  - id: v3_concept_llm
+    scope: script
+    prompt: prompts/v3/concept_llm.jinja
+    signals:
+      - core_value_clarity
+      - differentiation
+      - commercial_communicability
+  - id: v3_emotion_llm
+    scope: script
+    prompt: prompts/v3/emotion_llm.jinja
+    signals:
+      - empathy_signal
+  - id: v3_dialogue_llm
+    scope: episode
+    prompt: prompts/v3/dialogue_llm.jinja
+    signals:
+      - dialogue_efficiency
+      - qa_coherence
+      - qa_relevance
+      - subtext_or_conflict
+      - character_voice_distinction

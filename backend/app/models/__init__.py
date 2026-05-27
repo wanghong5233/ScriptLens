@@ -18,6 +18,9 @@ from models.plot_unit import (
 )
 from models.tag_registry import TagExtractionRun, LlmCache
 from models.script_score import ScriptScore
+from models.rubric_version import RubricVersion
+from models.scoring_run import ScoringRun
+from models.improvement_action import ScoringImprovementAction
 
 __all__ = [
     "Base",
@@ -39,4 +42,7 @@ __all__ = [
     "TagExtractionRun",
     "LlmCache",
     "ScriptScore",
+    "RubricVersion",
+    "ScoringRun",
+    "ScoringImprovementAction",
 ]

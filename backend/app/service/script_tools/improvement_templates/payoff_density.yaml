@@ -1,0 +1,22 @@
+signal_key: payoff_density
+template_version: v3.0.0
+tiers:
+  poor:
+    issue_template: "爽点/情绪兑现密度不足，观众反馈回报感偏弱。"
+    target_template: "每个关键冲突后尽快给出可感知的情绪或结果回报。"
+    action_steps_template:
+      - "把该场的结果句改为明确“赢/失/反击”反馈。"
+      - "补一个可视化情绪节点（关系推进或反派受挫）。"
+      - "缩短铺垫段，避免回报延迟到后续多场。"
+    estimated_lift_rule:
+      emotion: 1.3
+      pacing: 0.3
+  weak:
+    issue_template: "情绪回报存在但不够集中，爽点触发时机偏散。"
+    target_template: "强化场内情绪峰值并与主线目标绑定。"
+    action_steps_template:
+      - "把情绪高点前移到场中段，减少重复解释。"
+      - "在场尾增加一句兑现性台词或动作。"
+    estimated_lift_rule:
+      emotion: 0.7
+      pacing: 0.2
