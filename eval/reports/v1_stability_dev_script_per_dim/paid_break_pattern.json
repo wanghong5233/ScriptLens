@@ -1,0 +1,13 @@
+{
+  "dim": "paid_break_pattern",
+  "intra_alpha": 1.0,
+  "inter_alpha": 1.0,
+  "kappa_mean": 1.0,
+  "par": 1.0,
+  "cosine": 0.9999999403953552,
+  "macro_f1": null,
+  "verdict": "online",
+  "unstable_values": [],
+  "genre_sensitive": [],
+  "confusion": null
+}

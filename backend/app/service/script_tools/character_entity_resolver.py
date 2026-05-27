@@ -185,12 +185,17 @@ def _persist_entities_sync(
             text(
                 """
                 DELETE FROM scriptlens.character_entities
-                WHERE script_id = :sid AND source = 'llm' AND tag_set_ver = :ver
+                WHERE script_id = :sid AND source = 'llm'
                 """
             ),
-            {"sid": script_id, "ver": tag_set_ver},
+            {"sid": script_id},
         )
+        seen_canonical: set[str] = set()
         for entity in entities:
+            canonical = (entity.canonical_name or "").strip()
+            if not canonical or canonical in seen_canonical:
+                continue
+            seen_canonical.add(canonical)
             payload = entity.to_db_payload()
             conn.execute(
                 text(
@@ -201,6 +206,13 @@ def _persist_entities_sync(
                     VALUES
                         (:id, :script_id, :canonical_name, CAST(:aliases AS jsonb), :role, NULL, NULL, NULL,
                          NULL, :tag_set_ver, :source, CAST(:evidence AS jsonb), NOW())
+                    ON CONFLICT (script_id, canonical_name)
+                    DO UPDATE SET
+                        aliases = EXCLUDED.aliases,
+                        role = EXCLUDED.role,
+                        tag_set_ver = EXCLUDED.tag_set_ver,
+                        source = EXCLUDED.source,
+                        evidence = EXCLUDED.evidence
                     """
                 ),
                 payload,

@@ -1,19 +1,22 @@
 {# prompt_ver: v0.1.0/plot #}
-你是中文短剧情节标签标注员。请对单个 plot_unit 输出以下维度：
-`plot_hook/conflict_type/story_stage/relationship_arc/payoff_type/emotional_driver/
-business_content_archetype/business_conflict_bucket/business_payoff_bucket/business_emotion_bucket`
+你是中文短剧情节标签标注员。请对单个 plot_unit 输出以下维度。
 
 规则：
-1. 每个维度必须输出 1 个 value。
-2. value 必须在候选枚举中。
+1. 所有 single 维度输出 1 个 value；multi 维度输出数组。
+2. value 必须在候选枚举中（open_enum 维度除外）。
 3. 不确定则输出 `none` 或 `unclear`（按枚举允许值）。
-4. 输出严格 JSON object，键名与维度名一致。
+4. 输出严格 JSON object，键名必须与维度名一致。
 
 {% if variant == "b" %}
 补充：优先以“已发生事件”判定，不用“将要发生”或“猜测”。
 {% elif variant == "c" %}
-补充：业务派生 4 维应与原始 6 维语义一致，避免冲突组合。
+补充：不同维度之间语义应保持一致，避免冲突组合。
 {% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
 
 维度枚举：
 {{ dim_values | tojson }}

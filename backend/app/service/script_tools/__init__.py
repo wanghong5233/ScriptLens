@@ -10,6 +10,9 @@
 - `v0_drama_tag_extractor`     v0 剧级标签抽取器
 - `v0_plot_tag_extractor`      v0 情节 plot 10 维抽取器
 - `v0_asr_tag_extractor`       v0 台词 6 维抽取器
+- `bundle_extractor`           schema-driven bundle 抽取器（v0/v1/v2 共用）
+- `v1_extractor_common`        v1 character/relationship/episode 上下文加载
+- `relationship_candidate_generator` 关系候选生成（共现阈值 + top-K）
 - `v0_business_rule_baseline`  v0 business_* 规则对照基线
 - `v0_tag_pipeline`            v0 端到端 pipeline
 - `risk_terms`         广电六类红线关键词词表

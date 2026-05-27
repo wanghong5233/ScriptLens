@@ -8,65 +8,6 @@ from typing import Any
 
 _REGISTRY_ROOT = Path(__file__).resolve().parent
 _TAG_SET_DIR = _REGISTRY_ROOT / "tag_sets"
-_PROMPT_DIR = _REGISTRY_ROOT / "prompts"
-
-
-_ASR_DIMS = {
-    "dialogue_density",
-    "speech_style",
-    "cta_type",
-    "voiceover_type",
-    "emotional_keywords",
-    "keyword_theme",
-}
-_PLOT_DIMS = {
-    "plot_hook",
-    "conflict_type",
-    "story_stage",
-    "relationship_arc",
-    "payoff_type",
-    "emotional_driver",
-    "business_content_archetype",
-    "business_conflict_bucket",
-    "business_payoff_bucket",
-    "business_emotion_bucket",
-}
-_V1_SCRIPT_STRUCTURE_DIMS = {
-    "gender_axis",
-    "world_setting",
-    "protagonist_archetype",
-    "antagonist_archetype",
-    "pacing_mode",
-    "paid_break_pattern",
-    "story_arc_template",
-}
-_V1_CHARACTER_DIMS = {
-    "character_archetype",
-    "character_role_in_arc",
-    "character_arc_type",
-    "character_agency_level",
-}
-_V1_RELATION_DIMS = {
-    "relationship_type",
-    "relationship_polarity",
-    "relationship_dynamic_arc",
-    "relationship_triangle",
-}
-_V1_EPISODE_DIMS = {
-    "episode_opening_type",
-    "episode_end_hook",
-    "intra_episode_peak_count",
-    "paid_break_position",
-}
-_V2_STORYBOARD_DIMS = {
-    "scene_locale_type",
-    "scene_time_of_day",
-    "scene_in_out",
-    "scene_emotion_keynote",
-    "shot_suggestion",
-    "prop_focus",
-    "character_state_change",
-}
 
 
 @dataclass(frozen=True)
@@ -75,7 +16,18 @@ class DimConfig:
     dim: str
     cardinality: str = "single"
     open_enum: bool = False
+    stability_state: str = "experimental"
     values: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class BundleConfig:
+    id: str
+    scope: str
+    dims: tuple[str, ...]
+    prompt: str
+    output_mode: str = "single_call"
+    rule_overrides: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -83,7 +35,10 @@ class TagSetConfig:
     version: str
     description: str
     prompt_ver: str
+    breaking: bool
     scope_to_dims: dict[str, tuple[DimConfig, ...]]
+    bundles: tuple[BundleConfig, ...]
+    dim_to_bundle_id: dict[str, str]
 
     @property
     def all_dims(self) -> list[str]:
@@ -98,6 +53,23 @@ class TagSetConfig:
                 if item.dim == dim:
                     return item
         raise KeyError(f"dim {dim!r} not found in tag_set={self.version}")
+
+    def get_bundle(self, bundle_id: str) -> BundleConfig:
+        for bundle in self.bundles:
+            if bundle.id == bundle_id:
+                return bundle
+        raise KeyError(f"bundle {bundle_id!r} not found in tag_set={self.version}")
+
+    def list_bundles(self, scope: str | None = None) -> list[BundleConfig]:
+        if scope is None:
+            return list(self.bundles)
+        return [b for b in self.bundles if b.scope == scope]
+
+    def find_bundle_for_dim(self, dim: str) -> BundleConfig:
+        bundle_id = self.dim_to_bundle_id.get(dim)
+        if not bundle_id:
+            raise KeyError(f"bundle mapping not found for dim={dim!r} in tag_set={self.version}")
+        return self.get_bundle(bundle_id)
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -134,6 +106,23 @@ def _merge_scope(base_scope: dict[str, list[dict[str, Any]]], cur_scope: dict[st
     return merged
 
 
+def _merge_bundles(base: list[dict[str, Any]], cur: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = [dict(x) for x in base]
+    by_id = {str(item.get("id")): idx for idx, item in enumerate(merged) if item.get("id")}
+    for item in cur:
+        if not isinstance(item, dict):
+            raise ValueError(f"invalid bundle config: {item!r}")
+        bid = str(item.get("id") or "").strip()
+        if not bid:
+            raise ValueError(f"bundle.id is required: {item!r}")
+        if bid in by_id:
+            merged[by_id[bid]] = dict(item)
+        else:
+            by_id[bid] = len(merged)
+            merged.append(dict(item))
+    return merged
+
+
 def _load_raw_tag_set(version: str, seen: set[str] | None = None) -> dict[str, Any]:
     seen = seen or set()
     if version in seen:
@@ -146,22 +135,29 @@ def _load_raw_tag_set(version: str, seen: set[str] | None = None) -> dict[str, A
         raise ValueError(f"tag set version mismatch: file={cur_ver!r} expected={version!r}")
 
     base_scope: dict[str, list[dict[str, Any]]] = {}
+    base_bundles: list[dict[str, Any]] = []
     base_desc = ""
     base_prompt_ver = ""
+    base_breaking = False
 
     extends = cur.get("extends")
     if extends:
         base = _load_raw_tag_set(str(extends), seen)
         base_scope = base["scope"]
+        base_bundles = base.get("bundles", [])
         base_desc = base.get("description", "")
         base_prompt_ver = base.get("prompt_ver", "")
+        base_breaking = bool(base.get("breaking", False))
 
     merged_scope = _merge_scope(base_scope, cur.get("scope") or {})
+    merged_bundles = _merge_bundles(base_bundles, list(cur.get("bundles") or []))
     return {
         "version": version,
         "description": cur.get("description") or base_desc or "",
         "prompt_ver": cur.get("prompt_ver") or base_prompt_ver or version,
+        "breaking": bool(cur.get("breaking", base_breaking)),
         "scope": merged_scope,
+        "bundles": merged_bundles,
     }
 
 
@@ -179,45 +175,100 @@ def load_tag_set(tag_set_ver: str) -> TagSetConfig:
                     dim=str(dim_cfg["dim"]),
                     cardinality=str(dim_cfg.get("cardinality") or "single"),
                     open_enum=bool(dim_cfg.get("open_enum", False)),
+                    stability_state=str(dim_cfg.get("stability_state") or "experimental"),
                     values=values,
                 )
             )
         scope_to_dims[scope] = tuple(items)
+
+    bundles: list[BundleConfig] = []
+    dim_to_bundle_id: dict[str, str] = {}
+    for bundle_cfg in raw.get("bundles") or []:
+        scope = str(bundle_cfg.get("scope") or "").strip()
+        if scope not in scope_to_dims:
+            raise ValueError(f"bundle scope={scope!r} not found in tag_set={tag_set_ver}")
+        bundle_id = str(bundle_cfg.get("id") or "").strip()
+        if not bundle_id:
+            raise ValueError(f"bundle id is required in tag_set={tag_set_ver}")
+        dims = tuple(str(x).strip() for x in (bundle_cfg.get("dims") or []) if str(x).strip())
+        if not dims:
+            raise ValueError(f"bundle {bundle_id!r} has empty dims in tag_set={tag_set_ver}")
+        known_dims = {d.dim for d in scope_to_dims[scope]}
+        unknown = [d for d in dims if d not in known_dims]
+        if unknown:
+            raise ValueError(
+                f"bundle {bundle_id!r} has unknown dims for scope={scope!r}: {unknown}"
+            )
+        for dim in dims:
+            if dim in dim_to_bundle_id and dim_to_bundle_id[dim] != bundle_id:
+                raise ValueError(
+                    f"dim {dim!r} is mapped to multiple bundles: "
+                    f"{dim_to_bundle_id[dim]!r} and {bundle_id!r}"
+                )
+            dim_to_bundle_id[dim] = bundle_id
+        rule_overrides = bundle_cfg.get("rule_overrides")
+        parsed_rule_overrides: dict[str, str] | None = None
+        if isinstance(rule_overrides, dict):
+            parsed_rule_overrides = {
+                str(k): str(v) for k, v in rule_overrides.items() if str(k).strip() and str(v).strip()
+            }
+        bundles.append(
+            BundleConfig(
+                id=bundle_id,
+                scope=scope,
+                dims=dims,
+                prompt=str(bundle_cfg.get("prompt") or ""),
+                output_mode=str(bundle_cfg.get("output_mode") or "single_call"),
+                rule_overrides=parsed_rule_overrides,
+            )
+        )
+    for dim in [d for items in scope_to_dims.values() for d in items]:
+        if dim.dim not in dim_to_bundle_id:
+            raise ValueError(f"dim {dim.dim!r} does not belong to any bundle in tag_set={tag_set_ver}")
+
     return TagSetConfig(
         version=str(raw["version"]),
         description=str(raw.get("description") or ""),
         prompt_ver=str(raw.get("prompt_ver") or raw["version"]),
+        breaking=bool(raw.get("breaking", False)),
         scope_to_dims=scope_to_dims,
+        bundles=tuple(bundles),
+        dim_to_bundle_id=dim_to_bundle_id,
     )
 
 
-def _resolve_prompt_file(dim: str) -> Path:
-    if dim == "drama_tags":
-        return _PROMPT_DIR / "v0" / "drama_tags.jinja"
-    if dim in _ASR_DIMS:
-        return _PROMPT_DIR / "v0" / "asr.jinja"
-    if dim in _PLOT_DIMS:
-        return _PROMPT_DIR / "v0" / "plot.jinja"
-    if dim in _V1_SCRIPT_STRUCTURE_DIMS:
-        return _PROMPT_DIR / "v1" / "script_structure.jinja"
-    if dim in _V1_CHARACTER_DIMS:
-        return _PROMPT_DIR / "v1" / "character_attrs.jinja"
-    if dim in _V1_RELATION_DIMS:
-        return _PROMPT_DIR / "v1" / "relationship.jinja"
-    if dim in _V1_EPISODE_DIMS:
-        return _PROMPT_DIR / "v1" / "episode_structure.jinja"
-    if dim in _V2_STORYBOARD_DIMS:
-        return _PROMPT_DIR / "v2" / "storyboard_hints.jinja"
-    raise KeyError(f"prompt file mapping not found for dim={dim}")
+def _resolve_prompt_path(path_like: str) -> Path:
+    path = Path(path_like)
+    if not path.is_absolute():
+        path = _REGISTRY_ROOT / path
+    return path
 
 
 def load_prompt(tag_set_ver: str, dim: str) -> str:
-    # Ensure dim belongs to this tag set first.
     cfg = load_tag_set(tag_set_ver)
     cfg.get_dim(dim)
-    path = _resolve_prompt_file(dim)
+    bundle = cfg.find_bundle_for_dim(dim)
+    path = _resolve_prompt_path(bundle.prompt)
     with path.open("r", encoding="utf-8") as f:
         return f.read()
+
+
+def load_prompt_by_bundle(tag_set_ver: str, bundle_id: str) -> str:
+    cfg = load_tag_set(tag_set_ver)
+    bundle = cfg.get_bundle(bundle_id)
+    path = _resolve_prompt_path(bundle.prompt)
+    with path.open("r", encoding="utf-8") as f:
+        return f.read()
+
+
+def load_bundle(tag_set_ver: str, bundle_id: str) -> BundleConfig:
+    cfg = load_tag_set(tag_set_ver)
+    return cfg.get_bundle(bundle_id)
+
+
+def list_bundles(tag_set_ver: str, scope: str | None = None) -> list[BundleConfig]:
+    cfg = load_tag_set(tag_set_ver)
+    return cfg.list_bundles(scope=scope)
 
 
 def get_prompt_ver(tag_set_ver: str, dim: str, variant: str = "a") -> str:

@@ -1,0 +1,24 @@
+tag_set_ver: v1.0.0
+stability_classification:
+  stable_dims:
+  - antagonist_archetype
+  - character_agency_level
+  - character_arc_type
+  - character_archetype
+  - character_role_in_arc
+  - episode_end_hook
+  - episode_opening_type
+  - gender_axis
+  - intra_episode_peak_count
+  - pacing_mode
+  - paid_break_pattern
+  - paid_break_position
+  - protagonist_archetype
+  - relationship_dynamic_arc
+  - relationship_polarity
+  - relationship_triangle
+  - relationship_type
+  - story_arc_template
+  - world_setting
+  fix_dims: []
+  offline_dims: []

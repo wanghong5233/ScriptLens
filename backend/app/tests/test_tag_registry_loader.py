@@ -1,4 +1,11 @@
-from service.tag_registry.loader import get_prompt_ver, load_prompt, load_tag_set
+from service.tag_registry.loader import (
+    get_prompt_ver,
+    list_bundles,
+    load_bundle,
+    load_prompt,
+    load_prompt_by_bundle,
+    load_tag_set,
+)
 from service.tag_registry.validator import validate, validate_tagset
 
 
@@ -8,13 +15,25 @@ def test_load_tag_set_counts() -> None:
     v2 = load_tag_set("v2.0.0")
     assert len(v0.all_dims) == 17
     assert len(v1.all_dims) == 36
-    assert len(v2.all_dims) == 42
+    assert len(v2.all_dims) == 43
+    assert len(v0.bundles) == 3
+    assert len(v1.bundles) >= 4
 
 
 def test_load_prompt_for_dim() -> None:
     content = load_prompt("v0.1.0", "plot_hook")
     assert "plot_unit" in content
     assert "JSON" in content
+
+
+def test_bundle_apis() -> None:
+    bundle = load_bundle("v0.1.0", "v0_plot")
+    assert bundle.scope == "plot_unit"
+    assert "plot_hook" in bundle.dims
+    bundles = list_bundles("v1.0.0", scope="relationship")
+    assert bundles and bundles[0].id == "v1_relationship"
+    prompt = load_prompt_by_bundle("v1.0.0", "v1_relationship")
+    assert "关系" in prompt
 
 
 def test_prompt_ver_shape() -> None:

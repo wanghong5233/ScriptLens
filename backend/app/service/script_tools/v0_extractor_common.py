@@ -334,7 +334,7 @@ def persist_script_tags(
 def persist_plot_unit_tags(
     *,
     plot_unit_id: str,
-    values_by_dim: dict[str, str],
+    values_by_dim: dict[str, str | list[str]],
     tag_set_ver: str,
     prompt_ver: str,
     model_ver: str,
@@ -357,29 +357,108 @@ def persist_plot_unit_tags(
                     ),
                     {"pid": plot_unit_id, "dim": dim, "source": source, "ver": tag_set_ver},
                 )
-        for dim, value in values_by_dim.items():
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO scriptlens.plot_unit_tags
-                        (id, plot_unit_id, dim, value, score, confidence, source, tag_set_ver,
-                         prompt_ver, model_ver, run_id, evidence, created_at)
-                    VALUES
-                        (:id, :plot_unit_id, :dim, :value, NULL, :confidence, :source, :tag_set_ver,
-                         :prompt_ver, :model_ver, NULL, CAST(:evidence AS jsonb), NOW())
-                    """
-                ),
-                {
-                    "id": str(uuid.uuid4()),
-                    "plot_unit_id": plot_unit_id,
-                    "dim": dim,
-                    "value": value,
-                    "confidence": confidence,
-                    "source": source,
-                    "tag_set_ver": tag_set_ver,
-                    "prompt_ver": prompt_ver,
-                    "model_ver": model_ver,
-                    "evidence": json.dumps(evidence_by_dim.get(dim) or {}, ensure_ascii=False),
-                },
-            )
+        for dim, raw_value in values_by_dim.items():
+            values: list[str] = []
+            if isinstance(raw_value, list):
+                values = [str(v).strip() for v in raw_value if str(v).strip()]
+            else:
+                v = str(raw_value).strip()
+                if v:
+                    values = [v]
+            for value in values:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO scriptlens.plot_unit_tags
+                            (id, plot_unit_id, dim, value, score, confidence, source, tag_set_ver,
+                             prompt_ver, model_ver, run_id, evidence, created_at)
+                        VALUES
+                            (:id, :plot_unit_id, :dim, :value, NULL, :confidence, :source, :tag_set_ver,
+                             :prompt_ver, :model_ver, NULL, CAST(:evidence AS jsonb), NOW())
+                        """
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "plot_unit_id": plot_unit_id,
+                        "dim": dim,
+                        "value": value,
+                        "confidence": confidence,
+                        "source": source,
+                        "tag_set_ver": tag_set_ver,
+                        "prompt_ver": prompt_ver,
+                        "model_ver": model_ver,
+                        "evidence": json.dumps(evidence_by_dim.get(dim) or {}, ensure_ascii=False),
+                    },
+                )
+
+
+def persist_episode_tags(
+    *,
+    script_id: str,
+    episode_no: int,
+    values_by_dim: dict[str, str | list[str]],
+    tag_set_ver: str,
+    prompt_ver: str,
+    model_ver: str,
+    source: str = "llm",
+    confidence: float | None = None,
+    evidence_by_dim: dict[str, dict] | None = None,
+    clear_existing: bool = False,
+    engine: Engine = default_engine,
+) -> None:
+    evidence_by_dim = evidence_by_dim or {}
+    with engine.begin() as conn:
+        if clear_existing:
+            for dim in values_by_dim.keys():
+                conn.execute(
+                    text(
+                        """
+                        DELETE FROM scriptlens.episode_tags
+                        WHERE script_id = :sid AND episode_no = :ep
+                          AND dim = :dim AND source = :source AND tag_set_ver = :ver
+                        """
+                    ),
+                    {
+                        "sid": script_id,
+                        "ep": episode_no,
+                        "dim": dim,
+                        "source": source,
+                        "ver": tag_set_ver,
+                    },
+                )
+
+        for dim, raw_value in values_by_dim.items():
+            values: list[str] = []
+            if isinstance(raw_value, list):
+                values = [str(v).strip() for v in raw_value if str(v).strip()]
+            else:
+                v = str(raw_value).strip()
+                if v:
+                    values = [v]
+            for value in values:
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO scriptlens.episode_tags
+                            (id, script_id, episode_no, dim, value, score, confidence, source, tag_set_ver,
+                             prompt_ver, model_ver, run_id, evidence, created_at)
+                        VALUES
+                            (:id, :script_id, :episode_no, :dim, :value, NULL, :confidence, :source, :tag_set_ver,
+                             :prompt_ver, :model_ver, NULL, CAST(:evidence AS jsonb), NOW())
+                        """
+                    ),
+                    {
+                        "id": str(uuid.uuid4()),
+                        "script_id": script_id,
+                        "episode_no": episode_no,
+                        "dim": dim,
+                        "value": value,
+                        "confidence": confidence,
+                        "source": source,
+                        "tag_set_ver": tag_set_ver,
+                        "prompt_ver": prompt_ver,
+                        "model_ver": model_ver,
+                        "evidence": json.dumps(evidence_by_dim.get(dim) or {}, ensure_ascii=False),
+                    },
+                )
 

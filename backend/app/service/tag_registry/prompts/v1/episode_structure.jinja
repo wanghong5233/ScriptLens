@@ -1,17 +1,21 @@
 {# prompt_ver: v1.0.0/episode_structure #}
-你是短剧集级结构标注员。请对目标集输出：
-`episode_opening_type/episode_end_hook/intra_episode_peak_count/paid_break_position`
+你是短剧集级结构标注员。请对目标集输出本次维度结果。
 
 规则：
-1. 每维输出 1 个值。
-2. 必须在枚举中。
-3. 输出严格 JSON object。
+1. 所有 single 维度输出 1 个 value；multi 维度输出数组。
+2. 必须在候选枚举中（open_enum 维度除外）。
+3. 输出严格 JSON object，键名必须与维度名一致。
 
 {% if variant == "b" %}
 补充：集首看前三秒/前几句是否存在明确钩子。
 {% elif variant == "c" %}
 补充：峰值计数以“明显情绪或冲突峰”计，不按普通信息推进计数。
 {% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
 
 维度枚举：
 {{ dim_values | tojson }}

@@ -1,11 +1,47 @@
 version: v0.1.0
 description: "Shared-kernel baseline from docs/素材标签体系.md §1 §3 §4 §5"
 prompt_ver: "v0.1.0"
+bundles:
+  - id: v0_drama
+    scope: script
+    dims: [drama_tags]
+    prompt: prompts/v0/drama_tags.jinja
+    output_mode: single_call
+  - id: v0_plot
+    scope: plot_unit
+    dims:
+      - plot_hook
+      - conflict_type
+      - story_stage
+      - relationship_arc
+      - payoff_type
+      - emotional_driver
+      - business_content_archetype
+      - business_conflict_bucket
+      - business_payoff_bucket
+      - business_emotion_bucket
+    prompt: prompts/v0/plot.jinja
+    output_mode: single_call
+  - id: v0_asr
+    scope: plot_unit
+    dims:
+      - dialogue_density
+      - speech_style
+      - cta_type
+      - voiceover_type
+      - emotional_keywords
+      - keyword_theme
+    prompt: prompts/v0/asr.jinja
+    output_mode: single_call
+    rule_overrides:
+      dialogue_density: rule
+      voiceover_type: rule
 scope:
   script:
     - dim: drama_tags
       cardinality: multi
       open_enum: true
+      stability_state: stable
       values:
         - 乡村
         - 亲情
@@ -61,25 +97,32 @@ scope:
   plot_unit:
     - dim: dialogue_density
       cardinality: single
+      stability_state: stable
       values: [dense, moderate, sparse, none]
     - dim: speech_style
       cardinality: single
+      stability_state: stable
       values: [emotional, dramatic, narrative, comedic, none]
     - dim: cta_type
       cardinality: single
+      stability_state: stable
       values: [curiosity, urgency, subscribe, none]
     - dim: voiceover_type
       cardinality: single
+      stability_state: stable
       values: [character, narrator, mixed, none]
     - dim: emotional_keywords
       cardinality: single
+      stability_state: stable
       values: [high, moderate, low, none]
     - dim: keyword_theme
       cardinality: single
+      stability_state: stable
       values: [romance, power, family, comedy, none]
 
     - dim: plot_hook
       cardinality: single
+      stability_state: stable
       values:
         - identity_reveal
         - reversal
@@ -94,6 +137,7 @@ scope:
         - none
     - dim: conflict_type
       cardinality: single
+      stability_state: stable
       values:
         - status_gap
         - family_conflict
@@ -106,9 +150,11 @@ scope:
         - none
     - dim: story_stage
       cardinality: single
+      stability_state: stable
       values: [setup, trigger, escalation, climax, payoff, teaser, none]
     - dim: relationship_arc
       cardinality: single
+      stability_state: stable
       values:
         - enemies_to_lovers
         - power_flip
@@ -120,6 +166,7 @@ scope:
         - none
     - dim: payoff_type
       cardinality: single
+      stability_state: stable
       values:
         - face_slapping
         - counterattack
@@ -131,6 +178,7 @@ scope:
         - none
     - dim: emotional_driver
       cardinality: single
+      stability_state: stable
       values:
         - humiliation
         - jealousy
@@ -145,6 +193,7 @@ scope:
 
     - dim: business_content_archetype
       cardinality: single
+      stability_state: stable
       values:
         - power_payoff
         - relationship_payoff
@@ -154,9 +203,11 @@ scope:
         - unclear
     - dim: business_conflict_bucket
       cardinality: single
+      stability_state: stable
       values: [relationship_power, survival, workplace, none]
     - dim: business_payoff_bucket
       cardinality: single
+      stability_state: stable
       values:
         - face_slap_counter
         - power_reveal
@@ -168,6 +219,7 @@ scope:
         - none
     - dim: business_emotion_bucket
       cardinality: single
+      stability_state: stable
       values:
         - anger_humiliation
         - curiosity_suspense

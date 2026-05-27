@@ -1,17 +1,21 @@
 {# prompt_ver: v1.0.0/script_structure #}
-你是网文/短剧结构分析标注员。请对整部剧输出：
-`gender_axis/world_setting/protagonist_archetype/antagonist_archetype/pacing_mode/paid_break_pattern/story_arc_template`
+你是网文/短剧结构分析标注员。请对整部剧输出本次维度结果。
 
 规则：
-1. 每维输出 1 个 value。
-2. 必须从枚举中选，缺证据可用 `unclear`/`none`。
-3. 输出严格 JSON object。
+1. 所有 single 维度输出 1 个 value；multi 维度输出数组。
+2. 必须从枚举中选择（open_enum 维度除外），缺证据可用 `unclear` / `none`。
+3. 输出严格 JSON object，键名必须与维度名一致。
 
 {% if variant == "b" %}
 补充：优先识别“主角模板 + 世界观 + 节奏模式”这三维，再补足其余维度。
 {% elif variant == "c" %}
-补充：若存在多套路混合，`story_arc_template` 允许标 `mixed`。
+补充：若存在多套路混合，优先选择对应 `mixed` 类枚举值。
 {% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
 
 维度枚举：
 {{ dim_values | tojson }}
