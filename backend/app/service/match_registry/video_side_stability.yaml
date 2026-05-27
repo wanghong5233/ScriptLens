@@ -1,0 +1,54 @@
+source: docs/script_video_tag_stability_decision_20260527.md
+model: qwen3.5-omni-plus
+n_samples: 50
+n_repeats: 5
+dims:
+  world_setting:
+    par: 1.0
+    stable: 50
+    stable_total: 50
+    wilson_low: 0.929
+    verdict: video_stable
+  scene_emotion_keynote:
+    par: 0.992
+    stable: 48
+    stable_total: 50
+    wilson_low: 0.865
+    verdict: video_stable
+  gender_axis:
+    par: 0.952
+    stable: 44
+    stable_total: 50
+    wilson_low: 0.762
+    verdict: video_aggregate
+  scene_locale_type:
+    par: 0.964
+    stable: 44
+    stable_total: 50
+    wilson_low: 0.762
+    verdict: video_aggregate
+  relationship_polarity:
+    par: 0.952
+    stable: 43
+    stable_total: 50
+    wilson_low: 0.738
+    verdict: video_experimental
+  relationship_type:
+    par: 0.94
+    stable: 40
+    stable_total: 50
+    wilson_low: 0.67
+    verdict: video_blocked
+  protagonist_archetype:
+    par: 0.88
+    stable: 31
+    stable_total: 50
+    wilson_low: 0.482
+    verdict: video_blocked
+  antagonist_archetype:
+    par: 0.912
+    stable: 33
+    stable_total: 50
+    wilson_low: 0.522
+    verdict: video_blocked
+
