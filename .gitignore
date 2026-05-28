@@ -21,16 +21,11 @@ dist/
 *.sqlite
 *.sqlite3
 
-# 评测数据集：网络收集的真实短剧剧本（含版权 + 体积大），仅本地保留。
-# git 不支持父目录 ignore + 子文件白名单，因此按扩展名屏蔽，留出我们的 .py 脚本。
-eval/**/*.docx
-eval/**/*.doc
-eval/**/*.pdf
-eval/**/*.epub
-eval/**/*.mobi
-eval/runs/
-# 评测脚本本地跑出来的 stdout 落盘日志
-eval/_*_out.txt
+# 评测数据集与跑批产物（版权 + 体积大，仅本地保留）。
+# 评测代码在 backend/app/eval/，不在根目录 eval/。
+eval/
+剧本数据集/
+backend/app/eval/reports/
 logs/
 
 backend/storage_root/
