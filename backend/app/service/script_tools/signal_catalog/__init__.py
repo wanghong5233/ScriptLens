@@ -51,7 +51,7 @@ class SignalContext:
     plot_tags_by_unit: dict[str, dict[str, list[str]]]
     script_tag_map: dict[str, list[str]]
     episode_tag_map: dict[int, dict[str, list[str]]]
-    tag_set_ver: str = "v1.0.0"
+    tag_set_ver: str = "script"
 
     @property
     def episode_count(self) -> int:
@@ -198,7 +198,14 @@ def build_signal_context(*, script_id: str, engine: Engine = default_engine) -> 
             for row in conn.execute(
                 text(
                     """
-                    SELECT id::text AS id, episode_no, idx, summary, start_line, end_line
+                    SELECT id::text AS id,
+                           episode_no,
+                           idx,
+                           summary,
+                           start_scene_id::text AS start_scene_id,
+                           end_scene_id::text AS end_scene_id,
+                           start_line,
+                           end_line
                     FROM scriptlens.plot_units
                     WHERE script_id = :sid
                     ORDER BY idx
@@ -262,9 +269,12 @@ def build_signal_context(*, script_id: str, engine: Engine = default_engine) -> 
                     """
                     SELECT id::text AS id,
                            canonical_name,
+                           aliases,
                            role,
+                           archetype,
                            arc_type,
-                           agency_level
+                           agency_level,
+                           evidence
                     FROM scriptlens.character_entities
                     WHERE script_id = :sid
                     """

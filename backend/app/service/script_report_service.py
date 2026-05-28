@@ -1,4 +1,4 @@
-"""Batch 3 report pipeline (v3 rubric, 6 dimensions, action-driven rewrite)."""
+"""Script scoring report pipeline (6 dimensions, action-driven rewrite)."""
 
 from __future__ import annotations
 
@@ -18,25 +18,22 @@ from service.core.ingestion.script_loader import UnsupportedScriptFormatError
 from service.score_registry import RubricConfig, load_rubric
 from service.script_ingestion_service import ScriptIngestionService
 from service.script_progress_tracker import tracker as progress_tracker
-from service.script_tools.bundle_extractor import extract_bundle
-from service.script_tools.character_entity_resolver import resolve_character_entities
 from service.script_tools.compliance_scorer import screen_compliance
 from service.script_tools.decision_aggregator import decide
 from service.script_tools.dimension_aggregator import DimensionScore, aggregate
 from service.script_tools.genre_weights import apply_genre_weights, infer_genre_scope
 from service.script_tools.improvement_action_generator import ImprovementAction, generate_actions
 from service.script_tools.llm_caller import LlmCaller
-from service.script_tools.pacing_aggregator import aggregate_pacing_curve_v3
+from service.script_tools.pacing_aggregator import aggregate_pacing_curve_v3 as aggregate_pacing_curve
 from service.script_tools.percentile_tier import resolve_tier
-from service.script_tools.plot_unit_segmenter import segment_plot_units
-from service.script_tools.relationship_candidate_generator import ensure_relationship_candidates
 from service.script_tools.signal_catalog import SignalValue, build_signal_context, compute_signals
+from service.script_tools.tag_pipeline import run_tag_pipeline
 from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
 
-_RUBRIC_VERSION = "v3.0.0"
-_TAG_SET_VERSION = "v1.0.0"
+_RUBRIC_ID = "v3.0.0"
+_TAG_SET_VERSION = "script"
 _DIM_CONFIDENCE_FLOAT = {"high": 0.85, "medium": 0.6, "low": 0.35}
 _CONF_RANK = {"high": 2, "medium": 1, "low": 0}
 
@@ -151,6 +148,230 @@ def _merge_confidence(a: str, b: str) -> str:
     return "low"
 
 
+def _safe_tier_cuts(cuts: dict[str, Any] | None) -> dict[str, float]:
+    payload = cuts if isinstance(cuts, dict) else {}
+    try:
+        p25 = float(payload.get("p25", 4.0))
+    except (TypeError, ValueError):
+        p25 = 4.0
+    try:
+        p50 = float(payload.get("p50", 6.0))
+    except (TypeError, ValueError):
+        p50 = 6.0
+    try:
+        p75 = float(payload.get("p75", 8.0))
+    except (TypeError, ValueError):
+        p75 = 8.0
+    return {"p25": p25, "p50": p50, "p75": p75}
+
+
+def _compute_overall_cuts(scorecard: list[dict[str, Any]]) -> dict[str, float]:
+    if not scorecard:
+        return {"p25": 4.0, "p50": 6.0, "p75": 8.0}
+    p25_values: list[float] = []
+    p50_values: list[float] = []
+    p75_values: list[float] = []
+    for item in scorecard:
+        cuts = _safe_tier_cuts(item.get("tier_cuts"))
+        p25_values.append(cuts["p25"])
+        p50_values.append(cuts["p50"])
+        p75_values.append(cuts["p75"])
+    return {
+        "p25": round(sum(p25_values) / len(p25_values), 4),
+        "p50": round(sum(p50_values) / len(p50_values), 4),
+        "p75": round(sum(p75_values) / len(p75_values), 4),
+    }
+
+
+def _load_drama_tags(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT value,
+                       confidence
+                FROM scriptlens.script_tags
+                WHERE script_id = :sid
+                  AND dim = 'drama_tags'
+                ORDER BY confidence DESC NULLS LAST, value
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().all()
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        value = str(row.get("value") or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        conf_raw = row.get("confidence")
+        try:
+            confidence = float(conf_raw) if conf_raw is not None else 0.0
+        except (TypeError, ValueError):
+            confidence = 0.0
+        out.append({"key": "drama_tags", "value": value, "confidence": round(confidence, 4)})
+    return out
+
+
+def _load_plot_units(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT pu.id::text AS plot_unit_id,
+                       pu.episode_no,
+                       pu.idx,
+                       pu.summary,
+                       pu.start_scene_id::text AS start_scene_id,
+                       pu.end_scene_id::text AS end_scene_id,
+                       put.dim,
+                       put.value
+                FROM scriptlens.plot_units pu
+                LEFT JOIN scriptlens.plot_unit_tags put
+                       ON put.plot_unit_id = pu.id
+                WHERE pu.script_id = :sid
+                ORDER BY pu.idx
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().all()
+    by_unit: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        plot_unit_id = str(row.get("plot_unit_id") or "").strip()
+        if not plot_unit_id:
+            continue
+        payload = by_unit.setdefault(
+            plot_unit_id,
+            {
+                "plot_unit_id": plot_unit_id,
+                "episode_no": int(row.get("episode_no")) if row.get("episode_no") is not None else None,
+                "plot_unit_no": int(row.get("idx") or 0),
+                "summary": str(row.get("summary") or ""),
+                "start_scene_id": str(row.get("start_scene_id") or "") or None,
+                "end_scene_id": str(row.get("end_scene_id") or "") or None,
+                "scene_refs": [],
+                "narrative_intensity": 0,
+                "plot_hook": "none",
+                "conflict_type": "none",
+                "payoff_type": "none",
+                "emotional_driver": "none",
+                "story_stage": "none",
+            },
+        )
+        dim = str(row.get("dim") or "").strip()
+        value = str(row.get("value") or "").strip()
+        if not dim or not value:
+            continue
+        if dim in {"plot_hook", "conflict_type", "payoff_type", "emotional_driver", "story_stage"}:
+            payload[dim] = value
+
+    for payload in by_unit.values():
+        start_scene_id = payload.pop("start_scene_id", None)
+        end_scene_id = payload.pop("end_scene_id", None)
+        scene_refs: list[str] = []
+        if start_scene_id:
+            scene_refs.append(str(start_scene_id))
+        if end_scene_id and end_scene_id != start_scene_id:
+            scene_refs.append(str(end_scene_id))
+        payload["scene_refs"] = scene_refs
+        payload["narrative_intensity"] = min(
+            8,
+            (2 if payload["plot_hook"] != "none" else 0)
+            + (2 if payload["conflict_type"] != "none" else 0)
+            + (3 if payload["payoff_type"] != "none" else 0)
+            + (1 if payload["emotional_driver"] != "none" else 0),
+        )
+    return list(by_unit.values())
+
+
+def _load_characters(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT c.id::text AS id,
+                       c.canonical_name,
+                       c.aliases,
+                       c.archetype,
+                       c.arc_type,
+                       c.agency_level,
+                       c.evidence
+                FROM scriptlens.character_entities c
+                WHERE c.script_id = :sid
+                ORDER BY c.created_at, c.canonical_name
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().all()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        aliases_raw = row.get("aliases")
+        aliases = aliases_raw if isinstance(aliases_raw, list) else []
+        if isinstance(aliases_raw, str):
+            try:
+                parsed_aliases = json.loads(aliases_raw)
+            except (TypeError, ValueError):
+                parsed_aliases = None
+            if isinstance(parsed_aliases, list):
+                aliases = parsed_aliases
+        evidence_raw = row.get("evidence")
+        evidence = evidence_raw if isinstance(evidence_raw, dict) else {}
+        if isinstance(evidence_raw, str):
+            try:
+                parsed_evidence = json.loads(evidence_raw)
+            except (TypeError, ValueError):
+                parsed_evidence = None
+            if isinstance(parsed_evidence, dict):
+                evidence = parsed_evidence
+        out.append(
+            {
+                "id": str(row.get("id") or ""),
+                "name": str(row.get("canonical_name") or ""),
+                "aliases": [str(item) for item in aliases if str(item).strip()],
+                "archetype": str(row.get("archetype") or ""),
+                "role_in_arc": str(evidence.get("character_role_in_arc") or ""),
+                "arc_type": str(row.get("arc_type") or ""),
+                "agency_level": str(row.get("agency_level") or ""),
+                "appearance_count": int(evidence.get("scene_count") or 0),
+            }
+        )
+    return out
+
+
+def _load_character_relationships(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id::text AS id,
+                       src_char_id::text AS a_id,
+                       dst_char_id::text AS b_id,
+                       relationship_type,
+                       polarity,
+                       dynamic_arc,
+                       triangle
+                FROM scriptlens.character_relationships
+                WHERE script_id = :sid
+                ORDER BY created_at
+                """
+            ),
+            {"sid": script_id},
+        ).mappings().all()
+    return [
+        {
+            "id": str(row.get("id") or ""),
+            "a_id": str(row.get("a_id") or ""),
+            "b_id": str(row.get("b_id") or ""),
+            "type": str(row.get("relationship_type") or ""),
+            "polarity": str(row.get("polarity") or ""),
+            "dynamic_arc": str(row.get("dynamic_arc") or ""),
+            "triangle": str(row.get("triangle") or ""),
+        }
+        for row in rows
+    ]
+
+
 async def score_one_dimension(
     *,
     script_id: str,
@@ -159,7 +380,7 @@ async def score_one_dimension(
     engine: Engine = default_engine,
 ) -> dict[str, Any]:
     caller = caller or LlmCaller()
-    rubric = load_rubric(_RUBRIC_VERSION)
+    rubric = load_rubric(_RUBRIC_ID)
     valid = {dim.id for dim in rubric.dimensions} | {"compliance"}
     if dimension not in valid:
         raise ValueError(f"unknown dimension={dimension!r}; valid={sorted(valid)}")
@@ -173,13 +394,18 @@ async def score_one_dimension(
         return {
             "dimension": "compliance",
             "score": compliance.score,
-            "level": compliance.tier,
+            "tier": compliance.tier,
             "reason": compliance.reason,
             "evidence_scene_ids": _scene_ids_from_evidence(compliance.evidence_ref_ids),
             "baseline": baseline,
         }
 
-    await ensure_v1_tags_ready(script_id=script_id, caller=caller, engine=engine)
+    await run_tag_pipeline(
+        script_ref=script_id,
+        tag_set_ver=_TAG_SET_VERSION,
+        caller=caller,
+        engine=engine,
+    )
     ctx = build_signal_context(script_id=script_id, engine=engine)
     signals = await compute_signals(rubric, ctx, caller=caller)
     dim_scores = aggregate(rubric, signals)
@@ -200,7 +426,7 @@ async def score_one_dimension(
     return {
         "dimension": target.dimension,
         "score": target.score,
-        "level": target.tier,
+        "tier": target.tier,
         "reason": target.reason,
         "evidence_scene_ids": _scene_ids_from_signal_refs(target.signal_refs),
         "signal_refs": target.signal_refs,
@@ -224,17 +450,22 @@ async def generate_report(
             raise ValueError(f"script_id={script_id} 不存在")
         progress_tracker.update_stage(script_id, "loading_meta", "done", detail=f"title={meta.title}")
 
-        progress_tracker.update_stage(script_id, "extracting_rewards", "running", detail="检查并补齐 v1 标签依赖")
-        await ensure_v1_tags_ready(script_id=script_id, caller=caller, engine=engine)
-        progress_tracker.update_stage(script_id, "extracting_rewards", "done", detail="v1 标签依赖已就绪")
+        progress_tracker.update_stage(script_id, "running_tag_pipeline", "running", detail="运行完整标签流水线")
+        await run_tag_pipeline(
+            script_ref=script_id,
+            tag_set_ver=_TAG_SET_VERSION,
+            caller=caller,
+            engine=engine,
+        )
+        progress_tracker.update_stage(script_id, "running_tag_pipeline", "done", detail="标签流水线完成")
 
-        progress_tracker.update_stage(script_id, "extracting_narrative", "running", detail="加载 rubric + 计算 signals")
-        rubric = load_rubric(_RUBRIC_VERSION)
+        progress_tracker.update_stage(script_id, "computing_signals", "running", detail="加载 rubric + 计算 signals")
+        rubric = load_rubric(_RUBRIC_ID)
         ctx = build_signal_context(script_id=script_id, engine=engine)
         signals = await compute_signals(rubric, ctx, caller=caller)
         progress_tracker.update_stage(
             script_id,
-            "extracting_narrative",
+            "computing_signals",
             "done",
             detail=f"signals={len(signals)}",
         )
@@ -252,6 +483,7 @@ async def generate_report(
             )
             item.tier = tier_result.tier
             item.confidence = _merge_confidence(item.confidence, tier_result.confidence)
+            item.tier_cuts = _safe_tier_cuts(tier_result.cuts)
         weighted = apply_genre_weights(rubric, dim_scores, genre_scope=genre_scope)
         progress_tracker.update_stage(
             script_id,
@@ -270,7 +502,7 @@ async def generate_report(
             detail=f"decision={decision.decision}",
         )
 
-        progress_tracker.update_stage(script_id, "building_evidence", "running", detail="生成节奏曲线与改写动作")
+        progress_tracker.update_stage(script_id, "building_pacing_and_actions", "running", detail="生成节奏曲线与改写动作")
         run_id = str(uuid.uuid4())
         actions = generate_actions(
             run_id=run_id,
@@ -278,10 +510,10 @@ async def generate_report(
             dim_scores=dim_scores,
             signal_values=signals,
         )
-        pacing_curve = aggregate_pacing_curve_v3(ctx)
+        pacing_curve = aggregate_pacing_curve(ctx)
         progress_tracker.update_stage(
             script_id,
-            "building_evidence",
+            "building_pacing_and_actions",
             "done",
             detail=f"actions={len(actions)} pacing_points={len(pacing_curve)}",
         )
@@ -294,10 +526,11 @@ async def generate_report(
             compliance_payload=compliance.to_dict(),
             pacing_curve=pacing_curve,
             actions=actions,
+            engine=engine,
         )
 
         progress_tracker.update_stage(script_id, "persisting", "running", detail="写入 reports/scoring_runs/script_scores/actions")
-        _persist_v3_report(
+        _persist_report(
             script_id=script_id,
             run_id=run_id,
             rubric=rubric,
@@ -312,7 +545,7 @@ async def generate_report(
             engine=engine,
         )
         _mark_script_status(script_id=script_id, status="ready", failure_reason=None, engine=engine)
-        progress_tracker.update_stage(script_id, "persisting", "done", detail="v3 report persisted")
+        progress_tracker.update_stage(script_id, "persisting", "done", detail="report persisted")
         progress_tracker.finalize(script_id)
         return report_payload
     except Exception as exc:  # noqa: BLE001
@@ -320,98 +553,6 @@ async def generate_report(
         _mark_script_status(script_id=script_id, status="failed", failure_reason=f"{type(exc).__name__}: {exc}", engine=engine)
         progress_tracker.finalize(script_id, error=f"{type(exc).__name__}: {exc}")
         raise
-
-
-async def ensure_v1_tags_ready(
-    *,
-    script_id: str,
-    caller: Optional[LlmCaller] = None,
-    tag_set_ver: str = _TAG_SET_VERSION,
-    seed: int = 42,
-    variant: str = "a",
-    engine: Engine = default_engine,
-) -> None:
-    caller = caller or LlmCaller()
-    counts = _v1_dependency_counts(script_id=script_id, engine=engine)
-    ready = (
-        counts["plot_units"] > 0
-        and counts["plot_unit_tags"] > 0
-        and counts["script_drama_tags"] > 0
-        and counts["character_entities"] > 0
-    )
-    if ready:
-        return
-
-    await segment_plot_units(
-            script_id,
-        tag_set_ver=tag_set_ver,
-        seed=seed,
-        variant=variant,
-        caller=caller,
-        persist=True,
-        engine=engine,
-    )
-    await resolve_character_entities(
-        script_id,
-        tag_set_ver=tag_set_ver,
-        seed=seed,
-        caller=caller,
-        persist=True,
-            engine=engine,
-        )
-    ensure_relationship_candidates(
-            script_id,
-        tag_set_ver=tag_set_ver,
-        min_cooccurrence=1,
-        top_k=30,
-        persist=True,
-        engine=engine,
-    )
-
-    await extract_bundle(
-        "v1_script_structure",
-            script_id,
-        tag_set_ver=tag_set_ver,
-        seed=seed,
-        variant=variant,
-        caller=caller,
-        persist=True,
-        engine=engine,
-    )
-
-    for target in _episode_targets(script_id=script_id, engine=engine):
-        await extract_bundle(
-            "v1_episode_structure",
-            target,
-            tag_set_ver=tag_set_ver,
-            seed=seed,
-            variant=variant,
-            caller=caller,
-            persist=True,
-            engine=engine,
-        )
-    for char_id in _character_ids(script_id=script_id, engine=engine):
-        await extract_bundle(
-            "v1_character_attrs",
-            char_id,
-            tag_set_ver=tag_set_ver,
-            seed=seed,
-            variant=variant,
-            caller=caller,
-            persist=True,
-            engine=engine,
-        )
-    for rel_id in _relationship_ids(script_id=script_id, tag_set_ver=tag_set_ver, engine=engine):
-        await extract_bundle(
-            "v1_relationship",
-            rel_id,
-            tag_set_ver=tag_set_ver,
-            seed=seed,
-            variant=variant,
-            caller=caller,
-            persist=True,
-            engine=engine,
-        )
 
 
 def _build_report_payload(
@@ -423,8 +564,10 @@ def _build_report_payload(
     compliance_payload: dict[str, Any],
     pacing_curve: list[dict[str, Any]],
     actions: list[ImprovementAction],
+    engine: Engine,
 ) -> dict[str, Any]:
     decision_label = _normalize_decision_label(str(decision.decision))
+    decision_payload = decision.payload if isinstance(decision.payload, dict) else {}
     scorecard: list[dict[str, Any]] = []
     for dim in dim_scores:
         scorecard.append(
@@ -435,10 +578,16 @@ def _build_report_payload(
                 "confidence": dim.confidence,
                 "coverage_ratio": dim.coverage_ratio,
                 "signal_refs": dim.signal_refs,
+                "top_signals": dim.top_signals,
+                "tier_cuts": _safe_tier_cuts(dim.tier_cuts),
                 "reason": dim.reason,
                 "evidence_ref_ids": _scene_ids_from_signal_refs(dim.signal_refs),
             }
         )
+    tier_cuts_used = {
+        item["dimension"]: dict(item.get("tier_cuts") or {})
+        for item in scorecard
+    }
     action_seeds = [
         {
             "id": action.id,
@@ -460,19 +609,22 @@ def _build_report_payload(
             "confidence": decision.confidence,
             "one_sentence_reason": decision.one_sentence_reason,
             "summary": decision.one_sentence_reason,
-            "decision_inputs": {**decision.payload, "raw_decision": decision.decision},
+            "decision_inputs": {
+                **decision_payload,
+                "tier_cuts_used": tier_cuts_used,
+                "overall_cuts": _compute_overall_cuts(scorecard),
+                "raw_decision": decision.decision,
+            },
         },
         "decision_reason": decision.one_sentence_reason,
         "overall_score": weighted_overall_score,
         "summary": decision.one_sentence_reason,
-        "must_read_scene_ids": [],
         "scorecard": scorecard,
-            "compliance": compliance_payload,
-        "evidence_refs": [],
-        "highlights": [],
-        "coverage_card": None,
-        "beat_sheet": None,
-        "character_graph": None,
+        "compliance": compliance_payload,
+        "drama_tags": _load_drama_tags(script_id=meta.script_id, engine=engine),
+        "plot_units": _load_plot_units(script_id=meta.script_id, engine=engine),
+        "characters": _load_characters(script_id=meta.script_id, engine=engine),
+        "character_relationships": _load_character_relationships(script_id=meta.script_id, engine=engine),
         "pacing_curve": pacing_curve,
         "evaluation": {
             "dimensions": [
@@ -482,19 +634,21 @@ def _build_report_payload(
                     "score": item["score"],
                     "tier": item["tier"],
                     "confidence": item["confidence"],
+                    "coverage_ratio": item["coverage_ratio"],
                     "reason": item["reason"],
                     "signal_refs": item["signal_refs"],
+                    "evidence_ref_ids": item["evidence_ref_ids"],
+                    "top_signals": item["top_signals"],
+                    "tier_cuts": item["tier_cuts"],
                 }
                 for item in scorecard
             ],
-            "risk_flags": [],
             "rewrite_seeds": action_seeds,
         },
-        "risk_flags": [],
     }
 
 
-def _persist_v3_report(
+def _persist_report(
     *,
     script_id: str,
     run_id: str,
@@ -585,6 +739,8 @@ def _persist_v3_report(
                 for ref in dim.signal_refs
                 if str(ref.get("signal_key") or "").strip()
             }
+            if dim.top_signals:
+                signal_payload["__top_signals__"] = dim.top_signals
             score_rows.append(
                 {
                     "id": str(uuid.uuid4()),
@@ -606,7 +762,7 @@ def _persist_v3_report(
                     ),
                     "tag_set_ver": ctx.tag_set_ver,
                     "score_ver": rubric.score_ver,
-                    "model_ver": model_versions.get("primary_model", "v3-rule-only"),
+                    "model_ver": model_versions.get("primary_model", "rule-only"),
                 }
             )
         if score_rows:
@@ -623,7 +779,7 @@ def _persist_v3_report(
                         :tier, :confidence, :coverage_ratio, CAST(:signals AS jsonb), CAST(:weights AS jsonb),
                         :tag_set_ver, :score_ver, :model_ver, NOW()
                     )
-                    ON CONFLICT ON CONSTRAINT uq_script_scores_script_dim_ver
+                    ON CONFLICT (script_id, dimension, tag_set_ver, score_ver)
                     DO UPDATE SET
                         run_id = EXCLUDED.run_id,
                         primary_dimension = EXCLUDED.primary_dimension,
@@ -728,88 +884,6 @@ def _load_script_meta(script_id: str, *, engine: Engine) -> Optional[_ScriptMeta
     )
 
 
-def _v1_dependency_counts(*, script_id: str, engine: Engine) -> dict[str, int]:
-    with engine.connect() as conn:
-        row = conn.execute(
-            text(
-                """
-                SELECT
-                    (SELECT COUNT(*) FROM scriptlens.plot_units WHERE script_id = :sid) AS plot_units,
-                    (
-                        SELECT COUNT(*)
-                        FROM scriptlens.plot_unit_tags put
-                        JOIN scriptlens.plot_units pu ON pu.id = put.plot_unit_id
-                        WHERE pu.script_id = :sid
-                    ) AS plot_unit_tags,
-                    (SELECT COUNT(*) FROM scriptlens.script_tags WHERE script_id = :sid AND dim = 'drama_tags') AS script_drama_tags,
-                    (SELECT COUNT(*) FROM scriptlens.character_entities WHERE script_id = :sid) AS character_entities,
-                    (SELECT COUNT(*) FROM scriptlens.character_relationships WHERE script_id = :sid) AS relationships
-                """
-            ),
-            {"sid": script_id},
-        ).mappings().first()
-    row = row or {}
-    return {
-        "plot_units": int(row.get("plot_units") or 0),
-        "plot_unit_tags": int(row.get("plot_unit_tags") or 0),
-        "script_drama_tags": int(row.get("script_drama_tags") or 0),
-        "character_entities": int(row.get("character_entities") or 0),
-        "relationships": int(row.get("relationships") or 0),
-    }
-
-
-def _episode_targets(*, script_id: str, engine: Engine) -> list[str]:
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT DISTINCT episode_no
-                FROM scriptlens.scenes
-                WHERE script_id = :sid AND episode_no IS NOT NULL
-                ORDER BY episode_no
-                LIMIT 30
-                """
-            ),
-            {"sid": script_id},
-        ).mappings().all()
-    return [f"{script_id}::ep::{int(row['episode_no'])}" for row in rows]
-
-
-def _character_ids(*, script_id: str, engine: Engine) -> list[str]:
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT id::text AS id
-                FROM scriptlens.character_entities
-                WHERE script_id = :sid
-                ORDER BY created_at, canonical_name
-                LIMIT 120
-                """
-            ),
-            {"sid": script_id},
-        ).mappings().all()
-    return [str(row["id"]) for row in rows]
-
-
-def _relationship_ids(*, script_id: str, tag_set_ver: str, engine: Engine) -> list[str]:
-    with engine.connect() as conn:
-        rows = conn.execute(
-            text(
-                """
-                SELECT id::text AS id
-                FROM scriptlens.character_relationships
-                WHERE script_id = :sid
-                  AND (tag_set_ver = :ver OR tag_set_ver = '' OR tag_set_ver IS NULL)
-                ORDER BY created_at, id
-                LIMIT 160
-                """
-            ),
-            {"sid": script_id, "ver": tag_set_ver},
-        ).mappings().all()
-    return [str(row["id"]) for row in rows]
-
-
 def _collect_model_versions(signals: dict[str, SignalValue]) -> dict[str, Any]:
     models: list[str] = []
     for signal in signals.values():
@@ -819,7 +893,7 @@ def _collect_model_versions(signals: dict[str, SignalValue]) -> dict[str, Any]:
             models.append(model.strip())
     models = sorted(set(models))
     return {
-        "primary_model": models[0] if models else "v3-rule-only",
+        "primary_model": models[0] if models else "rule-only",
         "models": models,
     }
 
@@ -867,7 +941,7 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
             {"sid": script_id},
         ).mappings().first()
     if row is None:
-        return {"score": None, "level": None, "reason": None, "evidence_scene_ids": []}
+        return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
     payload = row.get("report_json")
     if isinstance(payload, (str, bytes)):
         try:
@@ -875,18 +949,18 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
         except (TypeError, ValueError):
             payload = {}
     if not isinstance(payload, dict):
-        return {"score": None, "level": None, "reason": None, "evidence_scene_ids": []}
+        return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
     if dimension == "compliance":
         compliance = payload.get("compliance") if isinstance(payload.get("compliance"), dict) else {}
         return {
             "score": compliance.get("score"),
-            "level": compliance.get("tier") or compliance.get("level"),
+            "tier": compliance.get("tier") or compliance.get("level"),
             "reason": compliance.get("reason"),
             "evidence_scene_ids": list(compliance.get("evidence_ref_ids") or []),
         }
     scorecard = payload.get("scorecard")
     if not isinstance(scorecard, list):
-        return {"score": None, "level": None, "reason": None, "evidence_scene_ids": []}
+        return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
     for item in scorecard:
         if not isinstance(item, dict):
             continue
@@ -894,11 +968,11 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
             continue
         return {
             "score": item.get("score"),
-            "level": item.get("tier") or item.get("level"),
+            "tier": item.get("tier") or item.get("level"),
             "reason": item.get("reason"),
             "evidence_scene_ids": list(item.get("evidence_ref_ids") or []),
         }
-    return {"score": None, "level": None, "reason": None, "evidence_scene_ids": []}
+    return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
 
 
 def _normalize_decision_label(raw: str) -> str:

@@ -103,7 +103,7 @@ class ScriptChatAgent(LaTeXEditAgent):
         super().__init__(llm_client=llm_client, tool_registry=tool_registry)
         self._script_id = script_id
         self.tool_call_limits = {
-            "score_dimension_tool": 6,            # 5 维 + compliance；rescore 闭环至少跑 1 次
+            "score_dimension_tool": 6,            # 六维 + compliance；rescore 闭环至少跑 1 次
             "locate_scenes_tool": 6,              # 多场景定位允许多次但有上限
             "extract_characters_tool": 1,         # 全剧人物 1 次足矣
             "read_scene_tool": 8,                 # 单会话多次读取局部场景

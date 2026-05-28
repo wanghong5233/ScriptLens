@@ -109,11 +109,7 @@ def _preflight(args: argparse.Namespace) -> None:
 
 
 def _all_bundles(tag_set_ver: str, *, scope: str | None = None):
-    """v2.0.0 是累积版本（extends v1 → v0），所有 v0_/v1_/v2_ 的 bundle 都参与稳定性测试。
-
-    早期版本按 `vN_` 前缀过滤是错的，会把 v0_drama / v1_episode_structure 等丢掉，
-    导致 scope=script/episode/character/relationship 全部漏跑。
-    """
+    """当前 tag_set 下所有 bundles 都参与稳定性测试。"""
     return list_bundles(tag_set_ver, scope=scope)
 
 

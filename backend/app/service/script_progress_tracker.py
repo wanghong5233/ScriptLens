@@ -1,4 +1,4 @@
-"""ScriptLens · 5 维评分流水线进度追踪器（进程内 in-memory）。
+"""ScriptLens · 评分流水线进度追踪器（进程内 in-memory）。
 
 设计取舍
 ========
@@ -40,12 +40,12 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "读取剧本基本信息（集数 / 场数 / 字数），用于后续评分时给 LLM 上下文",
     ),
     (
-        "extracting_rewards",
-        "确保 v1 标签就绪",
+        "running_tag_pipeline",
+        "运行标签流水线",
         "检查并补齐 plot_unit_tags / character_entities / relationship / drama_tags，缺失时触发 bundle_extractor",
     ),
     (
-        "extracting_narrative",
+        "computing_signals",
         "计算派生信号",
         "按 rubric 的 rule + llm bundles 统一计算信号集合，作为六维聚合输入",
     ),
@@ -60,7 +60,7 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "合规评分接入决策矩阵，输出最终 decision 与 decision_inputs",
     ),
     (
-        "building_evidence",
+        "building_pacing_and_actions",
         "生成节奏曲线与改写动作",
         "按 plot_unit 强度序列构建 pacing_curve，并基于弱信号模板生成 improvement_actions",
     ),
@@ -157,7 +157,7 @@ class _ProgressTracker:
     def update_detail(self, script_id: str, detail: str) -> None:
         """只更新「当前阶段」的 detail（不切状态）。
 
-        用途：5 维并行评分跑了一半，想把 "已完成 3/5 维（开场钩子、动机、风险）"
+        用途：并行评分跑了一半，想把 "已完成 3/6 维（开场钩子、动机、风险）"
         实时回写给前端。
         """
         now = time.time()

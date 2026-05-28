@@ -134,7 +134,7 @@ def _upsert_candidates(
 def ensure_relationship_candidates(
     script_ref: str,
     *,
-    tag_set_ver: str = "v1.0.0",
+    tag_set_ver: str = "script",
     min_cooccurrence: int = 3,
     top_k: int = 15,
     persist: bool = True,
@@ -176,4 +176,3 @@ def ensure_relationship_candidates(
     if persist and candidates:
         _upsert_candidates(script_id=script_id, tag_set_ver=tag_set_ver, candidates=candidates, engine=engine)
     return candidates
-

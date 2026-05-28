@@ -54,3 +54,6 @@ def test_weighted_score_and_confidence_label() -> None:
     assert abs(story.score - 6.8) < 1e-6
     assert story.confidence in {"medium", "high"}
     assert story.coverage_ratio == 1.0
+    assert len(story.top_signals) == 2
+    assert story.top_signals[0]["signal_key"] == "b"
+    assert story.top_signals[1]["signal_key"] == "a"

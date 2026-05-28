@@ -200,7 +200,7 @@ async def upload_script(
             str(e),
         )
 
-    # 3. 注册 BackgroundTask 跑完整链路：ingest（切场入库）→ 自动评分（5 维报告）
+    # 3. 注册 BackgroundTask 跑完整链路：ingest（切场入库）→ 自动评分报告
     #    用户上传剧本的产品语义就是「分析这个剧本」，不应让用户上传完再手动点一次。
     background_tasks.add_task(_run_full_pipeline_task, script_id, str(storage_path))
 
@@ -214,7 +214,7 @@ async def upload_script(
 
 async def _run_full_pipeline_task(script_id: str, file_path_str: str) -> None:
     """BackgroundTask 入口：先跑 ingestion（同步、CPU/IO 重，下放线程池），
-    ingestion 成功后立即接 5 维评分流水线（async / LLM 重）。
+    ingestion 成功后立即接评分流水线（async / LLM 重）。
 
     任一步失败都只 log，不向上游 BackgroundTasks 抛——失败原因已写入
     scripts.failure_reason / 通过 reports 表为空让前端感知。
@@ -643,7 +643,7 @@ def get_script_report(
 
 @router.post(
     "/{script_id}/reanalyze",
-    summary="触发 5 维评分（异步）",
+    summary="触发评分分析（异步）",
     description=(
         "拉起后台 BackgroundTask 跑评分流水线，立即返回 202。"
         "前端继续轮询 GET /report 直到拿到 ReportResponse。"
@@ -685,9 +685,9 @@ async def _run_report_task(script_id: str) -> None:
 @router.get(
     "/{script_id}/progress",
     response_model=ReportProgressResponse,
-    summary="读取 5 维评分流水线的实时进度",
+    summary="读取评分流水线的实时进度",
     description=(
-        "返回内存里 progress_tracker 的快照（6 阶段时间轴 + 当前 detail）。"
+        "返回内存里 progress_tracker 的快照（7 阶段时间轴 + 当前 detail）。"
         "snapshot 为 null 表示当前没有评分任务在跑（也没有 5 分钟内的旧快照）。"
         "前端在 reports 表为空时轮询此接口可视化进度。"
     ),
@@ -1610,7 +1610,7 @@ def revert_script_operation(
     summary="返回报告全字段（含派生 rewrite_seeds / task_status）",
     description=(
         "不重新生成评分。基于已生成的 reports.report_json："
-        "1) 透传 scorecard（顺序固定为五力声明序）+ must_read_scene_ids + 全部 evidence_refs "
+        "1) 透传 scorecard（顺序固定）+ drama_tags / plot_units / characters / character_relationships "
         "2) 派生 rewrite_seeds（最值得改的 N 场）+ task_status（已尝试改写次数 / 状态）。"
         "视角切换由前端「行动」segment 派生 Persona Action Card（详见 docs/09-action-lens.md），"
         "本接口不接受 role 参数、不按角色重排。报告未生成时返回 409。"

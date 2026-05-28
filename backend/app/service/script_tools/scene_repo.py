@@ -1,7 +1,7 @@
 """场景库 helper（DB 只读层）。
 
 把"按 script_id 取场景"的所有变体 SQL 集中到这里，让上层评分工具
-（reward_extractor / motivation_chain / risk_screener / dimension_scorer）
+（风险扫描与评分信号链路共用）
 不直接写 SQL，只调本模块函数。
 
 不变式：
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 #
 # 调用站：
 # - extract_quote(max_chars=EVIDENCE_QUOTE_MAX_LEN)
-# - reward_extractor 提示模板「evidence ≤ 80 字」
+# - 风险/评分提示模板「evidence ≤ 80 字」
 # - risk_screener evidence excerpt
 # - 前端 MustReadChip / HighlightRow scene_summary 截断
 #
@@ -148,7 +148,7 @@ def locate_scenes_by_keyword(
 ) -> List[Scene]:
     """按关键词命中场景（关键词 OR 关系，使用 ILIKE）。
 
-    给 risk_screener / reward_extractor 第一级关键词扫使用。
+    给风险扫描的第一级关键词筛查使用。
     """
     if not keywords:
         return []
@@ -218,7 +218,7 @@ def get_scenes_around(
     after: int = 0,
     engine: Engine = default_engine,
 ) -> List[Scene]:
-    """以 target_scene 为锚点取前后场景（motivation_chain 5 场上下文回扫用）。"""
+    """以 target_scene 为锚点取前后场景（上下文回扫用）。"""
     target = get_scene(scene_id=target_scene_id, engine=engine)
     if not target:
         return []
@@ -259,7 +259,7 @@ def extract_quote(
     max_chars: int = EVIDENCE_QUOTE_MAX_LEN,
     engine: Engine = default_engine,
 ) -> Optional[dict]:
-    """提取场景里最显著的一段，作为 evidence_refs.quote。
+    """提取场景里最显著的一段，作为 evidence 摘要片段。
 
     返回的 start_line / end_line 是 **scene.text 内的 1-indexed 物理行号**，
     与前端 Monaco 编辑器打开的内容（scene.text）严格对应——不要再用
@@ -383,7 +383,7 @@ def locate_quote_in_scene(
 
     返回 (start_line, end_line)；找不到返回 None（调用方应 fallback）。
 
-    用于：reward_extractor / risk_screener LLM 输出的 evidence 字段（要求是原文片段）
+    用于：风险/评分链路里 LLM 输出的 evidence 字段（要求是原文片段）
     需要被精确定位到行号，前端高亮才能跳到真正的论据所在行。
 
     匹配策略（递进 fallback）：

@@ -44,7 +44,7 @@ def test_render_match_config_module_is_importable(tmp_path: Path) -> None:
             script_verdict="online",
             video_verdict="video_stable",
             reason="both sides are stable",
-            tag_set_ver="v1.0.0",
+            tag_set_ver="script",
         ),
         SharedTagEntry(
             dim="scene_locale_type",
@@ -69,4 +69,3 @@ def test_render_match_config_module_is_importable(tmp_path: Path) -> None:
     assert len(module.SHARED_TAG_GATES) == 2
     assert module.get_entry("world_setting") is not None
     assert module.list_dims_by_gate(module.SharedGate.STABLE_SHARED) == ("world_setting",)
-

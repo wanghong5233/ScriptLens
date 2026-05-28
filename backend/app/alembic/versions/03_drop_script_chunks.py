@@ -8,7 +8,7 @@ Create Date: 2026-05-06
 向量）整表删除。
 
 为什么删（详见 `docs/04-script-pipeline.md` §4.4）：
-- 评分（dimension_scorer）：分维度按需读 scenes.text，不查向量
+- 评分链路：按维度读取 scenes.text，不依赖向量检索
 - 证据（extract_quote）：LLM 输出 scene_no 反查，不查向量
 - 任务派发（<TASK_META>）：已携带 scene_id，不查向量
 - Agent locate_scenes_tool：BM25（一级）+ LLM metadata（二级兜底）已足够，

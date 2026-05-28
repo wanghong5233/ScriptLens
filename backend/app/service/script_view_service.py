@@ -2,8 +2,8 @@
 
 GET /api/scripts/{id}/view 的核心逻辑：
 
-  1. 透传 reports.report_json（scorecard 顺序固定为五力声明序，不按角色重排）
-  2. 派生 `rewrite_seeds`：从 score<7 五力维度的第一条 evidence 生成
+  1. 透传 reports.report_json（scorecard 顺序固定，不按角色重排）
+  2. 派生 `rewrite_seeds`：从 score<7 维度的第一条 evidence 生成
      「最值得改的 N 场」候选（详见 docs/03-system-mental-model.md §6）
      注：合规违规不进改写候选——合规问题需人工二次审核，不交给 LLM 改写
   3. 派生 `task_status`：从 script_operations 表派生每个 (scene_id, dimension)
@@ -22,7 +22,6 @@ import logging
 from typing import Dict, List, Tuple
 
 from schemas.script import (
-    ReportEvidenceRef,
     ReportPayload,
     ReportScorecardItem,
     RewriteSeed,
@@ -65,13 +64,10 @@ def build_view(
         summary=report.summary or report.decision.summary,
         scorecard=list(report.scorecard),
         compliance=report.compliance,
-        must_read_scene_ids=list(report.must_read_scene_ids or []),
-        risk_flags=list(report.risk_flags or []),
-        evidence_refs=list(report.evidence_refs or []),
-        highlights=list(report.highlights or []),
-        coverage_card=report.coverage_card,
-        beat_sheet=report.beat_sheet,
-        character_graph=report.character_graph,
+        drama_tags=list(report.drama_tags or []),
+        plot_units=list(report.plot_units or []),
+        characters=list(report.characters or []),
+        character_relationships=list(report.character_relationships or []),
         pacing_curve=list(report.pacing_curve or []),
         evaluation=report.evaluation,
         rewrite_seeds=rewrite_seeds,
@@ -114,15 +110,13 @@ def _derive_rewrite_seeds(report: ReportPayload, *, max_seeds: int = 3) -> List[
         if seeds:
             return seeds
 
-    if not report.scorecard or not report.evidence_refs:
+    if not report.scorecard:
         return []
-
-    evi_by_id: Dict[str, ReportEvidenceRef] = {ref.id: ref for ref in report.evidence_refs}
     candidates: List[Tuple[float, ReportScorecardItem]] = []
     for sc in report.scorecard:
         if sc.score is None or sc.score >= 7:
             continue
-        if not sc.evidence_ref_ids:
+        if not sc.signal_refs:
             continue
         candidates.append((float(sc.score), sc))
     candidates.sort(key=lambda t: t[0])
@@ -132,17 +126,32 @@ def _derive_rewrite_seeds(report: ReportPayload, *, max_seeds: int = 3) -> List[
     for _, sc in candidates:
         if len(seeds) >= max_seeds:
             break
-        evi = next((evi_by_id[rid] for rid in sc.evidence_ref_ids if rid in evi_by_id), None)
-        if evi is None or evi.scene_id in used_scenes:
+        first_scene_id = ""
+        for signal_ref in sc.signal_refs:
+            if not isinstance(signal_ref, dict):
+                continue
+            evidence_refs = signal_ref.get("evidence_refs")
+            if not isinstance(evidence_refs, list):
+                continue
+            for evidence in evidence_refs:
+                if not isinstance(evidence, dict):
+                    continue
+                candidate_scene = str(evidence.get("scene_id") or "").strip()
+                if candidate_scene:
+                    first_scene_id = candidate_scene
+                    break
+            if first_scene_id:
+                break
+        if not first_scene_id or first_scene_id in used_scenes:
             continue
-        used_scenes.add(evi.scene_id)
+        used_scenes.add(first_scene_id)
         seeds.append(
             RewriteSeed(
                 dimension=sc.dimension,
-                scene_id=evi.scene_id,
-                scene_label=evi.scene_label or evi.scene_no,
+                scene_id=first_scene_id,
+                scene_label=first_scene_id,
                 issue=_first_sentence(sc.reason),
-                evidence_ref_id=evi.id,
+                evidence_ref_id=None,
             )
         )
     return seeds

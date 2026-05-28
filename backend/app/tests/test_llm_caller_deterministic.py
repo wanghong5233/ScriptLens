@@ -29,8 +29,8 @@ def test_call_json_deterministic_hit_cache(monkeypatch) -> None:
     async def _run():
         resp = await caller.call_json_deterministic(
             "dummy",
-            tag_set_ver="v0.1.0",
-            prompt_ver="v0.1.0:plot_hook:a",
+            tag_set_ver="script",
+            prompt_ver="script:plot_hook:a",
             dim="plot_hook",
             seed=42,
         )
@@ -67,8 +67,8 @@ def test_call_json_deterministic_cache_miss(monkeypatch) -> None:
     async def _run():
         resp = await caller.call_json_deterministic(
             "dummy",
-            tag_set_ver="v0.1.0",
-            prompt_ver="v0.1.0:plot_hook:a",
+            tag_set_ver="script",
+            prompt_ver="script:plot_hook:a",
             dim="plot_hook",
             seed=123,
         )

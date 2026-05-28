@@ -7,7 +7,7 @@
 
 输出对齐 PRD §7：
 - scorecard.risk.score（0-10）
-- scorecard.risk.level（high_risk / medium_risk / low_risk / clean）
+- scorecard.risk.tier/level（high_risk / medium_risk / low_risk / clean）
 - scorecard.risk.reason
 - scorecard.risk.evidence_ref_ids[]
 """

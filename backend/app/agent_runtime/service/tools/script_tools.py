@@ -6,7 +6,7 @@
 - `reply_to_user` 兜底（达预算时 ReAct 主循环自动收尾）
 
 为什么薄包装而不在工具里重写业务逻辑：
-- 5 维评分 / RAG 检索 / 场景查询 在 D2-4/D2-5a 已经实装为 service 层确定性流水线
+- 评分 / RAG 检索 / 场景查询 在 D2-4/D2-5a 已经实装为 service 层确定性流水线
 - 工具层只负责"参数从 LLM 来 → 调 service → 包成 ToolResult"
 - 业务逻辑改动只动 service 层，工具不变（reuse-matrix §0.1 子包语义边界）
 
@@ -78,11 +78,11 @@ class ScoreDimensionTool(BaseTool):
         super().__init__(
             name="score_dimension_tool",
             description=(
-                "复核或重新计算单一维度评分（阅文五力之一：story / character / concept / "
+                "复核或重新计算单一维度评分（六维之一：story / character / concept / "
                 "emotion / pacing；或独立合规审核：compliance）。"
-                "返回 score / level / reason 以及若干证据场景的 ID。"
+                "返回 score / tier / reason 以及若干证据场景的 ID。"
                 "用户在 chat 里追问「为什么人物力给 4 分」「再核一下合规」时调用本工具。"
-                "注意：完整五力报告由后台流水线一次性生成；本工具只跑单一维度。"
+                "注意：完整评分报告由后台流水线一次性生成；本工具只跑单一维度。"
             ),
         )
         self.parameters_schema = {
@@ -91,7 +91,7 @@ class ScoreDimensionTool(BaseTool):
                 "dimension": {
                     "type": "string",
                     "enum": list(_DIMENSIONS),
-                    "description": "5 维之一",
+                    "description": "六维之一",
                 },
                 "script_id": {
                     "type": "string",
@@ -126,14 +126,14 @@ class ScoreDimensionTool(BaseTool):
             cached = cache[cache_key]
             evi_count = len((cached or {}).get("evidence_scene_ids") or [])
             score = (cached or {}).get("score")
-            level = (cached or {}).get("level")
+            tier = (cached or {}).get("tier")
             if score is None:
                 summary = (
                     f"{dimension}: 证据不足，未给分（{evi_count} 条证据场景，"
                     f"原因：{(cached or {}).get('reason') or '未说明'}） [cached]"
                 )
             else:
-                summary = f"{dimension}: {score}/10 ({level})，{evi_count} 条证据场景 [cached]"
+                summary = f"{dimension}: {score}/10 ({tier})，{evi_count} 条证据场景 [cached]"
             return ToolResult(success=True, data=cached, summary=summary)
 
         from service.script_report_service import score_one_dimension
@@ -157,12 +157,12 @@ class ScoreDimensionTool(BaseTool):
 
         evi_count = len(result.get("evidence_scene_ids") or [])
         score = result.get("score")
-        level = result.get("level")
+        tier = result.get("tier")
         if score is None:
             # rubric §6 证据不足：用户能看见状态，不伪装成成功打分
             summary = f"{dimension}: 证据不足，未给分（{evi_count} 条证据场景，原因：{result.get('reason') or '未说明'}）"
         else:
-            summary = f"{dimension}: {score}/10 ({level})，{evi_count} 条证据场景"
+            summary = f"{dimension}: {score}/10 ({tier})，{evi_count} 条证据场景"
         return ToolResult(success=True, data=result, summary=summary)
 
 
@@ -421,7 +421,7 @@ _REWRITE_PROMPT = """你是中文短剧资深编剧。请基于「整剧上下�
 3. 改写后字数与原文 ±30% 以内
 4. 必须与【后续场次】的剧情走向自洽（例如下场如果该角色出现，本场不能让他死）
 
-维度对应的优化方向（取一即可，不要堆砌；阅文五力 docs/08 §3）：
+维度对应的优化方向（取一即可，不要堆砌；六维 docs/08 §3）：
 - story    : 强化主线推进 / 补一个反转或打脸节点，回应前情已埋的伏笔
 - character: 给关键决策补一段可追溯的因果（用前情人物关系 / 已发生事件做铺垫）
 - concept  : 把题材标识 / 核心卖点的钩子提前到本场前 1/3，删冗余铺垫
@@ -442,7 +442,7 @@ class ProposeRewriteTool(BaseTool):
         super().__init__(
             name="propose_rewrite_tool",
             description=(
-                "对剧本中某一场做定向改写，按指定维度优化（5 维之一）。"
+                "对剧本中某一场做定向改写，按指定维度优化（六维之一）。"
                 "工具内部会自动加载整剧上下文（人物表 + 前后场摘要 + 整剧概要）"
                 "再让 LLM 改写，保证新文本与剧情主线 / 已有人物 / 后续走向自洽。"
                 "返回原文 / 改写版 / unified diff / 改动说明。"

@@ -13,9 +13,6 @@
 - `relationship_candidate_generator` 关系候选生成（共现阈值 + top-K）
 - `v0_business_rule_baseline`  v0 business_* 规则对照基线
 - `risk_terms`         广电六类红线关键词词表
-- `reward_extractor`   extract_reward_events
-- `motivation_chain`   score_motivation_chain
 - `risk_screener`      risk_screening
-- `dimension_scorer`   score_dimension（5 维通用入口）
 - `rewrite_tool`       rewrite_scene（D2-6 实装，预留接口）
 """

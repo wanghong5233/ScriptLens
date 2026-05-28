@@ -13,7 +13,7 @@ from utils.database import engine as default_engine
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run schema-driven tag pipeline for a script.")
     parser.add_argument("--script-id", default="", help="script id (UUID) or exact script title")
-    parser.add_argument("--tag-set", required=True, help="tag set version, e.g. v2.0.0")
+    parser.add_argument("--tag-set", required=True, help="tag set version")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--variant", default="a", choices=["a", "b", "c"])
     return parser.parse_args()

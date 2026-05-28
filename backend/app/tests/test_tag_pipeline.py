@@ -17,31 +17,13 @@ def _bundle(bundle_id: str, scope: str) -> BundleConfig:
 
 
 _BUNDLES_BY_VERSION = {
-    "v0.1.0": [
-        _bundle("v0_drama", "script"),
-        _bundle("v0_plot", "plot_unit"),
-        _bundle("v0_asr", "plot_unit"),
-    ],
-    "v1.0.0": [
-        _bundle("v0_drama", "script"),
-        _bundle("v0_plot", "plot_unit"),
-        _bundle("v0_asr", "plot_unit"),
-        _bundle("v1_script_structure", "script"),
-        _bundle("v1_episode_structure", "episode"),
-        _bundle("v1_character_attrs", "character"),
-        _bundle("v1_relationship", "relationship"),
-        _bundle("v1_plot_unit_tags", "plot_unit"),
-    ],
-    "v2.0.0": [
-        _bundle("v0_drama", "script"),
-        _bundle("v0_plot", "plot_unit"),
-        _bundle("v0_asr", "plot_unit"),
-        _bundle("v1_script_structure", "script"),
-        _bundle("v1_episode_structure", "episode"),
-        _bundle("v1_character_attrs", "character"),
-        _bundle("v1_relationship", "relationship"),
-        _bundle("v1_plot_unit_tags", "plot_unit"),
-        _bundle("v2_storyboard_hints", "plot_unit"),
+    "script": [
+        _bundle("drama_tags", "script"),
+        _bundle("script_structure", "script"),
+        _bundle("plot_core", "plot_unit"),
+        _bundle("episode_structure", "episode"),
+        _bundle("character_attrs", "character"),
+        _bundle("relationship_attrs", "relationship"),
     ],
 }
 
@@ -49,33 +31,16 @@ _BUNDLES_BY_VERSION = {
 @pytest.mark.parametrize(
     ("tag_set_ver", "expected_bundle_runs", "expected_relationship_count"),
     [
-        ("v0.1.0", {"v0_drama": 1, "v0_plot": 2, "v0_asr": 2}, 0),
         (
-            "v1.0.0",
+            "script",
             {
-                "v0_drama": 1,
-                "v0_plot": 2,
-                "v0_asr": 2,
-                "v1_script_structure": 1,
-                "v1_episode_structure": 2,
-                "v1_character_attrs": 2,
-                "v1_relationship": 1,
-                "v1_plot_unit_tags": 2,
-            },
-            1,
-        ),
-        (
-            "v2.0.0",
-            {
-                "v0_drama": 1,
-                "v0_plot": 2,
-                "v0_asr": 2,
-                "v1_script_structure": 1,
-                "v1_episode_structure": 2,
-                "v1_character_attrs": 2,
-                "v1_relationship": 1,
-                "v1_plot_unit_tags": 2,
-                "v2_storyboard_hints": 2,
+                "drama_tags": 1,
+                "script_structure": 1,
+                "plot_core": 2,
+                "episode_structure": 2,
+                "character_attrs": 2,
+                "relationship_attrs": 1,
+                "rule_paid_break_position": 2,
             },
             1,
         ),
@@ -89,6 +54,7 @@ def test_run_tag_pipeline_dispatches_by_bundle_scope(
 ) -> None:
     dispatch_calls: list[tuple[str, str, str]] = []
     prereq_calls: dict[str, int] = {"segment": 0, "resolve": 0, "relationship_seed": 0}
+    rule_calls: list[tuple[str, list[int], str, str]] = []
 
     monkeypatch.setattr(tp, "resolve_script_id", lambda script_ref, engine=None: "sid-1")
 
@@ -116,7 +82,8 @@ def test_run_tag_pipeline_dispatches_by_bundle_scope(
 
     def _fake_relationship_ids(script_id: str, *, tag_set_ver: str, **kwargs):  # noqa: ANN003
         assert script_id == "sid-1"
-        return [] if tag_set_ver == "v0.1.0" else ["rel-1"]
+        assert tag_set_ver == "script"
+        return ["rel-1"]
 
     def _fake_episode_targets(script_id: str, **kwargs):  # noqa: ANN003
         assert script_id == "sid-1"
@@ -126,6 +93,13 @@ def test_run_tag_pipeline_dispatches_by_bundle_scope(
         dispatch_calls.append((bundle_id, target_id, kwargs["tag_set_ver"]))
         return {"__bundle_id": bundle_id}
 
+    def _fake_persist_paid_break_positions_for_episodes(
+        script_id: str,
+        episode_nos: list[int],
+        **kwargs,
+    ) -> None:  # noqa: ANN003
+        rule_calls.append((script_id, episode_nos, kwargs["tag_set_ver"], kwargs["prompt_ver"]))
+
     monkeypatch.setattr(tp, "segment_plot_units", _fake_segment)
     monkeypatch.setattr(tp, "resolve_character_entities", _fake_resolve)
     monkeypatch.setattr(tp, "ensure_relationship_candidates", _fake_seed_relationships)
@@ -134,6 +108,7 @@ def test_run_tag_pipeline_dispatches_by_bundle_scope(
     monkeypatch.setattr(tp, "_episode_targets", _fake_episode_targets)
     monkeypatch.setattr(tp, "list_bundles", lambda ver: list(_BUNDLES_BY_VERSION[ver]))
     monkeypatch.setattr(tp, "extract_bundle", _fake_extract_bundle)
+    monkeypatch.setattr(tp, "persist_paid_break_positions_for_episodes", _fake_persist_paid_break_positions_for_episodes)
 
     async def _run() -> tp.PipelineRunSummary:
         return await tp.run_tag_pipeline(
@@ -155,13 +130,14 @@ def test_run_tag_pipeline_dispatches_by_bundle_scope(
     assert summary.character_entity_count == 2
     assert summary.relationship_count == expected_relationship_count
     assert summary.bundle_runs == expected_bundle_runs
+    assert rule_calls == [("sid-1", [1, 2], "script", "rule:paid_break_position:b")]
 
     expected_scope_targets = {
         "script": ["sid-1"],
         "plot_unit": ["pu-1", "pu-2"],
         "episode": ["sid-1::ep::1", "sid-1::ep::2"],
         "character": ["char-1", "char-2"],
-        "relationship": [] if tag_set_ver == "v0.1.0" else ["rel-1"],
+        "relationship": ["rel-1"],
     }
     expected_pairs = {
         (bundle.id, target)

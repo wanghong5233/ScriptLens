@@ -10,11 +10,11 @@ from service.script_tools.match_config import SharedGate, SharedTagEntry
 
 
 DEFAULT_TARGET_DIMS: tuple[dict[str, str], ...] = (
-    {"dim": "world_setting", "scope": "script", "tag_set_ver": "v1.0.0"},
-    {"dim": "scene_emotion_keynote", "scope": "plot_unit", "tag_set_ver": "v2.0.0"},
-    {"dim": "relationship_polarity", "scope": "relationship", "tag_set_ver": "v1.0.0"},
-    {"dim": "gender_axis", "scope": "script", "tag_set_ver": "v1.0.0"},
-    {"dim": "scene_locale_type", "scope": "plot_unit", "tag_set_ver": "v2.0.0"},
+    {"dim": "world_setting", "scope": "script", "tag_set_ver": "script"},
+    {"dim": "scene_emotion_keynote", "scope": "plot_unit", "tag_set_ver": "script"},
+    {"dim": "relationship_polarity", "scope": "relationship", "tag_set_ver": "script"},
+    {"dim": "gender_axis", "scope": "script", "tag_set_ver": "script"},
+    {"dim": "scene_locale_type", "scope": "plot_unit", "tag_set_ver": "script"},
 )
 
 
@@ -320,4 +320,3 @@ def render_json_deliverable(
     payload["entries"] = rows
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-

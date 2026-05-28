@@ -32,6 +32,7 @@ def test_resolve_tier_by_score_cutoffs() -> None:
     assert good.tier == "good"
     assert weak.tier == "weak"
     assert poor.tier == "poor"
+    assert excellent.cuts == {"p25": 4.0, "p50": 6.0, "p75": 8.0}
 
 
 def test_resolve_tier_low_sample_degrades_confidence() -> None:
@@ -39,6 +40,7 @@ def test_resolve_tier_low_sample_degrades_confidence() -> None:
     result = resolve_tier(rubric, dimension="story", score=8.5, genre_scope="default", sample_size=12)
     assert result.tier == "excellent"
     assert result.confidence == "low"
+    assert result.cuts["p75"] == 8.0
 
 
 def test_resolve_industry_proxy_tier() -> None:

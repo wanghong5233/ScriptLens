@@ -124,7 +124,7 @@ def _flatten(d: Dict[str, List[str]]) -> List[str]:
 
 
 # ============================================================
-# reward 事件关键词（reward_extractor 用，与 risk 同源管理）
+# reward 事件关键词（供风险与评分信号链路复用）
 # ============================================================
 
 REWARD_TERMS: Dict[str, List[str]] = {
@@ -176,7 +176,7 @@ def categorize_reward_term(term: str) -> str | None:
 #
 # 业内对照（抖音文心 / 快手短剧选品 SOP）：「钩子事件」= 让用户在前 30
 # 秒内识别"这是哪个赛道的剧 + 主角处境是不是足够极端"的事件锚点。
-# 信号上对 v1 dimension_scorer 中 _OPENING_CONFLICT_KEYWORDS 与
+# 信号上对历史开场冲突关键词与
 # _CONCEPT_KEYWORDS 两套字面重复词表的合并整理（DRY）。
 #
 # 用法：
@@ -199,8 +199,8 @@ HOOK_KEYWORDS: tuple[str, ...] = (
 # 主流赛道白名单（短剧选品标签）
 #
 # 用途：
-# - score_concept 用此名单判断 coverage_card.genre 是否落到主流赛道
-# - 未来 coverage_chain / agent_runtime 若需做"赛道是否合规"校验可复用
+# - score_concept 可复用此名单判断题材标签是否落到主流赛道
+# - 未来 agent_runtime 若需做"赛道是否合规"校验可复用
 #
 # 来源：抖音 / 快手短剧 2024 选品 SOP 公开摘要 + 阅文短剧合作方分类。
 # 任何模块需扩展赛道时，**改这一处**，不许在调用点写 inline 集合。

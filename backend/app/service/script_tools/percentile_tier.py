@@ -11,6 +11,7 @@ TIER_ORDER = ("insufficient", "poor", "weak", "good", "excellent")
 class TierResult:
     tier: str
     confidence: str
+    cuts: dict[str, float]
 
 
 def _confidence_from_sample(sample_size: int | None) -> str:
@@ -32,7 +33,11 @@ def resolve_tier(
     sample_size: int | None = None,
 ) -> TierResult:
     if score is None:
-        return TierResult(tier="insufficient", confidence="low")
+        return TierResult(
+            tier="insufficient",
+            confidence="low",
+            cuts={"p25": 4.0, "p50": 6.0, "p75": 8.0},
+        )
 
     try:
         scoped_cuts = get_tier_cuts(rubric.rubric_id, genre_scope)
@@ -53,7 +58,11 @@ def resolve_tier(
         tier = "weak"
     else:
         tier = "poor"
-    return TierResult(tier=tier, confidence=_confidence_from_sample(sample_size))
+    return TierResult(
+        tier=tier,
+        confidence=_confidence_from_sample(sample_size),
+        cuts={"p25": p25, "p50": p50, "p75": p75},
+    )
 
 
 def resolve_industry_proxy_tier(

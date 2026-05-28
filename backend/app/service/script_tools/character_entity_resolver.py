@@ -222,7 +222,7 @@ def _persist_entities_sync(
 async def resolve_character_entities(
     script_id: str,
     *,
-    tag_set_ver: str = "v0.1.0",
+    tag_set_ver: str = "script",
     seed: int = 42,
     caller: Optional[LlmCaller] = None,
     persist: bool = True,
@@ -320,4 +320,3 @@ async def resolve_character_entities(
             engine=engine,
         )
     return entities
-

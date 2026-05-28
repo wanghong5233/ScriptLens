@@ -1,7 +1,7 @@
-"""评估层封装：阅文五力评分 + 改写候选（docs/08-evaluation-framework.md）。
+"""评估层封装：六维评分 + 改写候选（docs/08-evaluation-framework.md）。
 
 该模块不重新评分，只把上游评分结果整理成 ReportPayload.evaluation 字段。
-合规审核（compliance）独立成 ReportPayload.compliance 字段，不在五力评分里。
+合规审核（compliance）独立成 ReportPayload.compliance 字段，不在六维评分里。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Dict, List, Optional
 
 
-# 阅文五力 + 短剧场景化文案（详见 docs/08-evaluation-framework.md §3）
+# 六维 + 短剧场景化文案（详见 docs/08-evaluation-framework.md §3）
 _DIM_LABELS = {
     "story": "故事力",
     "character": "人物力",

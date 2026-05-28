@@ -16,6 +16,8 @@ class DimensionScore:
     tier: str = "insufficient"
     primary_dimension: str | None = None
     signal_refs: list[dict[str, Any]] = field(default_factory=list)
+    top_signals: list[dict[str, Any]] = field(default_factory=list)
+    tier_cuts: dict[str, float] = field(default_factory=dict)
     reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -27,6 +29,8 @@ class DimensionScore:
             "coverage_ratio": self.coverage_ratio,
             "primary_dimension": self.primary_dimension,
             "signal_refs": self.signal_refs,
+            "top_signals": self.top_signals,
+            "tier_cuts": self.tier_cuts,
             "reason": self.reason,
         }
 
@@ -37,6 +41,37 @@ def _confidence_label(value: float) -> str:
     if value >= 0.45:
         return "medium"
     return "low"
+
+
+def _build_top_signals(signal_refs: list[dict[str, Any]], *, limit: int = 3) -> list[dict[str, Any]]:
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for ref in signal_refs:
+        score = ref.get("score")
+        weight = ref.get("weight_in_dim")
+        if score is None or weight is None:
+            continue
+        try:
+            score_f = float(score)
+            weight_f = float(weight)
+        except (TypeError, ValueError):
+            continue
+        contribution = score_f * weight_f
+        ranked.append(
+            (
+                contribution,
+                {
+                    "signal_key": ref.get("signal_key"),
+                    "value": ref.get("value"),
+                    "score": score_f,
+                    "weight_in_dim": weight_f,
+                    "source": ref.get("source"),
+                    "confidence": float(ref.get("confidence") or 0.0),
+                    "contribution": round(contribution, 6),
+                },
+            )
+        )
+    ranked.sort(key=lambda item: item[0], reverse=True)
+    return [item[1] for item in ranked[:limit]]
 
 
 def aggregate(
@@ -79,6 +114,7 @@ def aggregate(
                 primary_dimension = dim.id
 
         coverage_ratio = covered_weight / max(total_weight, 1e-9)
+        top_signals = _build_top_signals(signal_refs)
         if coverage_ratio < coverage_threshold:
             out.append(
                 DimensionScore(
@@ -89,6 +125,7 @@ def aggregate(
                     coverage_ratio=round(coverage_ratio, 4),
                     primary_dimension=primary_dimension or dim.id,
                     signal_refs=signal_refs,
+                    top_signals=top_signals,
                     reason=f"coverage_ratio={coverage_ratio:.2f} below threshold {coverage_threshold:.2f}",
                 )
             )
@@ -105,6 +142,7 @@ def aggregate(
                 coverage_ratio=round(coverage_ratio, 4),
                 primary_dimension=primary_dimension or dim.id,
                 signal_refs=signal_refs,
+                top_signals=top_signals,
                 reason=f"{dim.id} weighted aggregation over {len(dim.signals)} signals",
             )
         )

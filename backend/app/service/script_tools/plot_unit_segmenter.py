@@ -276,7 +276,7 @@ def _persist_plot_units_sync(*, script_id: str, units: list[SegmentedPlotUnit], 
 async def segment_plot_units(
     script_id: str,
     *,
-    tag_set_ver: str = "v0.1.0",
+    tag_set_ver: str = "script",
     seed: int = 42,
     variant: str = "a",
     max_plot_units_per_episode: int = 8,
@@ -322,4 +322,3 @@ async def segment_plot_units(
 def dump_segment_result(units: list[SegmentedPlotUnit]) -> str:
     payload = [u.to_dict() for u in units]
     return json.dumps(payload, ensure_ascii=False, indent=2)
-
