@@ -27,7 +27,7 @@ def _resolve_project_root() -> Optional[Path]:
 
 _PROJECT_ROOT = _resolve_project_root()
 _PROJECT_DECISION_DOC = (
-    _PROJECT_ROOT / "docs" / "script_tag_stability_decision_20260527.md"
+    _PROJECT_ROOT / "docs" / "2026-05-28-剧本标签稳定性.md"
     if _PROJECT_ROOT is not None
     else None
 )

@@ -123,60 +123,39 @@ scope:
     - dim: drama_tags
       kind: llm
       cardinality: multi
-      open_enum: true
+      open_enum: false
       stability_state: stable
       values:
-        - 乡村
-        - 亲情
-        - 先婚后爱
-        - 剧情
-        - 历史古代
-        - 古代
+        - 都市言情
+        - 古风言情
         - 古风权谋
+        - 玄幻仙侠
+        - 系统流
+        - 穿越
+        - 重生
+        - 战神归来
+        - 总裁霸总
+        - 家庭伦理
+        - 年代爱情
+        - 校园
+        - 职场
+        - 黑道
+        - 悬疑推理
+        - 先婚后爱
+        - 闪婚
+        - 契约婚姻
+        - 甜宠
+        - 虐恋
+        - 双向奔赴
+        - 女强
+        - 男强
         - 大女主
         - 大男主
-        - 奇幻脑洞
-        - 女强
-        - 女性成长
-        - 女频
-        - 婆媳
-        - 实拍
-        - 家庭伦理
-        - 年代
-        - 年代爱情
-        - 强者回归
-        - 总裁
-        - 恋爱
-        - 悬疑推理
-        - 战神
-        - 战神归来
-        - 打脸虐渣
-        - 无敌神医
-        - 极品亲戚
-        - 架空
-        - 沙雕漫
-        - 玄幻
-        - 玄幻仙侠
-        - 现代
-        - 现代言情
-        - 现言甜宠
-        - 真人AI
-        - 种田
-        - 穿越
-        - 系统
-        - 职场
-        - 脑洞
-        - 豪门恩怨
-        - 赘婿逆袭
-        - 逆袭
-        - 都市
-        - 都市日常
-        - 都市爱情
-        - 都市玄幻
-        - 重生
-        - 闪婚
         - 马甲
-        - 黑道
+        - 神医
+        - 萌宝
+        - 打脸虐渣
+        - 复仇
 
     - dim: gender_axis
       kind: llm
@@ -209,19 +188,14 @@ scope:
       cardinality: single
       stability_state: stable
       values:
+        - reborn_revenge
+        - transmigrator
+        - system_holder
         - war_god_return
         - son_in_law_counter
-        - reborn_revenge
-        - system_holder
-        - transmigrator
         - hidden_heir
         - big_female
         - ceo_dominant
-        - sweet_pet
-        - genius_doctor
-        - weak_to_strong
-        - nanny_disguise
-        - unclear
 
     - dim: antagonist_archetype
       kind: llm
@@ -256,16 +230,12 @@ scope:
       cardinality: single
       stability_state: stable
       values:
-        - three_act_underdog_revenge
-        - rebirth_step_on_old_line
+        - underdog_revenge
+        - romance_arc
         - system_progression
-        - sweet_romance_progression
-        - reunion_after_misunderstanding
-        - crisis_solving
-        - family_reconciliation
+        - crisis_resolving
         - court_struggle
-        - mixed
-        - unclear
+        - family_reconciliation
 
   episode:
     - dim: episode_opening_type
@@ -329,7 +299,7 @@ scope:
       kind: llm
       cardinality: single
       stability_state: stable
-      values: [setup, trigger, escalation, climax, payoff, teaser, none]
+      values: [setup, escalation, climax, payoff]
 
     - dim: relationship_arc
       kind: llm

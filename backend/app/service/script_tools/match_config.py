@@ -22,7 +22,7 @@ class SharedTagEntry:
     tag_set_ver: str
 
 
-# Backfilled from docs/script_tag_stability_decision_20260527.md
+# Backfilled from docs/2026-05-28-剧本标签稳定性.md
 # script-side result: dialogue_density wilson_lower=0.999 (run_id=stage1_full_fast2)
 SHARED_TAG_GATES: tuple[SharedTagEntry, ...] = (
     SharedTagEntry(

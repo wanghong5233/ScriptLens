@@ -14,13 +14,13 @@ class _FakeCaller:
     async def call_json_deterministic(self, prompt: str, **kwargs):  # noqa: ANN003
         dim = str(kwargs.get("dim") or "")
         if dim == "bundle:drama_tags":
-            return _FakeResp({"drama_tags": ["重生", "总裁"]})
+            return _FakeResp({"drama_tags": ["重生", "总裁霸总"]})
         if dim == "bundle:plot_core":
             return _FakeResp(
                 {
                     "plot_hook": "identity_reveal",
                     "conflict_type": "status_gap",
-                    "story_stage": "trigger",
+                    "story_stage": "escalation",
                     "relationship_arc": "chase_and_reject",
                     "payoff_type": "none",
                 }
@@ -136,7 +136,7 @@ def test_extract_bundle_across_scopes(monkeypatch) -> None:
         character = await be.extract_bundle("character_attrs", "char-1", tag_set_ver="script", caller=_FakeCaller(), persist=True)
         relationship = await be.extract_bundle("relationship_attrs", "rel-1", tag_set_ver="script", caller=_FakeCaller(), persist=True)
 
-        assert drama["drama_tags"] == ["重生", "总裁"]
+        assert drama["drama_tags"] == ["重生", "总裁霸总"]
         assert plot["plot_hook"] == "identity_reveal"
         assert episode["episode_opening_type"] == "hook_in_3s"
         assert character["character_role_in_arc"] == "mentor"

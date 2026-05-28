@@ -2,15 +2,38 @@
 你是网文/短剧结构分析标注员。请对整部剧输出结构化标签。
 
 规则：
-1. 所有维度均为 single，必须输出 1 个值。
-2. 只能从候选枚举中选择，证据不足时用 `unclear` 或 `none`。
-3. 优先依据“已发生剧情”，不要按未来推测。
-4. 输出必须是 JSON object，键名必须与维度名一致。
+1. 所有维度均为 single，**必须**输出 1 个值；候选集已闭合，不允许输出枚举外的值。
+2. 优先依据"已发生剧情"，不要按未来推测。
+3. 输出必须是 JSON object，键名必须与维度名一致。
+
+## `protagonist_archetype` 决策树（按顺序判，命中即停）
+
+1. 主角是否**重生**（带前世记忆/重回过去）？→ `reborn_revenge`
+2. 主角是否**穿越**（跨时空/穿到异世）？→ `transmigrator`
+3. 主角是否**绑定系统**（系统任务/面板加点）？→ `system_holder`
+4. 主角是否**强者退役/回归**（隐世高手/退役战神/扫地僧）？→ `war_god_return`
+5. 主角是否**入赘/被欺凌后翻身**（赘婿、上门女婿、入赘逆袭）？→ `son_in_law_counter`
+6. 主角是否**隐藏豪门/皇族身份**（隐藏继承人）？→ `hidden_heir`
+7. 主角为**女性，独立成长/复仇/翻盘**（大女主/女强）？→ `big_female`
+8. 否则 → `ceo_dominant`（默认归为霸总/总裁系/豪门男主）
+
+## `story_arc_template` 6 选 1 互斥定义
+
+- `underdog_revenge`：弱起手 → 隐忍 → 爆发 → 反杀（吸收赘婿/战神/重生踩线）
+- `romance_arc`：以爱情为主轴的递进/拉扯/重聚（甜宠/虐恋/先婚后爱/误会重聚都属于此）
+- `system_progression`：靠系统/穿越/重生外挂任务驱动主线
+- `crisis_resolving`：连续危机 → 化解 → 新危机（救援/生死/逃亡为主线）
+- `court_struggle`：朝堂/宫斗/古风权谋斗争为主线
+- `family_reconciliation`：家庭矛盾化解为主线（母女/父子/婆媳和解）
+
+## `gender_axis` / `world_setting` / `pacing_mode` / `paid_break_pattern` / `antagonist_archetype`
+
+按枚举语义直接判定，与上面字段语义保持一致（如 `protagonist_archetype=reborn_revenge` 时 `world_setting` 可能是 `rebirth`）。
 
 {% if variant == "b" %}
-补充：优先判断 `world_setting`、`protagonist_archetype`、`pacing_mode`，再判其余维度。
+补充：先判 `gender_axis` 与 `world_setting`，再用其约束 `protagonist_archetype`。
 {% elif variant == "c" %}
-补充：若存在多套路并行且无法确定主导套路，使用 `mixed`。
+补充：若多个决策树规则都疑似命中，按上文顺序取**第一条**命中，不要回头修改。
 {% endif %}
 
 本次维度清单：
