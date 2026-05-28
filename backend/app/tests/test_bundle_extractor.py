@@ -1,8 +1,7 @@
 import asyncio
 
 from service.script_tools import bundle_extractor as be
-from service.script_tools.v0_extractor_common import PlotUnitContext
-from service.script_tools.v1_extractor_common import CharacterContext, EpisodeContext, RelationshipContext
+from service.script_tools.extractor_common import CharacterContext, EpisodeContext, PlotUnitContext, RelationshipContext
 
 
 class _FakeResp:
@@ -14,9 +13,9 @@ class _FakeResp:
 class _FakeCaller:
     async def call_json_deterministic(self, prompt: str, **kwargs):  # noqa: ANN003
         dim = str(kwargs.get("dim") or "")
-        if dim == "bundle:v0_drama":
+        if dim == "bundle:drama_tags":
             return _FakeResp({"drama_tags": ["重生", "总裁"]})
-        if dim == "bundle:v0_plot":
+        if dim == "bundle:plot_core":
             return _FakeResp(
                 {
                     "plot_hook": "identity_reveal",
@@ -24,14 +23,9 @@ class _FakeCaller:
                     "story_stage": "trigger",
                     "relationship_arc": "chase_and_reject",
                     "payoff_type": "none",
-                    "emotional_driver": "humiliation",
-                    "business_content_archetype": "relationship_payoff",
-                    "business_conflict_bucket": "relationship_power",
-                    "business_payoff_bucket": "none",
-                    "business_emotion_bucket": "anger_humiliation",
                 }
             )
-        if dim == "bundle:v1_episode_structure":
+        if dim == "bundle:episode_structure":
             return _FakeResp(
                 {
                     "episode_opening_type": "hook_in_3s",
@@ -40,7 +34,7 @@ class _FakeCaller:
                     "paid_break_position": "ep_end",
                 }
             )
-        if dim == "bundle:v1_character_attrs":
+        if dim == "bundle:character_attrs":
             return _FakeResp(
                 {
                     "character_archetype": "mentor_elder",
@@ -49,7 +43,7 @@ class _FakeCaller:
                     "character_agency_level": "medium",
                 }
             )
-        if dim == "bundle:v1_relationship":
+        if dim == "bundle:relationship_attrs":
             return _FakeResp(
                 {
                     "relationship_type": "mentor",
@@ -130,17 +124,17 @@ def test_extract_bundle_across_scopes(monkeypatch) -> None:
     monkeypatch.setattr(be, "_persist_relationship_values", lambda **kwargs: relationship_saved.update({"dims": kwargs["values"]}))
 
     async def _run() -> None:
-        drama = await be.extract_bundle("v0_drama", "sid-1", tag_set_ver="v0.1.0", caller=_FakeCaller(), persist=True)
-        plot = await be.extract_bundle("v0_plot", "sid-1::plot::1", tag_set_ver="v0.1.0", caller=_FakeCaller(), persist=True)
+        drama = await be.extract_bundle("drama_tags", "sid-1", tag_set_ver="script", caller=_FakeCaller(), persist=True)
+        plot = await be.extract_bundle("plot_core", "sid-1::plot::1", tag_set_ver="script", caller=_FakeCaller(), persist=True)
         episode = await be.extract_bundle(
-            "v1_episode_structure",
+            "episode_structure",
             "sid-1::ep::1",
-            tag_set_ver="v1.0.0",
+            tag_set_ver="script",
             caller=_FakeCaller(),
             persist=True,
         )
-        character = await be.extract_bundle("v1_character_attrs", "char-1", tag_set_ver="v1.0.0", caller=_FakeCaller(), persist=True)
-        relationship = await be.extract_bundle("v1_relationship", "rel-1", tag_set_ver="v1.0.0", caller=_FakeCaller(), persist=True)
+        character = await be.extract_bundle("character_attrs", "char-1", tag_set_ver="script", caller=_FakeCaller(), persist=True)
+        relationship = await be.extract_bundle("relationship_attrs", "rel-1", tag_set_ver="script", caller=_FakeCaller(), persist=True)
 
         assert drama["drama_tags"] == ["重生", "总裁"]
         assert plot["plot_hook"] == "identity_reveal"

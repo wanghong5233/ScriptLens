@@ -2,12 +2,35 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import shutil
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[4]
-_PROJECT_DECISION_DOC = _PROJECT_ROOT / "docs" / "script_tag_stability_decision_20260527.md"
+
+def _resolve_project_root() -> Optional[Path]:
+    """定位 dcccloud 项目根（含 docs/ + ScriptLens/）。
+
+    宿主机 parents[4] 恰好是 dcccloud，容器内 parents[4] IndexError；
+    用 marker 扫描 + env override 兜底。找不到时返回 None，让 caller 跳过 docs 副本，
+    而不是 import-time 炸。
+    """
+    env_root = os.getenv("SCRIPTLENS_PROJECT_ROOT")
+    if env_root:
+        return Path(env_root)
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / "docs").is_dir() and (parent / "ScriptLens").is_dir():
+            return parent
+    return None
+
+
+_PROJECT_ROOT = _resolve_project_root()
+_PROJECT_DECISION_DOC = (
+    _PROJECT_ROOT / "docs" / "script_tag_stability_decision_20260527.md"
+    if _PROJECT_ROOT is not None
+    else None
+)
 
 
 def _bucket_from_wilson(wilson_lower: float) -> str:
@@ -29,9 +52,12 @@ def _load_json(path: Path, default: Any) -> Any:
 def _build_markdown(
     *,
     manifest: dict[str, Any],
-    layer_a_rows: list[dict[str, Any]],
-    layer_b_rows: list[dict[str, Any]],
+    segmentation_rows: list[dict[str, Any]],
+    tag_value_rows: list[dict[str, Any]],
 ) -> str:
+    active_rows = [row for row in tag_value_rows if str(row.get("verdict") or "") != "reference"]
+    reference_rows = [row for row in tag_value_rows if str(row.get("verdict") or "") == "reference"]
+
     lines: list[str] = [
         "# 剧本标签稳定性决策",
         "",
@@ -55,7 +81,7 @@ def _build_markdown(
         "| script_id | unit_count_cv | window_diff_mean | boundary_similarity_mean | verdict |",
         "| --- | ---: | ---: | ---: | --- |",
     ]
-    for row in sorted(layer_a_rows, key=lambda item: str(item.get("script_id", ""))):
+    for row in sorted(segmentation_rows, key=lambda item: str(item.get("script_id", ""))):
         lines.append(
             f"| `{row.get('script_id', '')}` | {float(row.get('unit_count_cv', 0.0)):.3f} | "
             f"{float(row.get('window_diff_mean', 0.0)):.3f} | {float(row.get('boundary_similarity_mean', 0.0)):.3f} | "
@@ -67,8 +93,8 @@ def _build_markdown(
             "",
             "## 4. 第二层结论按字段",
             "",
-            "| 字段 | avg agreement | stable | Wilson 95% lower | 决策桶 |",
-            "| --- | ---: | ---: | ---: | --- |",
+            "| 字段 | eval_kind | avg agreement | stable | Wilson 95% lower | 决策桶 |",
+            "| --- | --- | ---: | ---: | ---: | --- |",
         ]
     )
     bucket_to_dims: dict[str, list[str]] = {
@@ -77,8 +103,9 @@ def _build_markdown(
         "需要收紧 prompt 后复测": [],
         "暂不进共享内核": [],
     }
-    for row in sorted(layer_b_rows, key=lambda item: str(item.get("dim", ""))):
+    for row in sorted(active_rows, key=lambda item: str(item.get("dim", ""))):
         dim = str(row.get("dim", ""))
+        eval_kind = str(row.get("eval_kind") or "exact_match")
         n_samples = int(row.get("n_samples", 0) or 0)
         stable_count = int(row.get("stable_count", 0) or 0)
         wilson_lower = float(row.get("wilson_lower", 0.0) or 0.0)
@@ -86,8 +113,29 @@ def _build_markdown(
         bucket_to_dims.setdefault(bucket, []).append(dim)
         stable = f"{stable_count}/{n_samples}" if n_samples > 0 else "0/0"
         lines.append(
-            f"| `{dim}` | {float(row.get('par', 0.0)):.3f} | {stable} | {wilson_lower:.3f} | {bucket} |"
+            f"| `{dim}` | `{eval_kind}` | {float(row.get('par', 0.0)):.3f} | {stable} | {wilson_lower:.3f} | {bucket} |"
         )
+
+    if reference_rows:
+        lines.extend(
+            [
+                "",
+                "## 4.1 参考输出字段（参与抽取，不参与稳定性分桶）",
+                "",
+                "| 字段 | eval_kind | avg agreement | stable | Wilson 95% lower |",
+                "| --- | --- | ---: | ---: | ---: |",
+            ]
+        )
+        for row in sorted(reference_rows, key=lambda item: str(item.get("dim", ""))):
+            dim = str(row.get("dim", ""))
+            eval_kind = str(row.get("eval_kind") or "exact_match")
+            n_samples = int(row.get("n_samples", 0) or 0)
+            stable_count = int(row.get("stable_count", 0) or 0)
+            wilson_lower = float(row.get("wilson_lower", 0.0) or 0.0)
+            stable = f"{stable_count}/{n_samples}" if n_samples > 0 else "0/0"
+            lines.append(
+                f"| `{dim}` | `{eval_kind}` | {float(row.get('par', 0.0)):.3f} | {stable} | {wilson_lower:.3f} |"
+            )
 
     lines.extend(["", "## 5. 4 桶分组列表", ""])
     for bucket in [
@@ -111,7 +159,7 @@ def _build_markdown(
             "",
         ]
     )
-    unstable_dims = [str(row.get("dim", "")) for row in layer_b_rows if row.get("verdict") in {"offline", "fix"}]
+    unstable_dims = [str(row.get("dim", "")) for row in active_rows if row.get("verdict") in {"offline", "fix"}]
     if unstable_dims:
         lines.append(f"- 漂移主要集中在：{', '.join(f'`{dim}`' for dim in unstable_dims)}。")
         lines.append("- 修复顺序建议：先收紧定义边界（枚举互斥条件），再复测 Wilson 下界。")
@@ -124,30 +172,34 @@ def _build_markdown(
 def generate_script_tag_stability_decision(*, run_dir: Path) -> dict[str, str]:
     run_dir = run_dir.resolve()
     manifest = _load_json(run_dir / "manifest.json", {})
-    layer_a_rows = _load_json(run_dir / "aggregated" / "layer_a.json", [])
-    layer_b_rows: list[dict[str, Any]] = []
-    layer_b_dir = run_dir / "aggregated" / "layer_b"
-    if layer_b_dir.exists():
-        for path in sorted(layer_b_dir.glob("*.json")):
+    segmentation_rows = _load_json(run_dir / "aggregated" / "segmentation.json", [])
+    tag_value_rows: list[dict[str, Any]] = []
+    tag_value_dir = run_dir / "aggregated" / "tag_value"
+    if tag_value_dir.exists():
+        for path in sorted(tag_value_dir.glob("*.json")):
             payload = _load_json(path, {})
             if isinstance(payload, dict):
                 payload.setdefault("dim", path.stem)
-                layer_b_rows.append(payload)
+                tag_value_rows.append(payload)
 
     markdown = _build_markdown(
         manifest=manifest if isinstance(manifest, dict) else {},
-        layer_a_rows=layer_a_rows if isinstance(layer_a_rows, list) else [],
-        layer_b_rows=layer_b_rows,
+        segmentation_rows=segmentation_rows if isinstance(segmentation_rows, list) else [],
+        tag_value_rows=tag_value_rows,
     )
     run_decision_path = run_dir / "decision.md"
     run_decision_path.parent.mkdir(parents=True, exist_ok=True)
     run_decision_path.write_text(markdown, encoding="utf-8")
 
-    _PROJECT_DECISION_DOC.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(run_decision_path, _PROJECT_DECISION_DOC)
+    if _PROJECT_DECISION_DOC is not None:
+        _PROJECT_DECISION_DOC.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(run_decision_path, _PROJECT_DECISION_DOC)
+        project_path = str(_PROJECT_DECISION_DOC)
+    else:
+        project_path = ""
     return {
         "run_decision_md": str(run_decision_path),
-        "project_decision_md": str(_PROJECT_DECISION_DOC),
+        "project_decision_md": project_path,
     }
 
 

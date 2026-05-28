@@ -15,13 +15,13 @@ from service.script_report_service import _build_report_payload, ensure_v1_tags_
 from service.script_tools.compliance_scorer import screen_compliance
 from service.script_tools.decision_aggregator import decide
 from service.script_tools.dimension_aggregator import aggregate
+from service.script_tools.extractor_common import resolve_script_id
 from service.script_tools.genre_weights import apply_genre_weights, infer_genre_scope
 from service.script_tools.improvement_action_generator import generate_actions
 from service.script_tools.llm_caller import LlmCaller
 from service.script_tools.pacing_aggregator import aggregate_pacing_curve_v3
 from service.script_tools.percentile_tier import resolve_tier
 from service.script_tools.signal_catalog import build_signal_context, compute_signals
-from service.script_tools.v0_extractor_common import resolve_script_id
 from utils.database import engine as default_engine
 
 

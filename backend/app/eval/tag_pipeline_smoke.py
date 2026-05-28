@@ -7,7 +7,7 @@ import json
 from sqlalchemy import text
 
 from service.script_tools.tag_pipeline import run_tag_pipeline
-from service.script_tools.v0_extractor_common import resolve_script_id
+from service.script_tools.extractor_common import resolve_script_id
 from utils.database import engine as default_engine
 
 

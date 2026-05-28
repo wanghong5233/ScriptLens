@@ -14,6 +14,7 @@ _TAG_SET_DIR = _REGISTRY_ROOT / "tag_sets"
 class DimConfig:
     scope: str
     dim: str
+    kind: str = "llm"  # llm | rule | reference
     cardinality: str = "single"
     open_enum: bool = False
     stability_state: str = "experimental"
@@ -87,92 +88,40 @@ def _read_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _merge_scope(base_scope: dict[str, list[dict[str, Any]]], cur_scope: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
-    merged = {scope: [dict(x) for x in dims] for scope, dims in base_scope.items()}
-    for scope, dims in (cur_scope or {}).items():
-        if not isinstance(dims, list):
-            raise ValueError(f"scope[{scope}] must be list")
-        existing = {d.get("dim"): i for i, d in enumerate(merged.get(scope, []))}
-        out = merged.get(scope, [])
-        for dim_cfg in dims:
-            if not isinstance(dim_cfg, dict) or "dim" not in dim_cfg:
-                raise ValueError(f"invalid dim config under scope={scope}: {dim_cfg!r}")
-            key = dim_cfg["dim"]
-            if key in existing:
-                out[existing[key]] = dict(dim_cfg)
-            else:
-                out.append(dict(dim_cfg))
-        merged[scope] = out
-    return merged
-
-
-def _merge_bundles(base: list[dict[str, Any]], cur: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: list[dict[str, Any]] = [dict(x) for x in base]
-    by_id = {str(item.get("id")): idx for idx, item in enumerate(merged) if item.get("id")}
-    for item in cur:
-        if not isinstance(item, dict):
-            raise ValueError(f"invalid bundle config: {item!r}")
-        bid = str(item.get("id") or "").strip()
-        if not bid:
-            raise ValueError(f"bundle.id is required: {item!r}")
-        if bid in by_id:
-            merged[by_id[bid]] = dict(item)
-        else:
-            by_id[bid] = len(merged)
-            merged.append(dict(item))
-    return merged
-
-
-def _load_raw_tag_set(version: str, seen: set[str] | None = None) -> dict[str, Any]:
-    seen = seen or set()
-    if version in seen:
-        raise ValueError(f"cyclic tag set extends: {version}")
-    seen.add(version)
-
-    cur = _read_yaml(_TAG_SET_DIR / f"{version.split('.')[0]}.yaml")
-    cur_ver = str(cur.get("version") or "").strip()
-    if cur_ver != version:
-        raise ValueError(f"tag set version mismatch: file={cur_ver!r} expected={version!r}")
-
-    base_scope: dict[str, list[dict[str, Any]]] = {}
-    base_bundles: list[dict[str, Any]] = []
-    base_desc = ""
-    base_prompt_ver = ""
-    base_breaking = False
-
-    extends = cur.get("extends")
-    if extends:
-        base = _load_raw_tag_set(str(extends), seen)
-        base_scope = base["scope"]
-        base_bundles = base.get("bundles", [])
-        base_desc = base.get("description", "")
-        base_prompt_ver = base.get("prompt_ver", "")
-        base_breaking = bool(base.get("breaking", False))
-
-    merged_scope = _merge_scope(base_scope, cur.get("scope") or {})
-    merged_bundles = _merge_bundles(base_bundles, list(cur.get("bundles") or []))
-    return {
-        "version": version,
-        "description": cur.get("description") or base_desc or "",
-        "prompt_ver": cur.get("prompt_ver") or base_prompt_ver or version,
-        "breaking": bool(cur.get("breaking", base_breaking)),
-        "scope": merged_scope,
-        "bundles": merged_bundles,
-    }
+def _load_raw_tag_set(version: str) -> dict[str, Any]:
+    tag_set_file = _TAG_SET_DIR / f"{version.split('.')[0]}.yaml"
+    raw = _read_yaml(tag_set_file)
+    file_version = str(raw.get("version") or "").strip()
+    if file_version != version:
+        raise ValueError(f"tag set version mismatch: file={file_version!r} expected={version!r}")
+    if raw.get("extends"):
+        raise ValueError(
+            f"legacy extends chain is no longer supported for tag_set={version!r}; "
+            "use a single-file tag set definition"
+        )
+    return raw
 
 
 @lru_cache(maxsize=8)
 def load_tag_set(tag_set_ver: str) -> TagSetConfig:
     raw = _load_raw_tag_set(tag_set_ver)
     scope_to_dims: dict[str, tuple[DimConfig, ...]] = {}
-    for scope, dims in raw["scope"].items():
+    scope_raw = raw.get("scope") or {}
+    if not isinstance(scope_raw, dict):
+        raise ValueError(f"invalid scope config in tag_set={tag_set_ver}")
+    for scope, dims in scope_raw.items():
+        if not isinstance(dims, list):
+            raise ValueError(f"scope[{scope!r}] must be list in tag_set={tag_set_ver}")
         items: list[DimConfig] = []
         for dim_cfg in dims:
+            if not isinstance(dim_cfg, dict) or "dim" not in dim_cfg:
+                raise ValueError(f"invalid dim config under scope={scope}: {dim_cfg!r}")
             values = tuple(str(v) for v in (dim_cfg.get("values") or []))
             items.append(
                 DimConfig(
                     scope=scope,
                     dim=str(dim_cfg["dim"]),
+                    kind=str(dim_cfg.get("kind") or "llm"),
                     cardinality=str(dim_cfg.get("cardinality") or "single"),
                     open_enum=bool(dim_cfg.get("open_enum", False)),
                     stability_state=str(dim_cfg.get("stability_state") or "experimental"),
@@ -183,7 +132,12 @@ def load_tag_set(tag_set_ver: str) -> TagSetConfig:
 
     bundles: list[BundleConfig] = []
     dim_to_bundle_id: dict[str, str] = {}
-    for bundle_cfg in raw.get("bundles") or []:
+    bundles_raw = raw.get("bundles") or []
+    if not isinstance(bundles_raw, list):
+        raise ValueError(f"invalid bundles config in tag_set={tag_set_ver}")
+    for bundle_cfg in bundles_raw:
+        if not isinstance(bundle_cfg, dict):
+            raise ValueError(f"invalid bundle config: {bundle_cfg!r}")
         scope = str(bundle_cfg.get("scope") or "").strip()
         if scope not in scope_to_dims:
             raise ValueError(f"bundle scope={scope!r} not found in tag_set={tag_set_ver}")
@@ -248,6 +202,8 @@ def load_prompt(tag_set_ver: str, dim: str) -> str:
     cfg = load_tag_set(tag_set_ver)
     cfg.get_dim(dim)
     bundle = cfg.find_bundle_for_dim(dim)
+    if not bundle.prompt:
+        raise ValueError(f"bundle {bundle.id!r} has empty prompt path")
     path = _resolve_prompt_path(bundle.prompt)
     with path.open("r", encoding="utf-8") as f:
         return f.read()
@@ -256,6 +212,8 @@ def load_prompt(tag_set_ver: str, dim: str) -> str:
 def load_prompt_by_bundle(tag_set_ver: str, bundle_id: str) -> str:
     cfg = load_tag_set(tag_set_ver)
     bundle = cfg.get_bundle(bundle_id)
+    if not bundle.prompt:
+        raise ValueError(f"bundle {bundle.id!r} has empty prompt path")
     path = _resolve_prompt_path(bundle.prompt)
     with path.open("r", encoding="utf-8") as f:
         return f.read()

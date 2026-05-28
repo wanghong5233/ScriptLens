@@ -11,7 +11,7 @@ from typing import Any, Awaitable, Callable
 from sqlalchemy import text
 
 from eval.stability.experiment_dir import ExperimentDir
-from service.tag_registry.loader import get_prompt_ver
+from service.tag_registry.loader import get_prompt_ver, load_bundle
 from utils.database import engine as default_engine
 
 ExtractorFn = Callable[..., Awaitable[dict[str, Any]]]
@@ -41,6 +41,15 @@ class StabilityTask:
     tag_set_ver: str
     dim: str
     scope: str
+    targets: list[str]
+
+
+@dataclass
+class BundleStabilityTask:
+    tag_set_ver: str
+    bundle_id: str
+    scope: str
+    dims: list[str]
     targets: list[str]
 
 
@@ -196,7 +205,7 @@ async def _run_once(
             finished_at=time.perf_counter(),
         )
         if exp_dir is not None:
-            exp_dir.append_layer_b_raw(
+            exp_dir.append_tag_value_raw(
                 script_id,
                 task.scope,
                 task.dim,
@@ -250,9 +259,9 @@ async def run_intra_pss(
     for rep in range(n_repeats):
         trace = RunTrace(run_type="intra", run_key=f"rep:{rep}")
         for script_id, target_ids in script_to_targets.items():
-            existing = exp_dir.layer_b_value_map(script_id, task.scope, task.dim, rep) if exp_dir is not None else {}
+            existing = exp_dir.tag_value_map(script_id, task.scope, task.dim, rep) if exp_dir is not None else {}
             rep_done = (
-                exp_dir.is_layer_b_done(
+                exp_dir.is_tag_value_done(
                     script_id,
                     task.scope,
                     task.dim,
@@ -317,3 +326,136 @@ async def run_full(task: StabilityTask) -> RunResult:
     intra = await run_intra_pss(task, seed=42, n_repeats=5, exp_dir=None, use_cache=False)
     inter = await run_inter_pss(task, seed=42, use_cache=False)
     return RunResult(task=task, intra_runs=intra.intra_runs, inter_runs=inter.inter_runs)
+
+
+async def run_bundle_stability(
+    task: BundleStabilityTask,
+    *,
+    seed: int = 42,
+    n_repeats: int = 5,
+    exp_dir: ExperimentDir | None = None,
+    use_cache: bool = False,
+) -> dict[str, RunResult]:
+    """Run one bundle stability with single-call extraction per target/rep.
+
+    Returns per-dim RunResult so downstream aggregate() can stay dim-oriented.
+    """
+    if not task.dims:
+        return {}
+    extractor = ExtractorRegistry.get(task.tag_set_ver, task.scope)
+    bundle = load_bundle(task.tag_set_ver, task.bundle_id)
+    if not bundle.dims:
+        return {}
+    # extract_by_scope resolves bundle by dim from prompt_ver;
+    # we pass the first dim's prompt_ver so one call returns all bundle dims.
+    bundle_dim_for_prompt = bundle.dims[0]
+
+    results: dict[str, RunResult] = {
+        dim: RunResult(task=StabilityTask(task.tag_set_ver, dim, task.scope, list(task.targets)))
+        for dim in task.dims
+    }
+
+    script_to_targets: dict[str, list[str]] = {}
+    for target_id in task.targets:
+        script_id = _target_script_id(task.scope, target_id)
+        script_to_targets.setdefault(script_id, []).append(target_id)
+
+    for rep in range(n_repeats):
+        traces_by_dim = {
+            dim: RunTrace(run_type="intra", run_key=f"rep:{rep}", target_values={})
+            for dim in task.dims
+        }
+        for script_id, target_ids in script_to_targets.items():
+            existing_by_dim = {
+                dim: (exp_dir.tag_value_map(script_id, task.scope, dim, rep) if exp_dir is not None else {})
+                for dim in task.dims
+            }
+            for target_id in target_ids:
+                if all(target_id in existing_by_dim[dim] for dim in task.dims):
+                    for dim in task.dims:
+                        traces_by_dim[dim].target_values[target_id] = str(existing_by_dim[dim][target_id])
+                    continue
+
+                prompt_ver = get_prompt_ver(task.tag_set_ver, bundle_dim_for_prompt, variant="a")
+                started = time.perf_counter()
+                input_hash = _hash_payload(
+                    {
+                        "target_id": target_id,
+                        "tag_set_ver": task.tag_set_ver,
+                        "bundle_id": task.bundle_id,
+                        "seed": seed,
+                        "variant": "a",
+                        "prompt_ver": prompt_ver,
+                    }
+                )
+                try:
+                    try:
+                        payload = await extractor(
+                            target_id, task.tag_set_ver, prompt_ver, seed, "a", use_cache=use_cache
+                        )
+                    except TypeError:
+                        payload = await extractor(target_id, task.tag_set_ver, prompt_ver, seed, "a")
+                except Exception as exc:
+                    elapsed_ms = int((time.perf_counter() - started) * 1000)
+                    for dim in task.dims:
+                        dim_prompt_ver = get_prompt_ver(task.tag_set_ver, dim, variant="a")
+                        await asyncio.to_thread(
+                            _persist_run,
+                            task=StabilityTask(task.tag_set_ver, dim, task.scope, []),
+                            scope_id=target_id,
+                            prompt_ver=dim_prompt_ver,
+                            model_ver="unknown",
+                            seed=seed,
+                            input_hash=input_hash,
+                            output_hash=None,
+                            status="failed",
+                            error=f"{type(exc).__name__}: {exc}",
+                            metrics={"elapsed_ms": elapsed_ms, "variant": "a", "rep": rep, "bundle_id": task.bundle_id},
+                            started_at=started,
+                            finished_at=time.perf_counter(),
+                        )
+                    raise
+
+                elapsed_ms = int((time.perf_counter() - started) * 1000)
+                model_ver = str(payload.get("__model_ver", "unknown"))
+                for dim in task.dims:
+                    value = str(payload.get(dim, ""))
+                    traces_by_dim[dim].target_values[target_id] = value
+                    dim_prompt_ver = get_prompt_ver(task.tag_set_ver, dim, variant="a")
+                    output_hash = _hash_payload({"value": value})
+                    await asyncio.to_thread(
+                        _persist_run,
+                        task=StabilityTask(task.tag_set_ver, dim, task.scope, []),
+                        scope_id=target_id,
+                        prompt_ver=dim_prompt_ver,
+                        model_ver=model_ver,
+                        seed=seed,
+                        input_hash=input_hash,
+                        output_hash=output_hash,
+                        status="success",
+                        error=None,
+                        metrics={"elapsed_ms": elapsed_ms, "variant": "a", "rep": rep, "bundle_id": task.bundle_id},
+                        started_at=started,
+                        finished_at=time.perf_counter(),
+                    )
+                    if exp_dir is not None:
+                        exp_dir.append_tag_value_raw(
+                            script_id,
+                            task.scope,
+                            dim,
+                            rep,
+                            target_id,
+                            value,
+                            {
+                                "model_ver": model_ver,
+                                "elapsed_ms": elapsed_ms,
+                                "seed": seed,
+                                "prompt_ver": dim_prompt_ver,
+                                "bundle_id": task.bundle_id,
+                            },
+                        )
+
+        for dim, trace in traces_by_dim.items():
+            results[dim].intra_runs.append(trace)
+
+    return results

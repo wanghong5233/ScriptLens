@@ -1,0 +1,25 @@
+{# prompt_ver: script/relationship_attrs #}
+你是短剧关系分析标注员。请对角色关系对输出关系标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只能从候选枚举中选择。
+3. 只根据给定关系证据，不做跨剧情猜测。
+4. 输出必须是 JSON object，键名必须与维度名一致。
+
+{% if variant == "b" %}
+补充：`relationship_dynamic_arc` 关注跨段主导演化，不看单句波动。
+{% elif variant == "c" %}
+补充：`relationship_triangle` 仅在明确三角/多角关系成立时标注，默认 `none`。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+关系证据：
+{{ relationship_text }}

@@ -1,0 +1,27 @@
+{# prompt_ver: script/plot_emotion #}
+你是中文短剧情绪驱动标注员。请对单个 plot_unit 输出情绪驱动标签。
+
+规则：
+1. `emotional_driver` 为 multi，输出数组，最多 3 个值。
+2. 优先选择“驱动剧情动作”的情绪，不是所有出现过的情绪词。
+3. 只能从候选枚举中选择。
+4. 当没有明确情绪驱动时输出 `["none"]`。
+5. 如果输出了除 `none` 之外的标签，不能同时输出 `none`。
+6. 输出必须是 JSON object，键名必须与维度名一致。
+
+{% if variant == "b" %}
+补充：同义情绪只保留更核心的上位标签，避免冗余。
+{% elif variant == "c" %}
+补充：若存在主次情绪，按主导强度排序输出（最强在前）。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+plot_unit 文本：
+{{ plot_unit_text }}

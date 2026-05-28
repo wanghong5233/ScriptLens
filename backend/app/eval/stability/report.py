@@ -9,18 +9,22 @@ from eval.stability.metrics import (
     cohen_kappa_mean,
     confusion_matrix_dict,
     cosine_similarity_enum,
+    jaccard_stable_count_and_wilson,
     krippendorff_alpha,
     macro_f1_against_gold,
     majority_vote,
     pairwise_agreement_rate,
+    pairwise_jaccard,
     stable_count_and_wilson,
 )
 from eval.stability.runner import RunResult
+from service.tag_registry import load_tag_set
 
 
 @dataclass
 class DimStabilityReport:
     dim: str
+    eval_kind: str  # exact_match | jaccard
     intra_alpha: float
     inter_alpha: float
     kappa_mean: float
@@ -66,13 +70,20 @@ def aggregate(
     for dim, rr in run_results.items():
         intra = rr.matrix("intra")
         inter = rr.matrix("inter")
+        dim_cfg = load_tag_set(rr.task.tag_set_ver).get_dim(dim)
 
         intra_alpha = krippendorff_alpha(intra)
         inter_alpha = krippendorff_alpha(inter) if inter else intra_alpha
         kappa = cohen_kappa_mean(intra)
-        par = pairwise_agreement_rate(intra)
+        if dim_cfg.cardinality == "multi":
+            eval_kind = "jaccard"
+            par = pairwise_jaccard(intra)
+            n_samples, stable_count, wilson_lower = jaccard_stable_count_and_wilson(intra, threshold=0.7)
+        else:
+            eval_kind = "exact_match"
+            par = pairwise_agreement_rate(intra)
+            n_samples, stable_count, wilson_lower = stable_count_and_wilson(intra)
         cosine = cosine_similarity_enum(intra)
-        n_samples, stable_count, wilson_lower = stable_count_and_wilson(intra)
 
         mv = majority_vote(intra)
         gold_vec = gold.get(dim)
@@ -84,6 +95,7 @@ def aggregate(
 
         reports[dim] = DimStabilityReport(
             dim=dim,
+            eval_kind=eval_kind,
             intra_alpha=intra_alpha,
             inter_alpha=inter_alpha,
             kappa_mean=kappa,
@@ -93,7 +105,7 @@ def aggregate(
             wilson_lower=wilson_lower,
             cosine=cosine,
             macro_f1=macro_f1,
-            verdict=_verdict(intra_alpha, inter_alpha, kappa, par),
+            verdict="reference" if dim_cfg.kind == "reference" else _verdict(intra_alpha, inter_alpha, kappa, par),
             unstable_values=_unstable_values(intra),
             genre_sensitive=[],
             confusion=confusion,
@@ -114,15 +126,15 @@ def write_markdown(
     lines = [
         f"# Stability Report ({tag_set_ver} / {split})",
         "",
-        "| dim | intra_alpha | inter_alpha | kappa | PAR | stable | Wilson95Lower | cosine | macro_f1 | verdict |",
-        "| --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |",
+        "| dim | eval_kind | intra_alpha | inter_alpha | kappa | PAR | stable | Wilson95Lower | cosine | macro_f1 | verdict |",
+        "| --- | --- | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | --- |",
     ]
     for dim in sorted(reports.keys()):
         r = reports[dim]
         f1_str = f"{r.macro_f1:.3f}" if r.macro_f1 is not None else "-"
         stable = f"{r.stable_count}/{r.n_samples}" if r.n_samples > 0 else "0/0"
         lines.append(
-            f"| {dim} | {r.intra_alpha:.3f} | {r.inter_alpha:.3f} | {r.kappa_mean:.3f} | "
+            f"| {dim} | {r.eval_kind} | {r.intra_alpha:.3f} | {r.inter_alpha:.3f} | {r.kappa_mean:.3f} | "
             f"{r.par:.3f} | {stable} | {r.wilson_lower:.3f} | {r.cosine:.3f} | {f1_str} | {r.verdict} |"
         )
 

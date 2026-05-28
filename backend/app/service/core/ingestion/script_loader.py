@@ -56,6 +56,16 @@ def _load_docx(path: Path) -> List[str]:
 def _load_pdf(path: Path) -> List[str]:
     import fitz  # pymupdf, lazy import
 
+    # Some real scripts contain malformed PDF resources. PyMuPDF can still
+    # extract text, but by default it floods stderr with repeated MuPDF warnings.
+    # Suppress those parser diagnostics here; actual extraction failures still
+    # raise exceptions from fitz.open/get_text.
+    tools = getattr(fitz, "TOOLS", None)
+    if tools is not None and hasattr(tools, "mupdf_display_errors"):
+        tools.mupdf_display_errors(False)
+    if tools is not None and hasattr(tools, "mupdf_display_warnings"):
+        tools.mupdf_display_warnings(False)
+
     out: List[str] = []
     pdf = fitz.open(str(path))
     try:

@@ -1,0 +1,615 @@
+version: script
+description: "ScriptLens clean script tagging system (single tag set)"
+prompt_ver: "script"
+breaking: true
+
+bundles:
+  - id: drama_tags
+    scope: script
+    dims: [drama_tags]
+    prompt: prompts/drama_tags.jinja
+    output_mode: single_call
+
+  - id: script_structure
+    scope: script
+    dims:
+      - gender_axis
+      - world_setting
+      - protagonist_archetype
+      - antagonist_archetype
+      - pacing_mode
+      - paid_break_pattern
+      - story_arc_template
+    prompt: prompts/script_structure.jinja
+    output_mode: single_call
+
+  - id: episode_structure
+    scope: episode
+    dims:
+      - episode_opening_type
+      - episode_end_hook
+      - intra_episode_peak_count
+      - paid_break_position
+    prompt: prompts/episode_structure.jinja
+    output_mode: single_call
+
+  - id: plot_core
+    scope: plot_unit
+    dims:
+      - plot_hook
+      - conflict_type
+      - story_stage
+      - relationship_arc
+      - payoff_type
+    prompt: prompts/plot_core.jinja
+    output_mode: single_call
+
+  - id: plot_emotion
+    scope: plot_unit
+    dims: [emotional_driver]
+    prompt: prompts/plot_emotion.jinja
+    output_mode: single_call
+
+  - id: plot_business
+    scope: plot_unit
+    dims:
+      - business_content_archetype
+      - business_conflict_bucket
+      - business_payoff_bucket
+      - business_emotion_bucket
+    prompt: prompts/plot_business.jinja
+    output_mode: single_call
+
+  - id: asr
+    scope: plot_unit
+    dims:
+      - dialogue_density
+      - speech_style
+      - cta_type
+      - voiceover_type
+      - emotional_keywords
+      - keyword_theme
+    prompt: prompts/asr.jinja
+    output_mode: single_call
+    rule_overrides:
+      dialogue_density: rule
+      voiceover_type: rule
+
+  - id: storyboard_hints
+    scope: plot_unit
+    dims:
+      - scene_locale_type
+      - scene_time_of_day
+      - scene_in_out
+      - scene_emotion_keynote
+      - character_state_change
+    prompt: prompts/storyboard_hints.jinja
+    output_mode: single_call
+
+  - id: storyboard_prop
+    scope: plot_unit
+    dims: [prop_focus]
+    prompt: prompts/storyboard_prop.jinja
+    output_mode: single_call
+
+  - id: storyboard_reference
+    scope: plot_unit
+    dims: [shot_suggestion]
+    prompt: prompts/storyboard_reference.jinja
+    output_mode: single_call
+
+  - id: character_attrs
+    scope: character
+    dims:
+      - character_archetype
+      - character_role_in_arc
+      - character_arc_type
+      - character_agency_level
+    prompt: prompts/character_attrs.jinja
+    output_mode: single_call
+
+  - id: relationship_attrs
+    scope: relationship
+    dims:
+      - relationship_type
+      - relationship_polarity
+      - relationship_dynamic_arc
+      - relationship_triangle
+    prompt: prompts/relationship_attrs.jinja
+    output_mode: single_call
+
+scope:
+  script:
+    - dim: drama_tags
+      kind: llm
+      cardinality: multi
+      open_enum: true
+      stability_state: stable
+      values:
+        - 乡村
+        - 亲情
+        - 先婚后爱
+        - 剧情
+        - 历史古代
+        - 古代
+        - 古风权谋
+        - 大女主
+        - 大男主
+        - 奇幻脑洞
+        - 女强
+        - 女性成长
+        - 女频
+        - 婆媳
+        - 实拍
+        - 家庭伦理
+        - 年代
+        - 年代爱情
+        - 强者回归
+        - 总裁
+        - 恋爱
+        - 悬疑推理
+        - 战神
+        - 战神归来
+        - 打脸虐渣
+        - 无敌神医
+        - 极品亲戚
+        - 架空
+        - 沙雕漫
+        - 玄幻
+        - 玄幻仙侠
+        - 现代
+        - 现代言情
+        - 现言甜宠
+        - 真人AI
+        - 种田
+        - 穿越
+        - 系统
+        - 职场
+        - 脑洞
+        - 豪门恩怨
+        - 赘婿逆袭
+        - 逆袭
+        - 都市
+        - 都市日常
+        - 都市爱情
+        - 都市玄幻
+        - 重生
+        - 闪婚
+        - 马甲
+        - 黑道
+
+    - dim: gender_axis
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [male_lead, female_lead, dual_lead, unclear]
+
+    - dim: world_setting
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - modern_urban
+        - modern_workplace
+        - modern_rural
+        - ancient_palace
+        - ancient_jianghu
+        - ancient_folk
+        - xianxia
+        - xuanhuan
+        - apocalypse
+        - system_flow
+        - rebirth
+        - transmigration
+        - school
+        - mixed
+
+    - dim: protagonist_archetype
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - war_god_return
+        - son_in_law_counter
+        - reborn_revenge
+        - system_holder
+        - transmigrator
+        - hidden_heir
+        - big_female
+        - ceo_dominant
+        - sweet_pet
+        - genius_doctor
+        - weak_to_strong
+        - nanny_disguise
+        - unclear
+
+    - dim: antagonist_archetype
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - evil_female_rival
+        - scumbag_male
+        - evil_relatives
+        - corrupt_ceo
+        - hidden_boss
+        - black_society
+        - corrupt_official
+        - ancient_villain
+        - mixed
+        - none
+
+    - dim: pacing_mode
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [high_density_conflict, medium_density, slow_build, mixed]
+
+    - dim: paid_break_pattern
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [no_break, ep_end_cliffhanger, mid_break, three_stage_break, dense_break]
+
+    - dim: story_arc_template
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - three_act_underdog_revenge
+        - rebirth_step_on_old_line
+        - system_progression
+        - sweet_romance_progression
+        - reunion_after_misunderstanding
+        - crisis_solving
+        - family_reconciliation
+        - court_struggle
+        - mixed
+        - unclear
+
+  episode:
+    - dim: episode_opening_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [hook_in_3s, setup_first, recap_then_hook, cliffhanger_resolve, flashback]
+
+    - dim: episode_end_hook
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [cliffhanger, twist, payoff_then_setup, promise, question, none]
+
+    - dim: intra_episode_peak_count
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: ["0", "1", "2", 3_plus]
+
+    - dim: paid_break_position
+      kind: rule
+      cardinality: single
+      stability_state: stable
+      values: [ep_end, ep_two_third, ep_mid, none]
+
+  plot_unit:
+    - dim: plot_hook
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - identity_reveal
+        - reversal
+        - betrayal
+        - rescue
+        - punishment
+        - forced_marriage
+        - reunion
+        - secret_exposure
+        - conflict_escalation
+        - emotional_choice
+        - none
+
+    - dim: conflict_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - status_gap
+        - family_conflict
+        - romantic_conflict
+        - workplace_conflict
+        - revenge
+        - survival_crisis
+        - misunderstanding
+        - moral_judgement
+        - none
+
+    - dim: story_stage
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [setup, trigger, escalation, climax, payoff, teaser, none]
+
+    - dim: relationship_arc
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - enemies_to_lovers
+        - power_flip
+        - chase_and_reject
+        - reunion_after_separation
+        - protection
+        - betrayal_and_revenge
+        - family_reconciliation
+        - none
+
+    - dim: payoff_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - face_slapping
+        - counterattack
+        - reveal_power
+        - romantic_payoff
+        - justice_served
+        - cliffhanger
+        - comic_relief
+        - none
+
+    - dim: emotional_driver
+      kind: llm
+      cardinality: multi
+      stability_state: stable
+      values:
+        - humiliation
+        - jealousy
+        - regret
+        - pity
+        - desire
+        - anger
+        - fear
+        - tenderness
+        - curiosity
+        - none
+
+    - dim: business_content_archetype
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - power_payoff
+        - relationship_payoff
+        - survival_suspense
+        - workplace_counter
+        - comedy_light
+        - unclear
+
+    - dim: business_conflict_bucket
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [relationship_power, survival, workplace, none]
+
+    - dim: business_payoff_bucket
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - face_slap_counter
+        - power_reveal
+        - emotional_romance
+        - rescue_protection
+        - suspense_cliffhanger
+        - justice_punishment
+        - comedy
+        - none
+
+    - dim: business_emotion_bucket
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - anger_humiliation
+        - curiosity_suspense
+        - fear_crisis
+        - warm_regret_pity
+        - desire_jealousy
+        - neutral
+
+    - dim: dialogue_density
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [dense, moderate, sparse, none]
+
+    - dim: speech_style
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [emotional, dramatic, narrative, comedic, none]
+
+    - dim: cta_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [curiosity, urgency, subscribe, none]
+
+    - dim: voiceover_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [character, narrator, mixed, none]
+
+    - dim: emotional_keywords
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [high, moderate, low, none]
+
+    - dim: keyword_theme
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [romance, power, family, comedy, none]
+
+    - dim: scene_locale_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - modern_indoor
+        - modern_outdoor
+        - ancient_indoor
+        - ancient_outdoor
+        - fantasy_world
+        - school
+        - transport
+        - unclear
+
+    - dim: scene_time_of_day
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [day, night, dawn, dusk, unclear]
+
+    - dim: scene_in_out
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [int, ext, mixed]
+
+    - dim: scene_emotion_keynote
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [tense, romantic, sad, happy, comedic, epic, eerie, calm]
+
+    - dim: shot_suggestion
+      kind: reference
+      cardinality: single
+      stability_state: reference
+      values:
+        - close_up
+        - medium_shot
+        - wide_shot
+        - over_shoulder
+        - push_in
+        - pull_out
+        - pan
+        - tilt_up
+        - tilt_down
+        - tracking
+        - mixed
+        - unclear
+
+    - dim: prop_focus
+      kind: llm
+      cardinality: multi
+      open_enum: true
+      stability_state: stable
+      values:
+        - sword
+        - jade_pendant
+        - token
+        - contract
+        - poison
+        - antidote
+        - letter
+        - child
+        - pet
+
+    - dim: character_state_change
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - none
+        - costume_change
+        - makeup_change
+        - injury
+        - status_promotion
+        - status_demotion
+        - emotion_shift
+        - identity_reveal
+
+  character:
+    - dim: character_archetype
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - weak_start_hidden_strong
+        - invincible_dominant
+        - cold_arrogant
+        - naive_warm
+        - scheming_lotus
+        - comic_relief
+        - family_burden
+        - absolute_villain
+        - grey_villain
+        - mentor_elder
+        - tool_npc
+
+    - dim: character_role_in_arc
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [actor, target, blocker, helper, mentor, catalyst, observer, comic_relief]
+
+    - dim: character_arc_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - power_growth
+        - moral_growth
+        - redemption
+        - corruption
+        - static
+        - identity_reveal
+        - relational_growth
+        - tragic_fall
+
+    - dim: character_agency_level
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [high, medium, low]
+
+  relationship:
+    - dim: relationship_type
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [romance, family, rival, ally, authority, mentor, deception, blood_oath, friendship, servant]
+
+    - dim: relationship_polarity
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [positive, negative, mixed, unstable]
+
+    - dim: relationship_dynamic_arc
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values:
+        - enemies_to_lovers
+        - forced_marriage_to_real_love
+        - friends_to_lovers
+        - lovers_to_strangers
+        - master_to_betrayal
+        - rivals_to_allies
+        - family_estrangement_to_reconciliation
+        - persistent_conflict
+        - persistent_support
+        - none
+
+    - dim: relationship_triangle
+      kind: llm
+      cardinality: single
+      stability_state: stable
+      values: [love_triangle, rivalry_triangle, family_triangle, none]

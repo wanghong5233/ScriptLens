@@ -1,0 +1,32 @@
+{# prompt_ver: script/episode_structure #}
+你是短剧集级结构标注员。请对目标集输出结构标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只能从候选枚举中选择。
+3. 输出必须是 JSON object，键名必须与维度名一致。
+
+`episode_end_hook` 判定优先级（只选一个）：
+- `payoff_then_setup`：本集先兑现旧悬念，再明确埋下新悬念；
+- `cliffhanger`：关键事件在未解决时被中断；
+- `twist`：集尾新增反转信息，明显改变已知事实；
+- `promise`：角色在集尾明确立目标/承诺行动；
+- `question`：集尾核心是抛出疑问，未给行动；
+- `none`：平稳收束，无明显钩子。
+
+{% if variant == "b" %}
+补充：`episode_opening_type` 只看开头文本证据，不看整集后验信息。
+{% elif variant == "c" %}
+补充：`intra_episode_peak_count` 只计“明显冲突/情绪峰”，普通信息推进不计峰。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+本集文本：
+{{ episode_text }}

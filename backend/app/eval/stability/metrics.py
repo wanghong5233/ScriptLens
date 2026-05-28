@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import hashlib
+import itertools
 import math
 from collections import Counter
 from functools import lru_cache
@@ -184,6 +186,85 @@ def stable_count_and_wilson(matrix: list[list[str]], confidence: float = 0.95) -
 
     if n_samples == 0:
         return 0, 0, 0.0
+    p_hat = stable_count / n_samples
+    z = NormalDist().inv_cdf(0.5 + confidence / 2)
+    denom = 1 + (z**2) / n_samples
+    center = p_hat + (z**2) / (2 * n_samples)
+    margin = z * math.sqrt((p_hat * (1 - p_hat) + (z**2) / (4 * n_samples)) / n_samples)
+    lower = (center - margin) / denom
+    return n_samples, stable_count, max(0.0, float(lower))
+
+
+def _cell_to_set(raw: str) -> set[str]:
+    text = str(raw or "").strip()
+    if not text:
+        return set()
+    parsed: object
+    try:
+        parsed = ast.literal_eval(text)
+    except Exception:
+        parsed = text
+    if isinstance(parsed, (list, tuple, set)):
+        return {str(x).strip() for x in parsed if str(x).strip()}
+    if isinstance(parsed, str):
+        value = parsed.strip()
+        return {value} if value else set()
+    value = str(parsed).strip()
+    return {value} if value else set()
+
+
+def pairwise_jaccard(matrix: list[list[str]]) -> float:
+    if len(matrix) < 2:
+        return 0.0
+    sims: list[float] = []
+    for i in range(len(matrix)):
+        for j in range(i + 1, len(matrix)):
+            left = matrix[i]
+            right = matrix[j]
+            n_cols = max(len(left), len(right))
+            if n_cols <= 0:
+                continue
+            col_sims: list[float] = []
+            for col in range(n_cols):
+                s1 = _cell_to_set(left[col] if col < len(left) else "")
+                s2 = _cell_to_set(right[col] if col < len(right) else "")
+                union = s1 | s2
+                if not union:
+                    col_sims.append(1.0)
+                else:
+                    col_sims.append(len(s1 & s2) / len(union))
+            sims.append(float(np.mean(col_sims)))
+    return float(np.mean(sims)) if sims else 0.0
+
+
+def jaccard_stable_count_and_wilson(
+    matrix: list[list[str]],
+    *,
+    threshold: float = 0.7,
+    confidence: float = 0.95,
+) -> tuple[int, int, float]:
+    if not matrix:
+        return 0, 0, 0.0
+    n_samples = max((len(row) for row in matrix), default=0)
+    if n_samples <= 0:
+        return 0, 0, 0.0
+
+    stable_count = 0
+    for col in range(n_samples):
+        sets = [_cell_to_set(row[col] if len(row) > col else "") for row in matrix]
+        if len(sets) < 2:
+            continue
+        pair_sims: list[float] = []
+        for left, right in itertools.combinations(sets, 2):
+            union = left | right
+            if not union:
+                pair_sims.append(1.0)
+            else:
+                pair_sims.append(len(left & right) / len(union))
+        mean_sim = float(np.mean(pair_sims)) if pair_sims else 0.0
+        if mean_sim >= threshold:
+            stable_count += 1
+
     p_hat = stable_count / n_samples
     z = NormalDist().inv_cdf(0.5 + confidence / 2)
     denom = 1 + (z**2) / n_samples

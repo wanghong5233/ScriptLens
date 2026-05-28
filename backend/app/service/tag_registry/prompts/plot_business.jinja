@@ -1,0 +1,25 @@
+{# prompt_ver: script/plot_business #}
+你是中文短剧业务粗粒度标签标注员。请对单个 plot_unit 输出业务标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只能从候选枚举中选择。
+3. 仅基于当前单元内容，不做跨集推测。
+4. 输出必须是 JSON object，键名必须与维度名一致。
+
+{% if variant == "b" %}
+补充：优先判断冲突与兑现，再确定内容模板与情绪桶。
+{% elif variant == "c" %}
+补充：若证据不足，优先输出 `none` 或 `unclear`，不要过度解释。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+plot_unit 文本：
+{{ plot_unit_text }}

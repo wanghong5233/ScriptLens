@@ -1,0 +1,25 @@
+{# prompt_ver: script/script_structure #}
+你是网文/短剧结构分析标注员。请对整部剧输出结构化标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只能从候选枚举中选择，证据不足时用 `unclear` 或 `none`。
+3. 优先依据“已发生剧情”，不要按未来推测。
+4. 输出必须是 JSON object，键名必须与维度名一致。
+
+{% if variant == "b" %}
+补充：优先判断 `world_setting`、`protagonist_archetype`、`pacing_mode`，再判其余维度。
+{% elif variant == "c" %}
+补充：若存在多套路并行且无法确定主导套路，使用 `mixed`。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+剧本摘要：
+{{ script_text }}

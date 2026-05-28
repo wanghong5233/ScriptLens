@@ -11,9 +11,9 @@ from sqlalchemy.engine import Engine
 
 from service.score_registry import load_rubric
 from service.script_report_service import ensure_v1_tags_ready
+from service.script_tools.extractor_common import resolve_script_id
 from service.script_tools.llm_caller import LlmCaller
 from service.script_tools.signal_catalog import SignalValue, build_signal_context, compute_signals
-from service.script_tools.v0_extractor_common import resolve_script_id
 from utils.database import engine as default_engine
 
 

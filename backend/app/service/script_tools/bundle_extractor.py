@@ -9,10 +9,15 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from eval.stability.runner import ExtractorRegistry
-from service.script_tools.llm_caller import LlmCaller, ModelTier
-from service.script_tools.v0_extractor_common import (
+from service.script_tools.extractor_common import (
+    CharacterContext,
+    EpisodeContext,
     PlotUnitContext,
+    RelationshipContext,
+    load_character_context,
+    load_episode_context,
     load_plot_unit_context,
+    load_relationship_context,
     load_script_text,
     persist_episode_tags,
     persist_plot_unit_tags,
@@ -20,14 +25,7 @@ from service.script_tools.v0_extractor_common import (
     render_prompt,
     stable_choice,
 )
-from service.script_tools.v1_extractor_common import (
-    CharacterContext,
-    EpisodeContext,
-    RelationshipContext,
-    load_character_context,
-    load_episode_context,
-    load_relationship_context,
-)
+from service.script_tools.llm_caller import LlmCaller, ModelTier
 from service.tag_registry import load_bundle, load_prompt_by_bundle, load_tag_set, validate
 from utils.database import engine as default_engine
 

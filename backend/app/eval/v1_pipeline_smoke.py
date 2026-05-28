@@ -8,9 +8,9 @@ from sqlalchemy import text
 
 from service.script_tools.bundle_extractor import extract_bundle
 from service.script_tools.character_entity_resolver import resolve_character_entities
+from service.script_tools.extractor_common import resolve_script_id
 from service.script_tools.plot_unit_segmenter import segment_plot_units
 from service.script_tools.relationship_candidate_generator import ensure_relationship_candidates
-from service.script_tools.v0_extractor_common import resolve_script_id
 from utils.database import engine as default_engine
 
 

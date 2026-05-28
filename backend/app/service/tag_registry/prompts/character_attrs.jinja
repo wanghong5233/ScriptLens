@@ -1,0 +1,25 @@
+{# prompt_ver: script/character_attrs #}
+你是短剧人物分析标注员。请对目标角色输出属性标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只依据给定角色证据，不凭背景常识补全。
+3. 只能从候选枚举中选择。
+4. 输出必须是 JSON object，键名必须与维度名一致。
+
+{% if variant == "b" %}
+补充：`character_role_in_arc` 以“当前剧情弧主作用”判定，不看历史人设印象。
+{% elif variant == "c" %}
+补充：`character_agency_level` 以主动决策次数和关键节点主导度为准。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+角色资料：
+{{ character_text }}

@@ -8,12 +8,15 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from service.core.ingestion.script_loader import UnsupportedScriptFormatError
 from service.score_registry import RubricConfig, load_rubric
+from service.script_ingestion_service import ScriptIngestionService
 from service.script_progress_tracker import tracker as progress_tracker
 from service.script_tools.bundle_extractor import extract_bundle
 from service.script_tools.character_entity_resolver import resolve_character_entities
@@ -36,6 +39,98 @@ _RUBRIC_VERSION = "v3.0.0"
 _TAG_SET_VERSION = "v1.0.0"
 _DIM_CONFIDENCE_FLOAT = {"high": 0.85, "medium": 0.6, "low": 0.35}
 _CONF_RANK = {"high": 2, "medium": 1, "low": 0}
+
+
+def _is_skippable_ingest_error(exc: Exception) -> bool:
+    if isinstance(exc, UnsupportedScriptFormatError):
+        return True
+    if isinstance(exc, ValueError):
+        msg = str(exc)
+        if "段落为空" in msg or "无场景" in msg:
+            return True
+    return False
+
+
+def _is_guarded_ingest_file(file_path: Path) -> bool:
+    return file_path.name.startswith("完整本_") and file_path.suffix.lower() == ".md"
+
+
+def ingest_dataset(
+    *,
+    dataset_dir: Path,
+    user_id: int,
+    skip_unsupported: bool = True,
+    limit: int | None = None,
+    summary_output: Path | None = None,
+) -> dict[str, Any]:
+    if not dataset_dir.exists():
+        raise FileNotFoundError(f"dataset_dir not found: {dataset_dir}")
+    files = sorted(path for path in dataset_dir.iterdir() if path.is_file())
+    if not files:
+        raise FileNotFoundError(f"dataset_dir is empty: {dataset_dir}")
+
+    ingest_service = ScriptIngestionService()
+    ok_rows: list[dict[str, Any]] = []
+    failed_rows: list[dict[str, str]] = []
+    mapping: dict[str, str] = {}
+    processed_total = 0
+
+    for file_path in files:
+        if limit is not None and limit > 0 and len(ok_rows) >= limit:
+            break
+        processed_total += 1
+        if _is_guarded_ingest_file(file_path):
+            failed_rows.append(
+                {
+                    "path": str(file_path),
+                    "reason": "GuardSkip: 完整本_*.md is dataset report artifact",
+                }
+            )
+            continue
+        try:
+            # Guard before DB write: skip degenerate scripts with too few scenes.
+            _, seg = ingest_service._load_segment(file_path=file_path)  # noqa: SLF001
+            if int(seg.total_scenes or 0) < 3:
+                failed_rows.append(
+                    {
+                        "path": str(file_path),
+                        "reason": f"GuardSkip: total_scenes<{3} ({int(seg.total_scenes or 0)})",
+                    }
+                )
+                continue
+
+            result = ingest_service.ingest(
+                file_path=file_path,
+                user_id=user_id,
+                title=file_path.stem,
+            )
+            mapping[file_path.name] = result.script_id
+            ok_rows.append(
+                {
+                    "path": str(file_path),
+                    "script_id": result.script_id,
+                    "title": result.title,
+                    "total_episodes": result.total_episodes,
+                    "total_scenes": result.total_scenes,
+                }
+            )
+        except Exception as exc:  # pragma: no cover - runtime integration branch
+            if skip_unsupported and _is_skippable_ingest_error(exc):
+                failed_rows.append({"path": str(file_path), "reason": f"{type(exc).__name__}: {exc}"})
+                continue
+            failed_rows.append({"path": str(file_path), "reason": f"{type(exc).__name__}: {exc}"})
+
+    payload = {
+        "dataset_dir": str(dataset_dir),
+        "total": processed_total,
+        "ok": ok_rows,
+        "failed": failed_rows,
+        "mapping": mapping,
+    }
+    if summary_output is not None:
+        summary_output.parent.mkdir(parents=True, exist_ok=True)
+        summary_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return payload
 
 
 @dataclass
@@ -248,7 +343,7 @@ async def ensure_v1_tags_ready(
         return
 
     await segment_plot_units(
-        script_id,
+            script_id,
         tag_set_ver=tag_set_ver,
         seed=seed,
         variant=variant,
@@ -262,10 +357,10 @@ async def ensure_v1_tags_ready(
         seed=seed,
         caller=caller,
         persist=True,
-        engine=engine,
-    )
+            engine=engine,
+        )
     ensure_relationship_candidates(
-        script_id,
+            script_id,
         tag_set_ver=tag_set_ver,
         min_cooccurrence=1,
         top_k=30,
@@ -275,7 +370,7 @@ async def ensure_v1_tags_ready(
 
     await extract_bundle(
         "v1_script_structure",
-        script_id,
+            script_id,
         tag_set_ver=tag_set_ver,
         seed=seed,
         variant=variant,
@@ -358,8 +453,8 @@ def _build_report_payload(
         for action in actions
     ]
     return {
-        "script_id": meta.script_id,
-        "title": meta.title,
+            "script_id": meta.script_id,
+            "title": meta.title,
         "decision": {
             "label": decision_label,
             "confidence": decision.confidence,
@@ -372,7 +467,7 @@ def _build_report_payload(
         "summary": decision.one_sentence_reason,
         "must_read_scene_ids": [],
         "scorecard": scorecard,
-        "compliance": compliance_payload,
+            "compliance": compliance_payload,
         "evidence_refs": [],
         "highlights": [],
         "coverage_card": None,

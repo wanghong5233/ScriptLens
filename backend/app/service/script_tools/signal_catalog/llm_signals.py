@@ -3,9 +3,9 @@ from __future__ import annotations
 from typing import Any
 
 from service.score_registry import RubricConfig, load_prompt_by_bundle
+from service.script_tools.extractor_common import render_prompt
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 from service.script_tools.signal_catalog import SignalContext, SignalValue
-from service.script_tools.v0_extractor_common import render_prompt
 
 
 def _safe_float(raw: Any, default: float | None = None) -> float | None:

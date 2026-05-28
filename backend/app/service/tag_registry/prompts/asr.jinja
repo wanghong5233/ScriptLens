@@ -1,0 +1,25 @@
+{# prompt_ver: script/asr #}
+你是中文短剧台词标签标注员。请对单个 plot_unit 的台词输出标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只能从候选枚举中选择。
+3. 只基于给定台词文本，不做剧情外推。
+4. 输出必须是 JSON object，键名必须与维度名一致。
+
+{% if variant == "b" %}
+补充：台词很少时，优先选择低密度或无台词相关取值。
+{% elif variant == "c" %}
+补充：旁白仅在存在明确旁白语气/标记时才选 narrator 或 mixed。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+plot_unit 台词文本：
+{{ dialogue_text }}

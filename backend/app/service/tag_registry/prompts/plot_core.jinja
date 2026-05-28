@@ -1,0 +1,30 @@
+{# prompt_ver: script/plot_core #}
+你是中文短剧情节标签标注员。请对单个 plot_unit 输出核心情节标签。
+
+规则：
+1. 所有维度均为 single，必须输出 1 个值。
+2. 只能从候选枚举中选择。
+3. 仅依据该 plot_unit 已发生内容，不做后续剧情推测。
+4. 输出必须是 JSON object，键名必须与维度名一致。
+
+`relationship_arc` 判定规则：
+- 只标注当前单元内“主导关系变化”，不是整部剧总弧线；
+- 若同一单元内出现多个并列关系变化且无主导，输出 `none`；
+- 仅在有明确关系变化证据时标注具体类别。
+
+{% if variant == "b" %}
+补充：优先判定 `story_stage`，再判 `plot_hook` 与 `payoff_type`。
+{% elif variant == "c" %}
+补充：字段之间需语义一致，避免互相冲突（如 `story_stage=setup` 却 `payoff_type` 为强兑现）。
+{% endif %}
+
+本次维度清单：
+{% for d in dims -%}
+- `{{ d.dim }}`（{{ d.cardinality }}）
+{% endfor %}
+
+维度枚举：
+{{ dim_values | tojson }}
+
+plot_unit 文本：
+{{ plot_unit_text }}

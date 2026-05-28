@@ -2,33 +2,34 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 from typing import Any
 
-from service.core.ingestion.script_loader import UnsupportedScriptFormatError
-from service.script_ingestion_service import ScriptIngestionService
+from service.script_report_service import ingest_dataset as ingest_dataset_service
 
-_SCRIPTLENS_ROOT = Path(__file__).resolve().parents[3]
-_DEFAULT_DATASET_DIR = _SCRIPTLENS_ROOT / "eval" / "ai漫剧剧本数据集" / "完整本"
+_DATASET_RELATIVE = Path("eval") / "ai漫剧剧本数据集" / "完整本"
+
+
+def _resolve_scriptlens_root() -> Path:
+    """与 cli/run_stability.py 同源逻辑：marker 扫描 + env override，
+    避免容器内 Path(__file__).parents[3] IndexError。"""
+    env_root = os.getenv("SCRIPTLENS_ROOT")
+    if env_root:
+        return Path(env_root)
+    here = Path(__file__).resolve()
+    for parent in here.parents:
+        if (parent / _DATASET_RELATIVE).is_dir():
+            return parent
+    if (Path("/") / _DATASET_RELATIVE).is_dir():
+        return Path("/")
+    parents = list(here.parents)
+    return parents[-1] if parents else here
+
+
+_SCRIPTLENS_ROOT = _resolve_scriptlens_root()
+_DEFAULT_DATASET_DIR = _SCRIPTLENS_ROOT / _DATASET_RELATIVE
 _DEFAULT_SUMMARY_PATH = Path(__file__).resolve().parents[1] / "eval" / "reports" / "dataset_ingest_summary.json"
-
-
-def _list_dataset_files(dataset_dir: Path) -> list[Path]:
-    if not dataset_dir.exists():
-        return []
-    files = [path for path in dataset_dir.iterdir() if path.is_file()]
-    files.sort(key=lambda path: path.name)
-    return files
-
-
-def _is_skippable_error(exc: Exception) -> bool:
-    if isinstance(exc, UnsupportedScriptFormatError):
-        return True
-    if isinstance(exc, ValueError):
-        msg = str(exc)
-        if "段落为空" in msg or "无场景" in msg:
-            return True
-    return False
 
 
 def ingest_dataset(
@@ -39,48 +40,13 @@ def ingest_dataset(
     limit: int | None,
     summary_output: Path = _DEFAULT_SUMMARY_PATH,
 ) -> dict[str, Any]:
-    files = _list_dataset_files(dataset_dir)
-    if limit is not None and limit > 0:
-        files = files[:limit]
-
-    ingest_service = ScriptIngestionService()
-    ok_rows: list[dict[str, Any]] = []
-    failed_rows: list[dict[str, str]] = []
-    mapping: dict[str, str] = {}
-
-    for file_path in files:
-        try:
-            result = ingest_service.ingest(
-                file_path=file_path,
-                user_id=user_id,
-                title=file_path.stem,
-            )
-            mapping[file_path.name] = result.script_id
-            ok_rows.append(
-                {
-                    "path": str(file_path),
-                    "script_id": result.script_id,
-                    "title": result.title,
-                    "total_episodes": result.total_episodes,
-                    "total_scenes": result.total_scenes,
-                }
-            )
-        except Exception as exc:  # pragma: no cover - runtime integration branch
-            if skip_unsupported and _is_skippable_error(exc):
-                failed_rows.append({"path": str(file_path), "reason": f"{type(exc).__name__}: {exc}"})
-                continue
-            failed_rows.append({"path": str(file_path), "reason": f"{type(exc).__name__}: {exc}"})
-
-    payload = {
-        "dataset_dir": str(dataset_dir),
-        "total": len(files),
-        "ok": ok_rows,
-        "failed": failed_rows,
-        "mapping": mapping,
-    }
-    summary_output.parent.mkdir(parents=True, exist_ok=True)
-    summary_output.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    return payload
+    return ingest_dataset_service(
+        dataset_dir=dataset_dir,
+        user_id=user_id,
+        skip_unsupported=skip_unsupported,
+        limit=limit,
+        summary_output=summary_output,
+    )
 
 
 def _parse_args() -> argparse.Namespace:

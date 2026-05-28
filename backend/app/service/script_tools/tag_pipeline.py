@@ -7,10 +7,11 @@ from sqlalchemy.engine import Engine
 
 from service.script_tools.bundle_extractor import extract_bundle
 from service.script_tools.character_entity_resolver import resolve_character_entities
+from service.script_tools.extractor_common import resolve_script_id
 from service.script_tools.llm_caller import LlmCaller
 from service.script_tools.plot_unit_segmenter import segment_plot_units
 from service.script_tools.relationship_candidate_generator import ensure_relationship_candidates
-from service.script_tools.v0_extractor_common import resolve_script_id
+from service.script_tools.rule_extractors import persist_paid_break_positions_for_episodes
 from service.tag_registry import list_bundles
 from utils.database import engine as default_engine
 
@@ -104,7 +105,7 @@ def _resolve_targets(
 async def run_tag_pipeline(
     script_ref: str,
     *,
-    tag_set_ver: str,
+    tag_set_ver: str = "script",
     seed: int = 42,
     variant: str = "a",
     caller: LlmCaller | None = None,
@@ -167,6 +168,17 @@ async def run_tag_pipeline(
                 engine=engine,
             )
         bundle_runs[bundle.id] = len(targets)
+
+    episode_nos = [int(x.rpartition("::ep::")[2]) for x in episode_targets if "::ep::" in x]
+    if episode_nos:
+        persist_paid_break_positions_for_episodes(
+            script_id,
+            episode_nos,
+            tag_set_ver=tag_set_ver,
+            prompt_ver=f"rule:paid_break_position:{variant}",
+            engine=engine,
+        )
+    bundle_runs["rule_paid_break_position"] = len(episode_nos)
 
     return PipelineRunSummary(
         script_id=script_id,

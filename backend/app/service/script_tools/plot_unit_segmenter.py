@@ -19,7 +19,7 @@ from utils.database import engine as default_engine
 
 _JINJA = Environment(loader=BaseLoader(), autoescape=False)
 _BOUNDARY_PROMPT_PATH = (
-    Path(__file__).resolve().parents[1] / "tag_registry" / "prompts" / "v0" / "_internal" / "boundary.jinja"
+    Path(__file__).resolve().parents[1] / "tag_registry" / "prompts" / "_internal" / "boundary.jinja"
 )
 
 

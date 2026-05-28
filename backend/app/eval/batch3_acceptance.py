@@ -15,7 +15,7 @@ from eval.stability.sampler import sample_split
 from eval.v3_scoring_smoke import _generate_report_dry_run, _scoring_tables_ready
 from service.score_registry import check_rubric_compatibility, load_rubric
 from service.script_report_service import generate_report
-from service.script_tools.v0_extractor_common import resolve_script_id
+from service.script_tools.extractor_common import resolve_script_id
 from utils.database import engine as default_engine
 
 

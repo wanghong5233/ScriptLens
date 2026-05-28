@@ -9,7 +9,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from service.script_tools.v0_extractor_common import load_plot_unit_context, resolve_script_id
+from service.script_tools.extractor_common import load_plot_unit_context, resolve_script_id
 from utils.database import engine as default_engine
 
 
