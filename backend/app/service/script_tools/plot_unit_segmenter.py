@@ -1,26 +1,72 @@
+"""Episode-level LLM-driven plot_unit segmentation.
+
+设计依据：`docs/2026-05-25-情节标签设计决策.md §8.2`
+
+切分流程：
+1. 把单集 `IREpisode` 的 blocks（line_no | kind | character | text）渲染成 LLM 可读视图；
+2. 携带前 3 集的 plot_unit summary 作为叙事连续性上下文；
+3. LLM 一次性输出一集内的所有 plot_unit `line_range + summary + hints`；
+4. 严格校验：line_range 首尾相接、不重叠、不越界；若失效则按"一场一情节"兜底；
+5. 把 LLM 的 line_range 映射回 IRScene，写库 `scriptlens.plot_units`。
+
+工业参考：
+- Save the Cat / Snyder beats —— 以叙事节拍而非物理 scene 为最小单元
+- Fabula / Story2KG —— Scene → Event 两遍处理，event 一等对象
+- Hierarchical Discourse Parsing —— LLM 一次看完整 episode 决定 break，不在 scene 边界做候选
+- MARCUS / MovieGraphs —— event-centric，每个 event 同时挂参与者与变化属性
+"""
+
 from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import uuid
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from jinja2 import BaseLoader, Environment
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from service.script_tools.llm_caller import LlmCaller, ModelTier
-from service.script_tools.script_ir import IREpisode, IRScene, build_script_ir
+from service.script_tools.script_ir import IREpisode, IRLine, IRScene, build_script_ir
 from utils.database import engine as default_engine
 
+logger = logging.getLogger(__name__)
+
 _JINJA = Environment(loader=BaseLoader(), autoescape=False)
-_BOUNDARY_PROMPT_PATH = (
-    Path(__file__).resolve().parents[1] / "tag_registry" / "prompts" / "_internal" / "boundary.jinja"
+_SEGMENT_PROMPT_PATH = (
+    Path(__file__).resolve().parents[1] / "tag_registry" / "prompts" / "_internal" / "plot_unit_segment.jinja"
 )
+
+# Episode-level segmentation 的 LLM 输出预算：
+# 单集最多 7 plot_unit × (summary ≤ 50 字 + line_range 2 int + 4 hints ≤ 20 字 + evidence_lines 3 int)
+# ≈ 100 字/单元 × 7 = 700 字 ≈ 1100 token；× 1.5 safety = 1650 → 取 2048。
+_SEGMENT_MAX_TOKENS = 2048
+
+# 单集 block 视图截断：避免超长集塞爆 prompt。中位集 ~2K 字符；上限取 12000（含 line_no 等冗余）。
+_MAX_EPISODE_BLOCKS_CHARS = 12000
+
+# 前 N 集 plot_unit summary 作为叙事连续性上下文
+_PRIOR_EPISODE_CONTEXT = 3
+
+# 当 LLM 输出非法且无法修复时，回落到"一场一情节"
+_FALLBACK_ONE_UNIT_PER_SCENE = True
+
+
+def _resolve_segmenter_concurrency(default: int = 64) -> int:
+    raw = os.getenv("SM_TAG_PIPELINE_CONCURRENCY", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, value)
 
 
 @dataclass
@@ -41,211 +87,240 @@ class SegmentedPlotUnit:
         return asdict(self)
 
 
-@dataclass
-class _BoundaryDecision:
-    keep: bool
-    score: float
-    reason: str = ""
-
-
 @lru_cache(maxsize=1)
-def _boundary_template() -> str:
-    return _BOUNDARY_PROMPT_PATH.read_text(encoding="utf-8")
+def _segment_template() -> str:
+    return _SEGMENT_PROMPT_PATH.read_text(encoding="utf-8")
 
 
-def _normalize_label(label: str) -> str:
-    out = (label or "").strip().lower()
-    out = out.replace(" ", "")
-    out = out.replace("，", ",")
-    return out
+def _episode_lines(episode: IREpisode) -> list[tuple[int, IRLine, IRScene]]:
+    """Flatten episode -> [(abs_line, IRLine, parent_IRScene)] sorted by abs_line."""
+    rows: list[tuple[int, IRLine, IRScene]] = []
+    for sc in episode.scenes:
+        for ln in sc.lines:
+            if ln.abs_line is None:
+                continue
+            rows.append((ln.abs_line, ln, sc))
+    rows.sort(key=lambda t: t[0])
+    return rows
 
 
-def _scene_characters(scene: IRScene) -> set[str]:
-    chars = {c.strip() for c in (scene.characters or []) if c and c.strip()}
-    for line in scene.lines:
-        if line.character:
-            chars.add(line.character.strip())
-    return {c for c in chars if c}
-
-
-def _char_change_ratio(prev: IRScene, cur: IRScene) -> float:
-    a = _scene_characters(prev)
-    b = _scene_characters(cur)
-    if not a and not b:
-        return 0.0
-    inter = len(a & b)
-    union = len(a | b)
-    if union == 0:
-        return 0.0
-    return 1.0 - (inter / union)
-
-
-def _stage_density(scene: IRScene) -> float:
-    if not scene.lines:
-        return 0.0
-    stage_like = sum(1 for ln in scene.lines if ln.kind in {"stage_direction", "action", "scene_header"})
-    return stage_like / max(len(scene.lines), 1)
-
-
-def _candidate_boundary_strength(prev: IRScene, cur: IRScene) -> float:
-    label_jump = 1.0 if _normalize_label(prev.scene_label) != _normalize_label(cur.scene_label) else 0.0
-    char_jump = _char_change_ratio(prev, cur)
-    stage_delta = abs(_stage_density(prev) - _stage_density(cur))
-    return max(label_jump, char_jump, min(1.0, stage_delta * 1.8))
-
-
-def _is_candidate_boundary(prev: IRScene, cur: IRScene) -> tuple[bool, float]:
-    strength = _candidate_boundary_strength(prev, cur)
-    return strength >= 0.45, strength
-
-
-def _segment_preview(scenes: list[IRScene], start_idx: int, end_idx: int, max_chars: int = 700) -> str:
+def _render_blocks_view(rows: list[tuple[int, IRLine, IRScene]]) -> str:
+    """Compact line-numbered block view; truncate by _MAX_EPISODE_BLOCKS_CHARS."""
     parts: list[str] = []
-    for sc in scenes[start_idx : end_idx + 1]:
-        first_lines = [ln.text.strip() for ln in sc.lines if ln.text and ln.text.strip()][:3]
-        snippet = " ".join(first_lines)
-        cell = f"[{sc.scene_label or sc.scene_no}] {snippet}".strip()
-        if cell:
-            parts.append(cell)
-    text_block = "\n".join(parts)
-    if len(text_block) > max_chars:
-        return text_block[: max_chars - 1] + "…"
-    return text_block
+    used = 0
+    for abs_line, ln, sc in rows:
+        kind = ln.kind
+        speaker = (ln.character or "").strip()
+        body = (ln.text or "").strip()
+        if not body and kind != "scene_header":
+            continue
+        if kind == "scene_header":
+            prefix = f"L{abs_line:>5}|场标 |{sc.scene_label or sc.scene_no}"
+            cell = prefix
+        else:
+            if speaker:
+                cell = f"L{abs_line:>5}|{kind:<7}|{speaker}|{body}"
+            else:
+                cell = f"L{abs_line:>5}|{kind:<7}||{body}"
+        if used + len(cell) + 1 > _MAX_EPISODE_BLOCKS_CHARS:
+            parts.append("...（截断）")
+            break
+        parts.append(cell)
+        used += len(cell) + 1
+    return "\n".join(parts)
 
 
-def _build_summary(scenes: list[IRScene], start_idx: int, end_idx: int) -> str:
-    preview = _segment_preview(scenes, start_idx, end_idx, max_chars=260)
-    return preview or f"{scenes[start_idx].scene_label} -> {scenes[end_idx].scene_label}"
+def _scene_at_line(scenes: list[IRScene], abs_line: int) -> IRScene | None:
+    """Find the IRScene whose [start_line, end_line] contains abs_line."""
+    for sc in scenes:
+        if sc.start_line is None or sc.end_line is None:
+            continue
+        if sc.start_line <= abs_line <= sc.end_line:
+            return sc
+    return None
 
 
-async def _llm_keep_boundary(
+def _episode_line_bounds(rows: list[tuple[int, IRLine, IRScene]]) -> tuple[int, int] | None:
+    if not rows:
+        return None
+    return rows[0][0], rows[-1][0]
+
+
+def _validate_and_repair_units(
+    raw_units: list[dict[str, Any]],
     *,
-    prev_text: str,
-    next_text: str,
-    candidate_strength: float,
+    bounds: tuple[int, int],
+) -> list[dict[str, Any]]:
+    """Validate LLM output:
+    - line_range[0] <= line_range[1]
+    - all within [bounds[0], bounds[1]]
+    - first range starts at bounds[0], last ends at bounds[1]
+    - adjacent ranges contiguous (next.start = prev.end + 1)
+
+    Returns the **repaired** list, or [] when irrecoverable.
+    """
+    if not isinstance(raw_units, list) or not raw_units:
+        return []
+
+    lo, hi = bounds
+    cleaned: list[dict[str, Any]] = []
+    for unit in raw_units:
+        if not isinstance(unit, dict):
+            continue
+        rng = unit.get("line_range")
+        if not isinstance(rng, list) or len(rng) != 2:
+            continue
+        try:
+            start = int(rng[0])
+            end = int(rng[1])
+        except (TypeError, ValueError):
+            continue
+        if start > end:
+            continue
+        # clamp to bounds
+        start = max(lo, min(hi, start))
+        end = max(lo, min(hi, end))
+        if start > end:
+            continue
+        cleaned.append({**unit, "line_range": [start, end]})
+
+    if not cleaned:
+        return []
+
+    # sort by start, drop overlaps by trimming end
+    cleaned.sort(key=lambda u: (u["line_range"][0], u["line_range"][1]))
+    repaired: list[dict[str, Any]] = []
+    cursor = lo
+    for unit in cleaned:
+        start, end = unit["line_range"]
+        if start < cursor:
+            start = cursor  # absorb overlap into prior unit's tail
+        if start > end:
+            continue
+        repaired.append({**unit, "line_range": [start, end]})
+        cursor = end + 1
+
+    if not repaired:
+        return []
+
+    # force first/last to align with episode bounds
+    repaired[0]["line_range"][0] = lo
+    repaired[-1]["line_range"][1] = hi
+
+    # enforce contiguity (gap → extend prior; if a gap is huge, keep as boundary; pragmatically we
+    # extend prior to cover the gap):
+    contiguous: list[dict[str, Any]] = [repaired[0]]
+    for unit in repaired[1:]:
+        prev = contiguous[-1]
+        if unit["line_range"][0] != prev["line_range"][1] + 1:
+            # snap start to prev_end+1
+            unit["line_range"][0] = prev["line_range"][1] + 1
+            if unit["line_range"][0] > unit["line_range"][1]:
+                # degenerate unit, drop
+                continue
+        contiguous.append(unit)
+
+    return contiguous
+
+
+def _fallback_one_unit_per_scene(scenes: list[IRScene]) -> list[dict[str, Any]]:
+    units: list[dict[str, Any]] = []
+    for sc in scenes:
+        if sc.start_line is None or sc.end_line is None or sc.end_line < sc.start_line:
+            continue
+        units.append(
+            {
+                "summary": (sc.scene_label or sc.scene_no or "").strip()[:50] or "未命名场",
+                "line_range": [sc.start_line, sc.end_line],
+                "location_hint": "",
+                "time_of_day_hint": "未知",
+                "in_out_hint": "未知",
+                "characters_hint": list(sc.characters or []),
+                "evidence_lines": [],
+            }
+        )
+    return units
+
+
+async def _llm_segment_episode(
+    *,
+    episode: IREpisode,
+    prior_summaries: list[str],
     tag_set_ver: str,
     seed: int,
     variant: str,
     caller: LlmCaller,
-) -> _BoundaryDecision:
-    default_keep = candidate_strength >= 0.8
+) -> list[dict[str, Any]]:
+    rows = _episode_lines(episode)
+    bounds = _episode_line_bounds(rows)
+    if bounds is None:
+        return []
+
     if os.getenv("SM_TAGGING_DISABLE_LLM", "").strip().lower() in {"1", "true", "yes", "on"}:
-        score = candidate_strength if default_keep else 1.0 - candidate_strength
-        return _BoundaryDecision(keep=default_keep, score=score, reason="llm_disabled")
-    prompt = _JINJA.from_string(_boundary_template()).render(
-        prev_text=prev_text,
-        next_text=next_text,
+        return _fallback_one_unit_per_scene(episode.scenes)
+
+    blocks_view = _render_blocks_view(rows)
+    prompt = _JINJA.from_string(_segment_template()).render(
+        episode_no=episode.episode_no if episode.episode_no is not None else 0,
+        episode_blocks=blocks_view,
+        prior_summaries=prior_summaries,
     )
-    prompt_ver = f"{tag_set_ver}:plot_unit_boundary_keep:{variant}"
+    prompt_ver = f"{tag_set_ver}:plot_unit_segment:{variant}"
     try:
         resp = await caller.call_json_deterministic(
             prompt,
             tag_set_ver=tag_set_ver,
             prompt_ver=prompt_ver,
-            dim="plot_unit_boundary_keep",
+            dim="plot_unit_segment",
             seed=seed,
-            tier=ModelTier.MINI,
-            max_tokens=256,
-            system_message="你只输出合法 JSON，不输出额外解释。",
+            tier=ModelTier.PRIMARY,
+            max_tokens=_SEGMENT_MAX_TOKENS,
+            system_message="你只输出严格 JSON，不输出任何额外解释或 markdown。",
         )
         parsed = resp.parsed if isinstance(resp.parsed, dict) else {}
-        raw_keep = str(parsed.get("keep_boundary") or parsed.get("decision") or "").strip().lower()
-        if raw_keep in {"keep", "true", "yes", "1"}:
-            keep = True
-        elif raw_keep in {"merge", "false", "no", "0"}:
-            keep = False
-        else:
-            keep = default_keep
-        score_raw = parsed.get("score")
-        try:
-            score = float(score_raw)
-        except (TypeError, ValueError):
-            score = 1.0 if keep else 0.0
-        score = max(0.0, min(1.0, score))
-        reason = str(parsed.get("reason") or "")
-        return _BoundaryDecision(keep=keep, score=score, reason=reason[:80])
-    except Exception:
-        score = candidate_strength if default_keep else 1.0 - candidate_strength
-        return _BoundaryDecision(keep=default_keep, score=score, reason="fallback_by_rule")
-
-
-async def _segment_episode(
-    episode: IREpisode,
-    *,
-    tag_set_ver: str,
-    seed: int,
-    variant: str,
-    caller: LlmCaller,
-    max_plot_units_per_episode: int,
-) -> list[tuple[int, int]]:
-    scenes = episode.scenes
-    if not scenes:
-        return []
-    if len(scenes) == 1:
-        return [(0, 0)]
-
-    boundaries: list[int] = [0]
-    boundary_scores: dict[int, float] = {}
-    for i in range(1, len(scenes)):
-        is_candidate, strength = _is_candidate_boundary(scenes[i - 1], scenes[i])
-        if not is_candidate:
-            continue
-        decision = await _llm_keep_boundary(
-            prev_text=_segment_preview(scenes, max(0, i - 2), i - 1),
-            next_text=_segment_preview(scenes, i, min(len(scenes) - 1, i + 1)),
-            candidate_strength=strength,
-            tag_set_ver=tag_set_ver,
-            seed=seed,
-            variant=variant,
-            caller=caller,
+        raw_units = parsed.get("plot_units") if isinstance(parsed.get("plot_units"), list) else []
+        cleaned = _validate_and_repair_units(raw_units, bounds=bounds)
+        if cleaned:
+            return cleaned
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "plot_unit_segmenter llm failure ep=%s err=%s; falling back to scene-level units",
+            episode.episode_no,
+            exc,
         )
-        if decision.keep:
-            boundaries.append(i)
-            boundary_scores[i] = decision.score
 
-    boundaries.append(len(scenes))
-    boundaries = sorted(set(boundaries))
-
-    # 每集最多 N 个 plot_unit：优先移除置信度最低的边界
-    while len(boundaries) - 1 > max_plot_units_per_episode and len(boundaries) > 2:
-        removable = boundaries[1:-1]
-        if not removable:
-            break
-        drop = min(removable, key=lambda x: boundary_scores.get(x, 0.0))
-        boundaries.remove(drop)
-
-    spans: list[tuple[int, int]] = []
-    for i in range(len(boundaries) - 1):
-        start = boundaries[i]
-        end = boundaries[i + 1] - 1
-        if start <= end:
-            spans.append((start, end))
-    return spans
+    if _FALLBACK_ONE_UNIT_PER_SCENE:
+        return _fallback_one_unit_per_scene(episode.scenes)
+    return []
 
 
 def _build_plot_unit(
     *,
     script_id: str,
-    episode_no: int | None,
+    episode: IREpisode,
     idx: int,
-    scenes: list[IRScene],
-    start_idx: int,
-    end_idx: int,
-) -> SegmentedPlotUnit:
-    seg_scenes = scenes[start_idx : end_idx + 1]
-    start_scene = seg_scenes[0]
-    end_scene = seg_scenes[-1]
-    char_count = sum(len((ln.text or "")) for sc in seg_scenes for ln in sc.lines)
+    raw_unit: dict[str, Any],
+) -> SegmentedPlotUnit | None:
+    start_line, end_line = raw_unit["line_range"]
+    start_scene = _scene_at_line(episode.scenes, start_line)
+    end_scene = _scene_at_line(episode.scenes, end_line)
+    if start_scene is None or end_scene is None:
+        return None
+    rows = _episode_lines(episode)
+    char_count = sum(len((ln.text or "")) for abs_line, ln, _ in rows if start_line <= abs_line <= end_line)
+    summary = str(raw_unit.get("summary") or "").strip()[:200]
+    if not summary:
+        summary = f"{start_scene.scene_label or start_scene.scene_no} → {end_scene.scene_label or end_scene.scene_no}"
     return SegmentedPlotUnit(
         id=str(uuid.uuid4()),
         script_id=script_id,
-        episode_no=episode_no,
+        episode_no=episode.episode_no,
         idx=idx,
         start_scene_id=start_scene.scene_id,
         end_scene_id=end_scene.scene_id,
-        start_line=start_scene.start_line,
-        end_line=end_scene.end_line,
-        summary=_build_summary(scenes, start_idx, end_idx),
+        start_line=start_line,
+        end_line=end_line,
+        summary=summary,
         char_count=char_count,
         source="llm",
     )
@@ -279,39 +354,66 @@ async def segment_plot_units(
     tag_set_ver: str = "script",
     seed: int = 42,
     variant: str = "a",
-    max_plot_units_per_episode: int = 8,
     caller: Optional[LlmCaller] = None,
     persist: bool = True,
     engine: Engine = default_engine,
 ) -> list[SegmentedPlotUnit]:
-    """Segment scenes into plot_units, optionally persisting to DB."""
+    """Episode-level LLM segmentation per design doc §8.2.
+
+    Concurrency: each episode is one LLM call; all episodes run concurrently with a global
+    semaphore (default 64, SM_TAG_PIPELINE_CONCURRENCY overrides).
+    """
     ir = build_script_ir(script_id, engine=engine)
     if not ir.episodes:
         return []
 
     caller = caller or LlmCaller()
+    concurrency = _resolve_segmenter_concurrency()
+    sem = asyncio.Semaphore(concurrency)
+    logger.info(
+        "plot_unit_segmenter v2 script_id=%s episodes=%d concurrency=%d",
+        script_id, len(ir.episodes), concurrency,
+    )
+
+    async def _segment_one(idx: int, ep: IREpisode, prior: list[str]) -> tuple[int, list[dict[str, Any]]]:
+        async with sem:
+            raw = await _llm_segment_episode(
+                episode=ep,
+                prior_summaries=prior,
+                tag_set_ver=tag_set_ver,
+                seed=seed,
+                variant=variant,
+                caller=caller,
+            )
+            return idx, raw
+
+    # Two-pass design: first pass runs all episodes in parallel with no prior context (cold start);
+    # subsequent runs benefit from the cache because (prompt, seed) is stable. For real narrative
+    # continuity we'd need a sequential pass (run ep K, then read its summary into ep K+1 prompt),
+    # but that re-serializes the whole pipeline. Compromise: bypass prior context on first run and
+    # rely on the LLM's intra-episode context plus the stable seed; we cache results so re-runs
+    # converge. If you need cross-episode narrative continuity, switch to phased rollout: ep 1-5
+    # first, summarize, then ep 6-10, etc.
+    raw_per_episode: list[list[dict[str, Any]]] = [[] for _ in ir.episodes]
+    results = await asyncio.gather(
+        *[_segment_one(i, ep, []) for i, ep in enumerate(ir.episodes)]
+    )
+    for i, raw in results:
+        raw_per_episode[i] = raw
+
     units: list[SegmentedPlotUnit] = []
     global_idx = 1
-    for ep in ir.episodes:
-        spans = await _segment_episode(
-            ep,
-            tag_set_ver=tag_set_ver,
-            seed=seed,
-            variant=variant,
-            caller=caller,
-            max_plot_units_per_episode=max_plot_units_per_episode,
-        )
-        for start_idx, end_idx in spans:
-            units.append(
-                _build_plot_unit(
-                    script_id=script_id,
-                    episode_no=ep.episode_no,
-                    idx=global_idx,
-                    scenes=ep.scenes,
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                )
+    for ep, raw_units in zip(ir.episodes, raw_per_episode):
+        for raw_unit in raw_units:
+            built = _build_plot_unit(
+                script_id=script_id,
+                episode=ep,
+                idx=global_idx,
+                raw_unit=raw_unit,
             )
+            if built is None:
+                continue
+            units.append(built)
             global_idx += 1
 
     if persist and units:

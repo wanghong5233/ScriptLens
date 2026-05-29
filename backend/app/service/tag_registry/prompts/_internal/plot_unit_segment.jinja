@@ -1,0 +1,55 @@
+你是中文短剧剧本切分助手。本任务把一集剧本切成若干"情节单元 plot_unit"。
+
+# 什么是 plot_unit
+plot_unit 是一次"发生了可感知变化"的最小叙事单元。可感知变化包括但不限于：
+
+- 目标变化（角色目的转向）
+- 信息揭示（身份/真相/计划暴露）
+- 冲突推进（对抗升级或缓解）
+- 权力/关系状态变化（先敌后友、误会解除、背叛、上下位翻转）
+- 情绪转折（关键情绪点：羞辱、震惊、悔悟、决裂）
+- 爽点兑现（打脸、反击、复仇、身份反转、还击）
+- 悬念设置 / 钩子（cliffhanger、伏笔、问句）
+
+# 切分规则
+1. 一个 plot_unit 必须落在同一集内，但可跨多场（scene）。
+2. 一场可包含 1-7 个 plot_unit。短过渡场通常 1 个，长高潮场可达 5-7 个。
+3. 相邻 plot_unit 的 `line_range` 必须**首尾相接、不重叠、不留空**。例如 [1, 11] 之后必须是 [12, X]，不允许 [10, X] 或 [13, X]。
+4. 无叙事变化的段落（铺垫、纯环境描写、空白）**合并入相邻 plot_unit**，不单独成单元。
+5. 整集只有标题/空白/重复气氛时，可返回空数组 `"plot_units": []`。
+6. 单集 plot_unit 数量参考：短过渡集 1-2 个，正常推进集 2-4 个，高潮集 4-7 个。**不要把每场都切成独立 plot_unit**。
+
+# 输入
+
+当前集（第 {{ episode_no }} 集）blocks：
+{{ episode_blocks }}
+
+{% if prior_summaries %}
+前 {{ prior_summaries|length }} 集 plot_unit 摘要（仅作为叙事连续性参考，不影响本集切分）：
+{% for s in prior_summaries %}
+- {{ s }}
+{% endfor %}
+{% endif %}
+
+# 输出格式（严格 JSON，禁止任何解释）
+
+{
+  "plot_units": [
+    {
+      "summary": "<=50 字一句话描述本情节单元的核心叙事动作",
+      "line_range": [start_abs_line, end_abs_line],
+      "location_hint": "地点或空字符串",
+      "time_of_day_hint": "日|夜|未知",
+      "in_out_hint": "内|外|未知",
+      "characters_hint": ["参与者 1", "参与者 2"],
+      "evidence_lines": [关键行号 1, 关键行号 2]
+    }
+  ]
+}
+
+# 硬约束
+- `line_range[0]` ≤ `line_range[1]`
+- 第一个 plot_unit 的 `line_range[0]` = 本集第一行行号
+- 最后一个 plot_unit 的 `line_range[1]` = 本集最后一行行号
+- 相邻 plot_unit：`next.line_range[0] = prev.line_range[1] + 1`
+- 不输出任何 JSON 之外的文字（无 markdown 围栏、无 "结果如下"）。

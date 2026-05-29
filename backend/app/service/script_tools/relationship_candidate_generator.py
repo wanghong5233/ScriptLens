@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from service.script_tools.character_graph_builder import is_real_character_name
 from service.script_tools.extractor_common import load_plot_unit_context, resolve_script_id
 from utils.database import engine as default_engine
 
@@ -157,10 +158,13 @@ def ensure_relationship_candidates(
     for row in rows:
         aliases = row.get("aliases")
         parsed_aliases = aliases if isinstance(aliases, list) else []
+        canonical_name = str(row.get("canonical_name") or "")
+        if not is_real_character_name(canonical_name):
+            continue
         characters.append(
             {
                 "id": str(row["id"]),
-                "canonical_name": str(row.get("canonical_name") or ""),
+                "canonical_name": canonical_name,
                 "aliases": [str(x) for x in parsed_aliases],
             }
         )

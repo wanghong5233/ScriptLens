@@ -242,11 +242,21 @@ def test_generate_report_runs_full_tag_pipeline(monkeypatch) -> None:
                 "name": "主角",
                 "aliases": ["阿主"],
                 "archetype": "hero",
-                "role_in_arc": "lead",
+                "role_in_arc": "actor",
                 "arc_type": "growth",
                 "agency_level": "high",
                 "appearance_count": 5,
-            }
+            },
+            {
+                "id": "c2",
+                "name": "反派",
+                "aliases": [],
+                "archetype": "absolute_villain",
+                "role_in_arc": "blocker",
+                "arc_type": "static",
+                "agency_level": "medium",
+                "appearance_count": 3,
+            },
         ],
     )
     monkeypatch.setattr(

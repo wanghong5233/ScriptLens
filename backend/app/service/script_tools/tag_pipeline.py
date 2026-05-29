@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+import os
 from dataclasses import dataclass
 
 from sqlalchemy import text
@@ -14,6 +17,19 @@ from service.script_tools.relationship_candidate_generator import ensure_relatio
 from service.script_tools.rule_extractors import persist_paid_break_positions_for_episodes
 from service.tag_registry import list_bundles
 from utils.database import engine as default_engine
+
+logger = logging.getLogger(__name__)
+
+
+def _resolve_pipeline_concurrency(default: int = 64) -> int:
+    raw = os.getenv("SM_TAG_PIPELINE_CONCURRENCY", "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(1, value)
 
 
 @dataclass
@@ -146,6 +162,22 @@ async def run_tag_pipeline(
     relationship_ids = _relationship_ids(script_id, tag_set_ver=tag_set_ver, engine=engine)
     episode_targets = _episode_targets(script_id, engine=engine)
 
+    concurrency = _resolve_pipeline_concurrency()
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _bounded_extract(bundle_id: str, target_id: str) -> None:
+        async with sem:
+            await extract_bundle(
+                bundle_id,
+                target_id,
+                tag_set_ver=tag_set_ver,
+                seed=seed,
+                variant=variant,
+                caller=caller,
+                persist=True,
+                engine=engine,
+            )
+
     bundle_runs: dict[str, int] = {}
     for bundle in list_bundles(tag_set_ver):
         targets = _resolve_targets(
@@ -156,17 +188,16 @@ async def run_tag_pipeline(
             relationship_ids=relationship_ids,
             episode_targets=episode_targets,
         )
-        for target in targets:
-            await extract_bundle(
-                bundle.id,
-                target,
-                tag_set_ver=tag_set_ver,
-                seed=seed,
-                variant=variant,
-                caller=caller,
-                persist=True,
-                engine=engine,
-            )
+        if not targets:
+            bundle_runs[bundle.id] = 0
+            continue
+        # 同一 bundle 内跨 target 并发；不同 bundle 之间保持顺序（plot_unit/character/relationship
+        # 的依赖已经在循环外解析完毕）。default concurrency=64，可由 SM_TAG_PIPELINE_CONCURRENCY 覆盖。
+        logger.info(
+            "tag_pipeline bundle=%s scope=%s targets=%d concurrency=%d",
+            bundle.id, bundle.scope, len(targets), concurrency,
+        )
+        await asyncio.gather(*[_bounded_extract(bundle.id, target) for target in targets])
         bundle_runs[bundle.id] = len(targets)
 
     episode_nos = [int(x.rpartition("::ep::")[2]) for x in episode_targets if "::ep::" in x]
