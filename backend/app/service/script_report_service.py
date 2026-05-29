@@ -277,11 +277,99 @@ def _trim_oneliner(s: str, max_len: int = 40) -> str:
     return s if len(s) <= max_len else s[: max_len - 1] + "…"
 
 
+def _build_evidence_refs_minimal(
+    reward_events: list[RewardEvent],
+    compliance_hits: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """从 reward_events + compliance.hits 派生 evidence_refs[]。
+
+    所有前端需要跳转的高亮锚点（看点、合规风险）都注册到 evidence_refs[]，
+    highlights / 卡片通过 id 引用同一条 evidence_ref。去重键是
+    (scene_id, start_line, end_line)，保证 id 与锚点一一对应。
+    """
+    refs: list[dict[str, Any]] = []
+    seen: set[tuple[str, Optional[int], Optional[int]]] = set()
+
+    for ev in reward_events:
+        line_range = getattr(ev, "evidence_line_range", None)
+        start_line = line_range[0] if line_range else None
+        end_line = line_range[1] if line_range else None
+        key = (ev.scene_id, start_line, end_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        confidence = (
+            "high"
+            if ev.event_type in {"reversal", "face_slap", "identity_reveal"}
+            else "medium"
+        )
+        refs.append(
+            {
+                "id": f"evi_reward_{ev.scene_id}_{ev.event_type}",
+                "scene_id": ev.scene_id,
+                "episode_no": ev.episode_no,
+                "scene_no": ev.scene_no,
+                "scene_label": None,
+                "start_line": start_line,
+                "end_line": end_line,
+                "quote": ev.evidence,
+                "quote_source": f"reward:{ev.event_type}",
+                "scene_summary": None,
+                "reason": f"看点：{_REWARD_TYPE_HEADLINE.get(ev.event_type, '看点')}",
+                "confidence": confidence,
+            }
+        )
+
+    for idx, hit in enumerate(compliance_hits or []):
+        scene_id = str(hit.get("scene_id") or "").strip()
+        if not scene_id:
+            continue
+        raw_range = hit.get("evidence_line_range") or []
+        start_line = raw_range[0] if isinstance(raw_range, (list, tuple)) and len(raw_range) >= 1 else None
+        end_line = raw_range[1] if isinstance(raw_range, (list, tuple)) and len(raw_range) >= 2 else None
+        key = (scene_id, start_line, end_line)
+        if key in seen:
+            continue
+        seen.add(key)
+        level = str(hit.get("level") or "low_risk")
+        confidence = {"high_risk": "high", "medium_risk": "medium"}.get(level, "low")
+        category = str(hit.get("category") or "compliance")
+        refs.append(
+            {
+                "id": f"evi_risk_{scene_id}_{idx}",
+                "scene_id": scene_id,
+                "episode_no": hit.get("episode_no"),
+                "scene_no": hit.get("scene_no"),
+                "scene_label": None,
+                "start_line": start_line,
+                "end_line": end_line,
+                "quote": str(hit.get("excerpt") or ""),
+                "quote_source": "risk_hit",
+                "scene_summary": None,
+                "reason": f"合规风险：{category}",
+                "confidence": confidence,
+            }
+        )
+
+    return refs
+
+
 def _build_highlights_minimal(
     reward_events: list[RewardEvent],
     beat_sheet: Optional[BeatSheet],
+    evidence_refs: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """从 reward_events + 开场节拍派生 highlights[]（保留兼容契约，最小版不依赖额外 scene 元数据查询）。"""
+    """从 reward_events + 开场节拍派生 highlights[]。
+
+    highlight.id 复用对应 evidence_ref.id（同空间），前端点击高亮即可定位锚点。
+    """
+    reward_evi_index: dict[tuple[str, str], str] = {}
+    for er in evidence_refs:
+        qs = er.get("quote_source") or ""
+        if qs.startswith("reward:"):
+            ev_type = qs.split(":", 1)[1]
+            reward_evi_index[(er["scene_id"], ev_type)] = er["id"]
+
     out: list[dict[str, Any]] = []
     used: set[str] = set()
     for ev in reward_events:
@@ -290,11 +378,14 @@ def _build_highlights_minimal(
         hl_type = _REWARD_TO_HIGHLIGHT_TYPE.get(ev.event_type)
         if hl_type is None:
             continue
+        evi_id = reward_evi_index.get((ev.scene_id, ev.event_type))
+        if evi_id is None:
+            continue
         headline = _REWARD_TYPE_HEADLINE.get(ev.event_type, "看点")
         line_range = getattr(ev, "evidence_line_range", None)
         out.append(
             {
-                "id": str(uuid.uuid4()),
+                "id": evi_id,
                 "type": hl_type,
                 "scene_id": ev.scene_id,
                 "episode_no": ev.episode_no,
@@ -313,7 +404,7 @@ def _build_highlights_minimal(
                 if beat.type == "opening" and beat.anchor_scene_id and beat.anchor_scene_id not in used:
                     out.append(
                         {
-                            "id": str(uuid.uuid4()),
+                            "id": f"evi_hook_{beat.anchor_scene_id}",
                             "type": "hook",
                             "scene_id": beat.anchor_scene_id,
                             "episode_no": None,
@@ -802,9 +893,11 @@ def _build_report_payload(
         for action in actions
     ]
     reward_events = reward_events or []
+    compliance_hits = compliance_payload.get("hits") or []
     must_read_scene_ids = _select_beat_anchor_scenes(beat_sheet, top_k=3)
     risk_flags = _derive_risk_flags(compliance_payload)
-    highlights_payload = _build_highlights_minimal(reward_events, beat_sheet)
+    evidence_refs_payload = _build_evidence_refs_minimal(reward_events, compliance_hits)
+    highlights_payload = _build_highlights_minimal(reward_events, beat_sheet, evidence_refs_payload)
     return {
             "script_id": meta.script_id,
             "title": meta.title,
@@ -830,7 +923,7 @@ def _build_report_payload(
         "characters": _load_characters(script_id=meta.script_id, engine=engine),
         "character_relationships": _load_character_relationships(script_id=meta.script_id, engine=engine),
         "must_read_scene_ids": must_read_scene_ids,
-        "evidence_refs": [],
+        "evidence_refs": evidence_refs_payload,
         "highlights": highlights_payload,
         "coverage_card": asdict(coverage_card) if coverage_card is not None else None,
         "beat_sheet": beat_sheet.to_dict() if beat_sheet is not None else None,
