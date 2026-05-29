@@ -762,6 +762,13 @@ async def generate_report(
             "running",
             detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 看点事件",
         )
+        # 先加载 resolver 表数据：作为 character_graph_chain 的权威基线，
+        # 让 graph.nodes[].id 与 report.characters[].id 同 id-space（character_entities.id），
+        # 前端能跨 tab 联动；同时 report payload 也直接复用避免重复查表。
+        characters_payload = _load_characters(script_id=meta.script_id, engine=engine)
+        relationships_payload = _load_character_relationships(
+            script_id=meta.script_id, engine=engine
+        )
         reward_events: list[RewardEvent] = (
             await _optional_chain(
                 "reward_extractor",
@@ -784,7 +791,13 @@ async def generate_report(
         )
         graph_task = _optional_chain(
             "character_graph_chain",
-            extract_character_graph(script_id=script_id, caller=caller, engine=engine),
+            extract_character_graph(
+                script_id=script_id,
+                caller=caller,
+                engine=engine,
+                characters=characters_payload,
+                relationships=relationships_payload,
+            ),
         )
         coverage_card, beat_sheet, character_graph = await asyncio.gather(
             coverage_task, beat_task, graph_task
@@ -813,6 +826,8 @@ async def generate_report(
             beat_sheet=beat_sheet,
             character_graph=character_graph,
             reward_events=reward_events,
+            characters=characters_payload,
+            relationships=relationships_payload,
             engine=engine,
         )
 
@@ -856,6 +871,8 @@ def _build_report_payload(
     beat_sheet: Optional[BeatSheet] = None,
     character_graph: Optional[CharacterGraph] = None,
     reward_events: Optional[list[RewardEvent]] = None,
+    characters: Optional[list[dict[str, Any]]] = None,
+    relationships: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     decision_label = _normalize_decision_label(str(decision.decision))
     decision_payload = decision.payload if isinstance(decision.payload, dict) else {}
@@ -920,8 +937,16 @@ def _build_report_payload(
         "compliance": compliance_payload,
         "drama_tags": _load_drama_tags(script_id=meta.script_id, engine=engine),
         "plot_units": _load_plot_units(script_id=meta.script_id, engine=engine),
-        "characters": _load_characters(script_id=meta.script_id, engine=engine),
-        "character_relationships": _load_character_relationships(script_id=meta.script_id, engine=engine),
+        "characters": (
+            characters
+            if characters is not None
+            else _load_characters(script_id=meta.script_id, engine=engine)
+        ),
+        "character_relationships": (
+            relationships
+            if relationships is not None
+            else _load_character_relationships(script_id=meta.script_id, engine=engine)
+        ),
         "must_read_scene_ids": must_read_scene_ids,
         "evidence_refs": evidence_refs_payload,
         "highlights": highlights_payload,

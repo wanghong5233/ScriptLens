@@ -197,7 +197,16 @@ def test_generate_report_runs_full_tag_pipeline(monkeypatch) -> None:
             ]
         )
 
-    async def _fake_extract_character_graph(*, script_id, caller=None, engine=None, max_nodes=12, max_edges=30):
+    async def _fake_extract_character_graph(
+        *,
+        script_id,
+        caller=None,
+        engine=None,
+        max_nodes=12,
+        max_edges=30,
+        characters=None,
+        relationships=None,
+    ):
         from service.script_tools.character_graph_chain import CharacterEdge, CharacterNode
         return srs.CharacterGraph(
             nodes=[

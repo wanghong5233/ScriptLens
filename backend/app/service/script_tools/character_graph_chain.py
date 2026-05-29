@@ -79,6 +79,50 @@ _RELATION_TYPES = {"family", "romance", "rival", "ally", "authority", "deception
 _POLARITIES = {"positive", "negative", "mixed"}
 _ROLES = {"protagonist", "antagonist", "support", "minor"}
 
+# 真实人物名过滤：剧本里常见的非人物条目（道具、动作描写、群体角色）。
+# 这套黑名单同时被 relationship_candidate_generator 使用，所以保持模块级常量。
+_ACTION_NAME_PATTERN = re.compile(
+    r"(上前|迎上|走出|看向|转头|回头|冷喝|点头|挥手|指着|皱眉|扫视|目光|"
+    r"翻白眼|站起|伸出|拍了拍|握住|反手|一脚|趴倒|坐下|起身|惊讶|着急|疑惑|不屑|"
+    r"做出|手势|表情|动作|的样子|地说|的人)"
+)
+_GENERIC_CHARACTER_NAMES = {
+    "出场人物",
+    "电话",
+    "空镜",
+    "电子提示音",
+    "保镖",
+    "保镖若干",
+    "保镖若干。",
+    "宾客",
+    "宾客若干",
+    "工作人员",
+    "小弟",
+    "护士",
+    "服务员",
+    "店员",
+}
+
+
+def is_real_character_name(name: str) -> bool:
+    """判定 name 是否像真实人物（剔除道具、动作描写残片、通用群体角色）。
+
+    供 character_graph_chain 的 resolver baseline 路径和
+    relationship_candidate_generator 共享，保持单一入口避免规则发散。
+    """
+    text = str(name or "").strip()
+    if not text:
+        return False
+    if text in _GENERIC_CHARACTER_NAMES:
+        return False
+    if re.fullmatch(r"场景\d+", text):
+        return False
+    if re.fullmatch(r"(同学|宾客)\d+", text):
+        return False
+    if len(text) > 8:
+        return False
+    return not bool(_ACTION_NAME_PATTERN.search(text))
+
 _SYSTEM_PROMPT = """你是中文短剧人物关系分析师。
 
 共现统计已经告诉你哪些人物重要、哪些人物关系紧密。你只需要补充：
@@ -141,27 +185,162 @@ async def extract_character_graph(
     engine: Engine = default_engine,
     max_nodes: int = 12,
     max_edges: int = 30,
+    characters: Optional[List[Dict]] = None,
+    relationships: Optional[List[Dict]] = None,
 ) -> CharacterGraph:
+    """抽取人物关系图。
+
+    两条数据源路径：
+
+    1. **resolver baseline**（优先）—— 当调用方传入 ``characters`` /
+       ``relationships`` 时，节点取 ``character_entities`` 行（已合并 alias、
+       归一 canonical_name），边取 ``character_relationships`` 行（已包含
+       LLM 判定过的 type / polarity）。节点 id = character_entities.id（UUID），
+       与报告 payload 里的 ``characters[]`` 同 id-space，前端可以跨 tab 联动。
+    2. **scene 共现 fallback** —— 仅在 resolver 数据不可用时使用，节点 id
+       是从 name 算出来的 slug，无法和 characters 表对齐，但能保证旧脚本
+       /未跑 resolver 流水线的剧本仍出图。
+
+    两条路径都走 LLM enrichment 补 motivation / goal / obstacle；resolver
+    baseline 路径下边的 type / polarity 已存在，enrichment 仅在 LLM 给出
+    合法值时覆盖。
+    """
     caller = caller or LlmCaller()
     scenes = get_all_scenes(script_id=script_id, engine=engine)
     if not scenes:
         return CharacterGraph()
 
-    nodes, raw_edges = _cooccurrence_graph(scenes, max_nodes=max_nodes, max_edges=max_edges)
+    nodes, raw_edges = _build_from_resolver(
+        characters or [], relationships or [], max_nodes=max_nodes, max_edges=max_edges
+    )
+    if not nodes:
+        nodes, raw_edges = _cooccurrence_graph(
+            scenes, max_nodes=max_nodes, max_edges=max_edges
+        )
     if not nodes:
         return CharacterGraph()
 
-    # LLM enrichment 是「锦上添花」：role / motivation / goal / obstacle / type / polarity 都依赖 LLM。
-    # 共现节点和边本身（name / appearance_count / weight）都不依赖 LLM，永远拿得到。
-    # enrichment 失败时不该让整张图消失——退化成「只有共现的图」远比「图整个没了」对用户更友好。
+    # 收集每个 node 的 canonical_name 和 aliases，给 _sample_scenes_block 用做
+    # scene.characters 匹配。resolver 路径下 node.id 是 UUID 和 scene 的 raw 名字
+    # 无法直接比对，必须靠 name 集合做模糊匹配。fallback 路径下 aliases 为空，
+    # 仍然能按 node.name 自身匹配回原 scene。
+    node_aliases: Dict[str, List[str]] = {}
+    if characters:
+        char_by_id = {str(c.get("id") or ""): c for c in characters}
+        for node in nodes:
+            entry = char_by_id.get(node.id)
+            if entry is None:
+                continue
+            raw_aliases = entry.get("aliases") or []
+            if isinstance(raw_aliases, list):
+                node_aliases[node.id] = [str(a) for a in raw_aliases if str(a).strip()]
+
+    # LLM enrichment 是「锦上添花」：motivation / goal / obstacle 完全依赖 LLM；
+    # role / type / polarity 在 resolver 路径下已有默认，LLM 只在给出合法值时覆盖。
+    # enrichment 失败时不该让整张图消失——退化成「只有基线的图」远比「图整个没了」对用户更友好。
     try:
-        return await _enrich_graph(nodes, raw_edges, scenes, caller)
+        return await _enrich_graph(nodes, raw_edges, scenes, caller, node_aliases)
     except ScoreLLMError as exc:
         logger.exception(
-            "character_graph_chain: LLM enrichment 失败，降级返回纯共现图（保留 %d 节点 / %d 边）: %s",
+            "character_graph_chain: LLM enrichment 失败，降级返回基线图（保留 %d 节点 / %d 边）: %s",
             len(nodes), len(raw_edges), exc,
         )
         return CharacterGraph(nodes=nodes, edges=raw_edges)
+
+
+def _build_from_resolver(
+    characters: List[Dict],
+    relationships: List[Dict],
+    *,
+    max_nodes: int,
+    max_edges: int,
+) -> Tuple[List[CharacterNode], List[CharacterEdge]]:
+    """从 character_entities + character_relationships 表数据构造基线节点/边。
+
+    输入字段约定（与 script_report_service._load_characters /
+    _load_character_relationships 输出一致）：
+
+      characters[i]    : id, name, archetype, role_in_arc, arc_type,
+                          agency_level, appearance_count
+      relationships[i] : a_id, b_id, type, polarity
+
+    返回的 ``CharacterNode.id`` 是 character_entities.id（UUID），保证和
+    report payload 里的 characters[] / character_relationships[] 同 id-space。
+    """
+    valid_chars = [
+        c
+        for c in characters
+        if str(c.get("id") or "").strip()
+        and is_real_character_name(str(c.get("name") or ""))
+    ]
+    if not valid_chars:
+        return [], []
+    valid_chars.sort(
+        key=lambda c: (
+            -int(c.get("appearance_count") or 0),
+            str(c.get("name") or ""),
+        )
+    )
+    top = valid_chars[:max_nodes]
+    node_ids = {str(c.get("id") or "") for c in top}
+
+    nodes: List[CharacterNode] = []
+    for idx, character in enumerate(top):
+        nodes.append(
+            CharacterNode(
+                id=str(character.get("id") or ""),
+                name=str(character.get("name") or ""),
+                role=_initial_role(character, idx),
+                appearance_count=int(character.get("appearance_count") or 0),
+            )
+        )
+
+    edge_by_pair: Dict[Tuple[str, str], CharacterEdge] = {}
+    for rel in relationships:
+        a, b = str(rel.get("a_id") or ""), str(rel.get("b_id") or "")
+        if not a or not b or a == b:
+            continue
+        if a not in node_ids or b not in node_ids:
+            continue
+        rel_type = str(rel.get("type") or "").strip()
+        if rel_type not in _RELATION_TYPES:
+            continue
+        polarity = str(rel.get("polarity") or "").strip()
+        if polarity not in _POLARITIES:
+            polarity = "mixed"
+        key = tuple(sorted((a, b)))  # type: ignore[assignment]
+        if key in edge_by_pair:
+            # 已有同对边，保留 type 非默认的那条
+            continue
+        edge_by_pair[key] = CharacterEdge(
+            source_id=a,
+            target_id=b,
+            type=rel_type,
+            polarity=polarity,
+            # 表里没强度信号，给中等默认；前端用 weight 控制连线粗细，太低会看不见
+            weight=0.5,
+        )
+
+    edges = list(edge_by_pair.values())[:max_edges]
+    return nodes, edges
+
+
+def _initial_role(character: Dict, index: int) -> str:
+    """基于 character_entities 的语义字段推断节点 role 初值。
+
+    LLM enrichment 会在 _apply_node_enrichment 阶段覆盖；这里给出一个
+    确定性的兜底，保证 LLM 失败时主角/反派还能区分。
+    """
+    role_in_arc = str(character.get("role_in_arc") or "").lower()
+    archetype = str(character.get("archetype") or "").lower()
+    agency_level = str(character.get("agency_level") or "").lower()
+    if index == 0 or role_in_arc == "actor":
+        return "protagonist"
+    if role_in_arc == "blocker" or "villain" in archetype:
+        return "antagonist"
+    if role_in_arc in {"helper", "mentor", "catalyst"} or agency_level == "high":
+        return "support"
+    return "minor"
 
 
 def _cooccurrence_graph(
@@ -227,6 +406,7 @@ async def _enrich_graph(
     edges: List[CharacterEdge],
     scenes: List[Scene],
     caller: LlmCaller,
+    node_aliases: Optional[Dict[str, List[str]]] = None,
 ) -> CharacterGraph:
     node_by_id = {node.id: node for node in nodes}
     edge_by_pair = {_edge_key(edge.source_id, edge.target_id): edge for edge in edges}
@@ -239,7 +419,7 @@ async def _enrich_graph(
             edges_block="\n".join(
                 f"- {edge.source_id}|{edge.target_id}|共现权重{edge.weight}" for edge in edges
             ),
-            scenes_block=_sample_scenes_block(scenes, set(node_by_id)),
+            scenes_block=_sample_scenes_block(scenes, nodes, node_aliases or {}),
         ),
         tier=ModelTier.PRIMARY,
         system_message=_SYSTEM_PROMPT,
@@ -303,11 +483,38 @@ def _apply_edge_enrichment(
             edge.polarity = polarity
 
 
-def _sample_scenes_block(scenes: List[Scene], node_ids: set[str]) -> str:
+def _sample_scenes_block(
+    scenes: List[Scene],
+    nodes: List[CharacterNode],
+    node_aliases: Dict[str, List[str]],
+) -> str:
+    """挑选涉及主要节点的场景作为 LLM 上下文。
+
+    匹配口径：scene.characters 中的任一原始名（清洗后）命中节点 canonical_name
+    或其 alias 集合即视为涉及。这套口径同时支持：
+
+      - resolver 路径（node.id = UUID，必须靠 name+alias 才能匹配 scene 名）
+      - fallback 共现路径（node.id 是 name slug，但 node.name 仍是清洗后名字，
+        aliases 为空时退化为纯 name 匹配）
+    """
+    matchable: set[str] = set()
+    for node in nodes:
+        cleaned = _clean_name(node.name)
+        if cleaned:
+            matchable.add(cleaned)
+        for alias in node_aliases.get(node.id, []):
+            cleaned_alias = _clean_name(alias)
+            if cleaned_alias:
+                matchable.add(cleaned_alias)
+    matchable.discard("")
+    if not matchable:
+        return ""
+
     blocks: List[str] = []
     for scene in scenes[:60]:
-        names = [_node_id(_clean_name(n)) for n in scene.characters or []]
-        if not any(n in node_ids for n in names):
+        scene_names = {_clean_name(n) for n in (scene.characters or [])}
+        scene_names.discard("")
+        if not (scene_names & matchable):
             continue
         text = scene.text or ""
         if len(text) > 500:
