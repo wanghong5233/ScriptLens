@@ -30,9 +30,14 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-# 7 个流水线阶段，与 service.script_report_service.generate_report 一一对应。
+# 6 个流水线阶段，与 service.script_report_service.generate_report 一一对应。
 # (id, label, description) —— description 用于前端 tooltip / 下方解说，
 # 让用户明白每一步在做什么，而不是单纯看见一堆 spinner。
+#
+# release/v1-mvp（2026-05-29）：移除 running_tag_pipeline / computing_signals /
+# scoring_dimensions / aggregating_decision / building_pacing_and_actions 等 Batch3
+# 阶段；评分回归 self-contained 6 维规则评分（dimension_scorer），剧本不再做
+# 整剧抽情节打标签，pacing_curve / improvement_actions 暂时下线。
 _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
     (
         "loading_meta",
@@ -40,39 +45,29 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "读取剧本基本信息（集数 / 场数 / 字数），用于后续评分时给 LLM 上下文",
     ),
     (
-        "running_tag_pipeline",
-        "运行标签流水线",
-        "检查并补齐 plot_unit_tags / character_entities / relationship / drama_tags，缺失时触发 bundle_extractor",
-    ),
-    (
-        "computing_signals",
-        "计算派生信号",
-        "按 rubric 的 rule + llm bundles 统一计算信号集合，作为六维聚合输入",
-    ),
-    (
-        "scoring_dimensions",
-        "六维聚合与分档",
-        "dimension_aggregator 聚合后做 genre_weights 与 percentile tier，得到 tier/confidence/coverage",
-    ),
-    (
-        "aggregating_decision",
-        "汇总整体决策",
-        "合规评分接入决策矩阵，输出最终 decision 与 decision_inputs",
-    ),
-    (
-        "building_pacing_and_actions",
-        "生成节奏曲线与改写动作",
-        "按 plot_unit 强度序列构建 pacing_curve，并基于弱信号模板生成 improvement_actions",
-    ),
-    (
         "extracting_narrative",
-        "抽取速览 / 节拍 / 人物图",
-        "并行抽取速览卡 logline、三幕节拍 beat_sheet、人物关系图 character_graph、看点 reward_events，前端 5 个 tab 的叙事层数据",
+        "抽取叙事层",
+        "并行抽取看点 reward_events、速览卡 logline、三幕节拍 beat_sheet、人物关系图 character_graph、动机回扫 motivation —— 前端速览 / 节拍 / 人物 / 看点 4 个叙事 tab 的数据源",
+    ),
+    (
+        "scoring_6d",
+        "六维规则评分",
+        "self-contained 规则评分：story / character / concept / emotion / pacing / dialogue 各自从 chain 输出 + scenes 表推导分数，不依赖标签流水线",
+    ),
+    (
+        "compliance",
+        "合规风险扫描",
+        "compliance_scorer 独立维度：扫描红线词、二级 LLM 判定后给出 high_risk / medium_risk / low_risk / clean",
+    ),
+    (
+        "building_payload",
+        "组装报告 payload",
+        "把 6 维评分、合规结果、叙事层数据、看点 / 证据锚点拼装成前端需要的 report payload 结构",
     ),
     (
         "persisting",
         "写入数据库",
-        "事务写入 scoring_runs / script_scores / scoring_improvement_actions / reports.decision_payload",
+        "事务写入 scoring_runs / script_scores / reports.decision_payload",
     ),
 ]
 

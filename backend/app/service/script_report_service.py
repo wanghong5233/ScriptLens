@@ -1,9 +1,21 @@
-"""Script scoring report pipeline (6 dimensions, action-driven rewrite).
+"""Script scoring report pipeline (6 dimensions, self-contained, release/v1-mvp).
 
-报告内容生成分两层：
-1. 评分层（6 维 rubric/signal/aggregator） —— scorecard + decision + tier_cuts + top_signals
-2. 叙事层（chain 抽取）              —— coverage_card / beat_sheet / character_graph / highlights
-   这层独立于评分，纯为前端 5 个 tab 的内容展示提供结构化数据。
+release/v1-mvp 评分流水线说明：
+
+- 评分**完全独立于 tag_pipeline**（整剧抽情节打标签方向已废弃）。报告生成只跑：
+    1. 叙事层 5 chain（reward / coverage / beat / character_graph / motivation）
+    2. 6 维规则评分（dimension_scorer.score_<dim>，story/character/concept/
+       emotion/pacing/dialogue）
+    3. 合规扫描（compliance_scorer.screen_compliance，独立维度）
+- Batch3 的 rubric / signal_catalog / score_registry / tag_pipeline /
+  decision_aggregator / dimension_aggregator / improvement_action_generator /
+  pacing_aggregator / evaluation_chain / bundle_extractor / plot_unit_segmenter /
+  character_entity_resolver / relationship_candidate_generator /
+  tag_alignment_analyzer 等模块进入 dead-code 隔离区（顶部 docstring 已标注），
+  下次 cleanup PR 统一清理。
+- payload 契约：drama_tags / plot_units / characters / character_relationships
+  字段保留 key，但因 tag_pipeline 不再运行、对应表无数据，查询自然返回 []，
+  前端 4 个 tab 走空态。
 """
 
 from __future__ import annotations
@@ -22,31 +34,72 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from service.core.ingestion.script_loader import UnsupportedScriptFormatError
-from service.score_registry import RubricConfig, load_rubric
 from service.script_ingestion_service import ScriptIngestionService
 from service.script_progress_tracker import tracker as progress_tracker
 from service.script_tools.beat_chain import BeatSheet, extract_beat_sheet
 from service.script_tools.character_graph_chain import CharacterGraph, extract_character_graph
 from service.script_tools.compliance_scorer import screen_compliance
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
-from service.script_tools.decision_aggregator import decide
-from service.script_tools.dimension_aggregator import DimensionScore, aggregate
-from service.script_tools.genre_weights import apply_genre_weights, infer_genre_scope
-from service.script_tools.improvement_action_generator import ImprovementAction, generate_actions
+from service.script_tools.dimension_scorer import (
+    ScoreOutput,
+    score_character,
+    score_concept,
+    score_dialogue,
+    score_emotion,
+    score_pacing,
+    score_story,
+)
 from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
-from service.script_tools.pacing_aggregator import aggregate_pacing_curve_v3 as aggregate_pacing_curve
-from service.script_tools.percentile_tier import resolve_tier
+from service.script_tools.motivation_chain import MotivationResult, score_motivation
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
-from service.script_tools.signal_catalog import SignalValue, build_signal_context, compute_signals
-from service.script_tools.tag_pipeline import run_tag_pipeline
 from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
 
-_RUBRIC_ID = "v3.0.0"
-_TAG_SET_VERSION = "script"
+# release/v1-mvp 6 维评分版本号（不再走 rubric registry）
+_SCORE_VER = "v1-mvp-6d"
+_TAG_SET_VER_NONE = "none"
+
+# 6 维默认权重（与 rubric_sets/v3.yaml.base_weight 保持一致；不引 yaml 避免拉回 rubric 依赖）
+_DIM_BASE_WEIGHT: dict[str, float] = {
+    "story": 0.20,
+    "character": 0.20,
+    "concept": 0.15,
+    "emotion": 0.20,
+    "pacing": 0.15,
+    "dialogue": 0.10,
+}
+_DIM_ORDER: tuple[str, ...] = ("story", "character", "concept", "emotion", "pacing", "dialogue")
+_DEFAULT_TIER_CUTS: dict[str, float] = {"p25": 4.0, "p50": 6.0, "p75": 8.0}
+
+# schemas.script.TierName = Literal["excellent","good","weak","poor","insufficient"]
+# 4 档分位与 service.script_tools.percentile_tier.resolve_tier 一致：
+#   score >= p75=8 → excellent；>= p50=6 → good；>= p25=4 → weak；其它 → poor；None → insufficient。
+# 历史的 "above / average / below" 字面量是错的，会让 ReportPayload.model_validate 直接 500。
+def _score_to_tier(score: Optional[int | float]) -> str:
+    if score is None:
+        return "insufficient"
+    s = float(score)
+    p25 = _DEFAULT_TIER_CUTS["p25"]
+    p50 = _DEFAULT_TIER_CUTS["p50"]
+    p75 = _DEFAULT_TIER_CUTS["p75"]
+    if s >= p75:
+        return "excellent"
+    if s >= p50:
+        return "good"
+    if s >= p25:
+        return "weak"
+    return "poor"
+
+
+# ScoreOutput.level → 前端 confidence 文案（schemas.script.ConfidenceName: high/medium/low）
+_LEVEL_TO_CONFIDENCE: dict[Optional[str], str] = {
+    "high": "high",
+    "medium": "medium",
+    "low": "medium",
+    None: "low",
+}
 _DIM_CONFIDENCE_FLOAT = {"high": 0.85, "medium": 0.6, "low": 0.35}
-_CONF_RANK = {"high": 2, "medium": 1, "low": 0}
 
 
 def _is_skippable_ingest_error(exc: Exception) -> bool:
@@ -147,16 +200,6 @@ class _ScriptMeta:
     title: str
     total_episodes: int
     total_scenes: int
-
-
-def _merge_confidence(a: str, b: str) -> str:
-    rank_a = _CONF_RANK.get(a, 0)
-    rank_b = _CONF_RANK.get(b, 0)
-    out_rank = min(rank_a, rank_b)
-    for label, rank in _CONF_RANK.items():
-        if rank == out_rank:
-            return label
-    return "low"
 
 
 def _safe_tier_cuts(cuts: dict[str, Any] | None) -> dict[str, float]:
@@ -610,6 +653,52 @@ def _load_character_relationships(*, script_id: str, engine: Engine) -> list[dic
     ]
 
 
+def _score_one(
+    *,
+    dimension: str,
+    script_id: str,
+    meta: "_ScriptMeta",
+    reward_events: list[RewardEvent],
+    coverage_card: Optional[CoverageCard],
+    beat_sheet: Optional[BeatSheet],
+    character_graph: Optional[CharacterGraph],
+    motivation_result: Optional[MotivationResult],
+    engine: Engine,
+) -> ScoreOutput:
+    """6 维 dispatcher：把 chain 输出按维度分发给 dimension_scorer 函数。"""
+    if dimension == "story":
+        return score_story(
+            beat_sheet=beat_sheet,
+            reward_events=reward_events,
+            total_episodes=meta.total_episodes,
+        )
+    if dimension == "character":
+        return score_character(
+            motivation_result=motivation_result,
+            character_graph=character_graph,
+        )
+    if dimension == "concept":
+        return score_concept(
+            coverage_card=coverage_card,
+            script_id=script_id,
+            engine=engine,
+        )
+    if dimension == "emotion":
+        return score_emotion(
+            reward_events=reward_events,
+            total_episodes=meta.total_episodes,
+        )
+    if dimension == "pacing":
+        return score_pacing(
+            script_id=script_id,
+            reward_events=reward_events,
+            engine=engine,
+        )
+    if dimension == "dialogue":
+        return score_dialogue(script_id=script_id, engine=engine)
+    raise ValueError(f"unsupported dimension={dimension!r}")
+
+
 async def score_one_dimension(
     *,
     script_id: str,
@@ -617,9 +706,13 @@ async def score_one_dimension(
     caller: Optional[LlmCaller] = None,
     engine: Engine = default_engine,
 ) -> dict[str, Any]:
+    """单维度复评（用于 doc-studio rewrite 后的对比评分）。
+
+    release/v1-mvp 简化版：按需重新跑该维度依赖的上游 chain + score_<dim>，
+    不依赖 rubric / signal_catalog / tag_pipeline。
+    """
     caller = caller or LlmCaller()
-    rubric = load_rubric(_RUBRIC_ID)
-    valid = {dim.id for dim in rubric.dimensions} | {"compliance"}
+    valid = {"story", "character", "concept", "emotion", "pacing", "dialogue", "compliance"}
     if dimension not in valid:
         raise ValueError(f"unknown dimension={dimension!r}; valid={sorted(valid)}")
     meta = _load_script_meta(script_id, engine=engine)
@@ -638,36 +731,64 @@ async def score_one_dimension(
             "baseline": baseline,
         }
 
-    await run_tag_pipeline(
-        script_ref=script_id,
-        tag_set_ver=_TAG_SET_VERSION,
-        caller=caller,
+    reward_events: list[RewardEvent] = []
+    coverage_card: Optional[CoverageCard] = None
+    beat_sheet: Optional[BeatSheet] = None
+    character_graph: Optional[CharacterGraph] = None
+    motivation_result: Optional[MotivationResult] = None
+
+    if dimension in {"story", "emotion", "pacing"}:
+        reward_events = (
+            await _optional_chain(
+                "reward_extractor",
+                extract_reward_events(script_id=script_id, caller=caller),
+            )
+            or []
+        )
+    if dimension == "story":
+        beat_sheet = await _optional_chain(
+            "beat_chain",
+            extract_beat_sheet(
+                script_id=script_id,
+                reward_events=reward_events,
+                caller=caller,
+                engine=engine,
+            ),
+        )
+    elif dimension == "character":
+        motivation_result = await _optional_chain(
+            "motivation_chain",
+            score_motivation(script_id=script_id, caller=caller),
+        )
+        character_graph = await _optional_chain(
+            "character_graph_chain",
+            extract_character_graph(
+                script_id=script_id, caller=caller, engine=engine
+            ),
+        )
+    elif dimension == "concept":
+        coverage_card = await _optional_chain(
+            "coverage_chain",
+            extract_coverage_card(script_id=script_id, caller=caller, engine=engine),
+        )
+
+    output = _score_one(
+        dimension=dimension,
+        script_id=script_id,
+        meta=meta,
+        reward_events=reward_events,
+        coverage_card=coverage_card,
+        beat_sheet=beat_sheet,
+        character_graph=character_graph,
+        motivation_result=motivation_result,
         engine=engine,
     )
-    ctx = build_signal_context(script_id=script_id, engine=engine)
-    signals = await compute_signals(rubric, ctx, caller=caller)
-    dim_scores = aggregate(rubric, signals)
-    genre = infer_genre_scope(ctx.drama_tags)
-    for item in dim_scores:
-        tier_result = resolve_tier(
-            rubric,
-            dimension=item.dimension,
-            score=item.score,
-            genre_scope=genre,
-            sample_size=ctx.plot_unit_count,
-        )
-        item.tier = tier_result.tier
-        item.confidence = _merge_confidence(item.confidence, tier_result.confidence)
-    target = next((item for item in dim_scores if item.dimension == dimension), None)
-    if target is None:
-        raise ValueError(f"dimension={dimension!r} not found in rubric")
     return {
-        "dimension": target.dimension,
-        "score": target.score,
-        "tier": target.tier,
-        "reason": target.reason,
-        "evidence_scene_ids": _scene_ids_from_signal_refs(target.signal_refs),
-        "signal_refs": target.signal_refs,
+        "dimension": dimension,
+        "score": output.score,
+        "tier": _score_to_tier(output.score),
+        "reason": output.reason,
+        "evidence_scene_ids": list(output.evidence_ref_ids),
         "baseline": baseline,
     }
 
@@ -678,6 +799,16 @@ async def generate_report(
     caller: Optional[LlmCaller] = None,
     engine: Engine = default_engine,
 ) -> dict[str, Any]:
+    """release/v1-mvp 报告生成流水线（self-contained，零 tag_pipeline 依赖）。
+
+    阶段：
+      1. loading_meta              —— 读取剧本元数据
+      2. extracting_narrative      —— 并行跑 reward → coverage/beat/graph/motivation 5 chain
+      3. scoring_6d                —— 6 维规则评分（dimension_scorer）
+      4. compliance                —— 独立合规扫描
+      5. building_payload          —— 组装 report payload
+      6. persisting                —— 落库 reports / scoring_runs / script_scores
+    """
     caller = caller or LlmCaller()
     progress_tracker.start(script_id)
 
@@ -688,87 +819,13 @@ async def generate_report(
             raise ValueError(f"script_id={script_id} 不存在")
         progress_tracker.update_stage(script_id, "loading_meta", "done", detail=f"title={meta.title}")
 
-        progress_tracker.update_stage(script_id, "running_tag_pipeline", "running", detail="运行完整标签流水线")
-        await run_tag_pipeline(
-            script_ref=script_id,
-            tag_set_ver=_TAG_SET_VERSION,
-            caller=caller,
-            engine=engine,
-        )
-        progress_tracker.update_stage(script_id, "running_tag_pipeline", "done", detail="标签流水线完成")
-
-        progress_tracker.update_stage(script_id, "computing_signals", "running", detail="加载 rubric + 计算 signals")
-        rubric = load_rubric(_RUBRIC_ID)
-        ctx = build_signal_context(script_id=script_id, engine=engine)
-        signals = await compute_signals(rubric, ctx, caller=caller)
-        progress_tracker.update_stage(
-            script_id,
-            "computing_signals",
-            "done",
-            detail=f"signals={len(signals)}",
-        )
-
-        progress_tracker.update_stage(script_id, "scoring_dimensions", "running", detail="维度聚合与 tier 映射")
-        dim_scores = aggregate(rubric, signals)
-        genre_scope = infer_genre_scope(ctx.drama_tags)
-        for item in dim_scores:
-            tier_result = resolve_tier(
-                rubric,
-                dimension=item.dimension,
-                score=item.score,
-                genre_scope=genre_scope,
-                sample_size=ctx.plot_unit_count,
-            )
-            item.tier = tier_result.tier
-            item.confidence = _merge_confidence(item.confidence, tier_result.confidence)
-            item.tier_cuts = _safe_tier_cuts(tier_result.cuts)
-        weighted = apply_genre_weights(rubric, dim_scores, genre_scope=genre_scope)
-        progress_tracker.update_stage(
-            script_id,
-            "scoring_dimensions",
-            "done",
-            detail=f"dimensions={len(dim_scores)} genre={genre_scope}",
-        )
-
-        progress_tracker.update_stage(script_id, "aggregating_decision", "running", detail="合规评估 + 决策聚合")
-        compliance = await screen_compliance(script_id=script_id, caller=caller)
-        decision = decide(dim_scores, weighted, compliance=compliance.to_dict())
-        progress_tracker.update_stage(
-            script_id,
-            "aggregating_decision",
-            "done",
-            detail=f"decision={decision.decision}",
-        )
-
-        progress_tracker.update_stage(script_id, "building_pacing_and_actions", "running", detail="生成节奏曲线与改写动作")
-        run_id = str(uuid.uuid4())
-        actions = generate_actions(
-            run_id=run_id,
-            script_id=script_id,
-            dim_scores=dim_scores,
-            signal_values=signals,
-        )
-        pacing_curve = aggregate_pacing_curve(ctx)
-        progress_tracker.update_stage(
-            script_id,
-            "building_pacing_and_actions",
-            "done",
-            detail=f"actions={len(actions)} pacing_points={len(pacing_curve)}",
-        )
-
         progress_tracker.update_stage(
             script_id,
             "extracting_narrative",
             "running",
-            detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 看点事件",
+            detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 看点 / 动机",
         )
-        # 先加载 resolver 表数据：作为 character_graph_chain 的权威基线，
-        # 让 graph.nodes[].id 与 report.characters[].id 同 id-space（character_entities.id），
-        # 前端能跨 tab 联动；同时 report payload 也直接复用避免重复查表。
-        characters_payload = _load_characters(script_id=meta.script_id, engine=engine)
-        relationships_payload = _load_character_relationships(
-            script_id=meta.script_id, engine=engine
-        )
+        # reward 必须先跑（beat_chain 依赖它）；其余 4 个 chain 在 reward 完成后并发
         reward_events: list[RewardEvent] = (
             await _optional_chain(
                 "reward_extractor",
@@ -789,18 +846,17 @@ async def generate_report(
                 engine=engine,
             ),
         )
+        # 不传 characters/relationships → 走共现 fallback，零 tag_pipeline 表依赖
         graph_task = _optional_chain(
             "character_graph_chain",
-            extract_character_graph(
-                script_id=script_id,
-                caller=caller,
-                engine=engine,
-                characters=characters_payload,
-                relationships=relationships_payload,
-            ),
+            extract_character_graph(script_id=script_id, caller=caller, engine=engine),
         )
-        coverage_card, beat_sheet, character_graph = await asyncio.gather(
-            coverage_task, beat_task, graph_task
+        motivation_task = _optional_chain(
+            "motivation_chain",
+            score_motivation(script_id=script_id, caller=caller),
+        )
+        coverage_card, beat_sheet, character_graph, motivation_result = await asyncio.gather(
+            coverage_task, beat_task, graph_task, motivation_task
         )
         progress_tracker.update_stage(
             script_id,
@@ -810,40 +866,74 @@ async def generate_report(
                 f"速览{'已生成' if coverage_card else '降级'} · "
                 f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
                 f"人物 {len(character_graph.nodes) if character_graph else 0} 个 · "
-                f"看点 {len(reward_events)}"
+                f"看点 {len(reward_events)} · "
+                f"动机决策 {len(motivation_result.judged_decisions) if motivation_result else 0}"
             ),
         )
 
+        progress_tracker.update_stage(
+            script_id, "scoring_6d", "running", detail="6 维规则评分（self-contained）"
+        )
+        dim_outputs: dict[str, ScoreOutput] = {
+            dim: _score_one(
+                dimension=dim,
+                script_id=script_id,
+                meta=meta,
+                reward_events=reward_events,
+                coverage_card=coverage_card,
+                beat_sheet=beat_sheet,
+                character_graph=character_graph,
+                motivation_result=motivation_result,
+                engine=engine,
+            )
+            for dim in _DIM_ORDER
+        }
+        scored_count = sum(1 for o in dim_outputs.values() if o.score is not None)
+        progress_tracker.update_stage(
+            script_id,
+            "scoring_6d",
+            "done",
+            detail=f"dimensions={len(dim_outputs)} scored={scored_count}",
+        )
+
+        progress_tracker.update_stage(
+            script_id, "compliance", "running", detail="合规风险扫描"
+        )
+        compliance = await screen_compliance(script_id=script_id, caller=caller)
+        progress_tracker.update_stage(
+            script_id,
+            "compliance",
+            "done",
+            detail=f"compliance.tier={compliance.tier}",
+        )
+
+        progress_tracker.update_stage(
+            script_id, "building_payload", "running", detail="组装报告 payload"
+        )
+        run_id = str(uuid.uuid4())
         report_payload = _build_report_payload(
             meta=meta,
-            decision=decision,
-            weighted_overall_score=weighted.overall_score,
-            dim_scores=dim_scores,
+            dim_outputs=dim_outputs,
             compliance_payload=compliance.to_dict(),
-            pacing_curve=pacing_curve,
-            actions=actions,
             coverage_card=coverage_card,
             beat_sheet=beat_sheet,
             character_graph=character_graph,
             reward_events=reward_events,
-            characters=characters_payload,
-            relationships=relationships_payload,
             engine=engine,
         )
+        progress_tracker.update_stage(script_id, "building_payload", "done")
 
-        progress_tracker.update_stage(script_id, "persisting", "running", detail="写入 reports/scoring_runs/script_scores/actions")
+        progress_tracker.update_stage(
+            script_id,
+            "persisting",
+            "running",
+            detail="写入 reports / scoring_runs / script_scores",
+        )
         _persist_report(
             script_id=script_id,
             run_id=run_id,
-            rubric=rubric,
-            genre_scope=genre_scope,
-            ctx=ctx,
-            signals=signals,
-            dim_scores=dim_scores,
-            actions=actions,
-            decision_payload=decision.payload,
+            dim_outputs=dim_outputs,
             report_payload=report_payload,
-            weighted_overall_score=weighted.overall_score,
             engine=engine,
         )
         _mark_script_status(script_id=script_id, status="ready", failure_reason=None, engine=engine)
@@ -852,100 +942,184 @@ async def generate_report(
         return report_payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("generate_report failed script_id=%s: %s", script_id, exc)
-        _mark_script_status(script_id=script_id, status="failed", failure_reason=f"{type(exc).__name__}: {exc}", engine=engine)
+        _mark_script_status(
+            script_id=script_id,
+            status="failed",
+            failure_reason=f"{type(exc).__name__}: {exc}",
+            engine=engine,
+        )
         progress_tracker.finalize(script_id, error=f"{type(exc).__name__}: {exc}")
         raise
+
+
+def _scorecard_from_outputs(dim_outputs: dict[str, ScoreOutput]) -> list[dict[str, Any]]:
+    """6 维 ScoreOutput → scorecard payload。
+
+    与 Batch3 时代 scorecard 字段保持兼容（前端 zero-change）；信号/聚合相关字段
+    （signal_refs / top_signals）置空，因为 release/v1-mvp 走规则评分不分信号。
+    """
+    scorecard: list[dict[str, Any]] = []
+    for dim in _DIM_ORDER:
+        out = dim_outputs.get(dim)
+        if out is None:
+            scorecard.append(
+                {
+                    "dimension": dim,
+                    "score": None,
+                    "tier": "insufficient",
+                    "confidence": "low",
+                    "coverage_ratio": 0.0,
+                    "signal_refs": [],
+                    "top_signals": [],
+                    "tier_cuts": dict(_DEFAULT_TIER_CUTS),
+                    "reason": "未参与评分",
+                    "evidence_ref_ids": [],
+                }
+            )
+            continue
+        scorecard.append(
+            {
+                "dimension": dim,
+                "score": out.score,
+                "tier": _score_to_tier(out.score),
+                "confidence": _LEVEL_TO_CONFIDENCE.get(out.level, "low"),
+                "coverage_ratio": 1.0 if out.score is not None else 0.0,
+                "signal_refs": [],
+                "top_signals": [],
+                "tier_cuts": dict(_DEFAULT_TIER_CUTS),
+                "reason": out.reason,
+                "evidence_ref_ids": list(out.evidence_ref_ids),
+            }
+        )
+    return scorecard
+
+
+def _compute_overall_score(dim_outputs: dict[str, ScoreOutput]) -> Optional[float]:
+    """对有分维度按 _DIM_BASE_WEIGHT 加权（仅有分项参与归一化）。"""
+    total_weight = 0.0
+    weighted_sum = 0.0
+    for dim in _DIM_ORDER:
+        out = dim_outputs.get(dim)
+        if out is None or out.score is None:
+            continue
+        weight = _DIM_BASE_WEIGHT.get(dim, 0.0)
+        total_weight += weight
+        weighted_sum += float(out.score) * weight
+    if total_weight <= 0:
+        return None
+    return round(weighted_sum / total_weight, 2)
+
+
+def _derive_decision(
+    overall_score: Optional[float],
+    compliance_payload: dict[str, Any],
+) -> tuple[str, str, str]:
+    """简单规则决策（release/v1-mvp）：基于 overall_score + 合规级别。
+
+    返回 (label, confidence, one_sentence_reason)。
+    label ∈ {recommend_continue, cautious_continue, not_recommended}。
+    """
+    compliance_tier = str(compliance_payload.get("tier") or "").strip()
+    if compliance_tier == "high_risk":
+        return (
+            "not_recommended",
+            "high",
+            "合规扫描发现高风险红线命中，建议先做内容整改。",
+        )
+    if overall_score is None:
+        return (
+            "cautious_continue",
+            "low",
+            "评分维度证据不足，建议人工复核后再定。",
+        )
+    if overall_score >= 6.5:
+        return (
+            "recommend_continue",
+            "high",
+            f"6 维加权 {overall_score:.1f}/10，整体表现良好，建议推进。",
+        )
+    if overall_score >= 4.5:
+        return (
+            "cautious_continue",
+            "medium",
+            f"6 维加权 {overall_score:.1f}/10，存在明显短板，建议针对弱项改写后复评。",
+        )
+    return (
+        "not_recommended",
+        "medium",
+        f"6 维加权 {overall_score:.1f}/10，多维度低分，整体故事质量需要重写。",
+    )
 
 
 def _build_report_payload(
     *,
     meta: _ScriptMeta,
-    decision: Any,
-    weighted_overall_score: float | None,
-    dim_scores: list[DimensionScore],
+    dim_outputs: dict[str, ScoreOutput],
     compliance_payload: dict[str, Any],
-    pacing_curve: list[dict[str, Any]],
-    actions: list[ImprovementAction],
     engine: Engine,
     coverage_card: Optional[CoverageCard] = None,
     beat_sheet: Optional[BeatSheet] = None,
     character_graph: Optional[CharacterGraph] = None,
     reward_events: Optional[list[RewardEvent]] = None,
-    characters: Optional[list[dict[str, Any]]] = None,
-    relationships: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    decision_label = _normalize_decision_label(str(decision.decision))
-    decision_payload = decision.payload if isinstance(decision.payload, dict) else {}
-    scorecard: list[dict[str, Any]] = []
-    for dim in dim_scores:
-        scorecard.append(
-            {
-                "dimension": dim.dimension,
-                "score": dim.score,
-                "tier": dim.tier,
-                "confidence": dim.confidence,
-                "coverage_ratio": dim.coverage_ratio,
-                "signal_refs": dim.signal_refs,
-                "top_signals": dim.top_signals,
-                "tier_cuts": _safe_tier_cuts(dim.tier_cuts),
-                "reason": dim.reason,
-                "evidence_ref_ids": _scene_ids_from_signal_refs(dim.signal_refs),
-            }
-        )
-    tier_cuts_used = {
-        item["dimension"]: dict(item.get("tier_cuts") or {})
-        for item in scorecard
-    }
-    action_seeds = [
-        {
-            "id": action.id,
-            "dimension": action.dimension,
-            "signal_key": action.signal_key,
-            "issue": action.issue,
-            "target": action.target,
-            "action_steps": action.action_steps,
-            "evidence_refs": action.evidence_refs,
-            "estimated_lift": action.estimated_lift,
-        }
-        for action in actions
-    ]
+    """release/v1-mvp 报告 payload 组装。
+
+    payload 字段契约（与前端 4 个 tab + scorecard + decision 保持兼容）：
+      - scorecard / evaluation.dimensions  : 6 维 from dim_outputs
+      - decision                            : 规则决策（基于 overall_score + compliance）
+      - overall_score                       : 6 维加权和（仅有分项参与归一）
+      - compliance / risk_flags             : 独立合规扫描
+      - drama_tags / plot_units /
+        characters / character_relationships: tag_pipeline 已废弃 → 表为空 → 自然为 []
+      - coverage_card / beat_sheet /
+        character_graph                     : 5 chain 输出
+      - reward / evidence_refs / highlights /
+        must_read_scene_ids                 : 看点 + 证据锚点
+      - pacing_curve                        : v1-mvp 暂留空 []，后续按 reward+scene
+                                              分布派生（无 plot_units 依赖）
+      - evaluation.rewrite_seeds            : v1-mvp 暂留空 []（Batch3 actions 体系
+                                              已废弃，rewrite 由 doc-studio agent 接管）
+    """
+    scorecard = _scorecard_from_outputs(dim_outputs)
+    overall_score = _compute_overall_score(dim_outputs)
+    decision_label, decision_confidence, decision_reason = _derive_decision(
+        overall_score, compliance_payload
+    )
+    tier_cuts_used = {item["dimension"]: dict(item.get("tier_cuts") or {}) for item in scorecard}
+
     reward_events = reward_events or []
     compliance_hits = compliance_payload.get("hits") or []
     must_read_scene_ids = _select_beat_anchor_scenes(beat_sheet, top_k=3)
     risk_flags = _derive_risk_flags(compliance_payload)
     evidence_refs_payload = _build_evidence_refs_minimal(reward_events, compliance_hits)
     highlights_payload = _build_highlights_minimal(reward_events, beat_sheet, evidence_refs_payload)
+
     return {
-            "script_id": meta.script_id,
-            "title": meta.title,
+        "script_id": meta.script_id,
+        "title": meta.title,
         "decision": {
             "label": decision_label,
-            "confidence": decision.confidence,
-            "one_sentence_reason": decision.one_sentence_reason,
-            "summary": decision.one_sentence_reason,
+            "confidence": decision_confidence,
+            "one_sentence_reason": decision_reason,
+            "summary": decision_reason,
             "decision_inputs": {
-                **decision_payload,
                 "tier_cuts_used": tier_cuts_used,
                 "overall_cuts": _compute_overall_cuts(scorecard),
-                "raw_decision": decision.decision,
+                "raw_decision": decision_label,
+                "score_ver": _SCORE_VER,
             },
         },
-        "decision_reason": decision.one_sentence_reason,
-        "overall_score": weighted_overall_score,
-        "summary": decision.one_sentence_reason,
+        "decision_reason": decision_reason,
+        "overall_score": overall_score,
+        "summary": decision_reason,
         "scorecard": scorecard,
         "compliance": compliance_payload,
+        # 以下 4 个字段查询自动为 [] —— tag_pipeline 已废弃、对应表无数据
         "drama_tags": _load_drama_tags(script_id=meta.script_id, engine=engine),
         "plot_units": _load_plot_units(script_id=meta.script_id, engine=engine),
-        "characters": (
-            characters
-            if characters is not None
-            else _load_characters(script_id=meta.script_id, engine=engine)
-        ),
-        "character_relationships": (
-            relationships
-            if relationships is not None
-            else _load_character_relationships(script_id=meta.script_id, engine=engine)
+        "characters": _load_characters(script_id=meta.script_id, engine=engine),
+        "character_relationships": _load_character_relationships(
+            script_id=meta.script_id, engine=engine
         ),
         "must_read_scene_ids": must_read_scene_ids,
         "evidence_refs": evidence_refs_payload,
@@ -954,7 +1128,7 @@ def _build_report_payload(
         "beat_sheet": beat_sheet.to_dict() if beat_sheet is not None else None,
         "character_graph": character_graph.to_dict() if character_graph is not None else None,
         "risk_flags": risk_flags,
-        "pacing_curve": pacing_curve,
+        "pacing_curve": [],
         "evaluation": {
             "dimensions": [
                 {
@@ -972,7 +1146,7 @@ def _build_report_payload(
                 }
                 for item in scorecard
             ],
-            "rewrite_seeds": action_seeds,
+            "rewrite_seeds": [],
         },
     }
 
@@ -981,41 +1155,34 @@ def _persist_report(
     *,
     script_id: str,
     run_id: str,
-    rubric: RubricConfig,
-    genre_scope: str,
-    ctx: Any,
-    signals: dict[str, SignalValue],
-    dim_scores: list[DimensionScore],
-    actions: list[ImprovementAction],
-    decision_payload: dict[str, Any],
+    dim_outputs: dict[str, ScoreOutput],
     report_payload: dict[str, Any],
-    weighted_overall_score: float | None,
     engine: Engine,
 ) -> None:
+    """release/v1-mvp 持久化：reports + scoring_runs + script_scores（6 维）。
+
+    rubric/signal/genre/actions 等 Batch3 体系字段填占位值，保持表结构兼容。
+    scoring_improvement_actions 表 release/v1-mvp 不写入（actions 体系已废弃）。
+    """
     now = datetime.utcnow()
     report_id = str(uuid.uuid4())
+    overall_score = report_payload.get("overall_score")
     input_hash = hashlib.sha256(
         json.dumps(
             {
                 "script_id": script_id,
-                "rubric_version": rubric.rubric_id,
-                "score_ver": rubric.score_ver,
-                "tag_set_ver": ctx.tag_set_ver,
-                "plot_unit_count": ctx.plot_unit_count,
-                "episode_count": ctx.episode_count,
+                "score_ver": _SCORE_VER,
+                "tag_set_ver": _TAG_SET_VER_NONE,
             },
             ensure_ascii=False,
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
-    model_versions = _collect_model_versions(signals)
-    prompt_versions = {
-        bundle.id: f"{rubric.score_ver}:{bundle.id}" for bundle in rubric.llm_bundles
-    }
     quality_flags = {
-        "insufficient_dimensions": [dim.dimension for dim in dim_scores if dim.tier == "insufficient"],
-        "overall_score": weighted_overall_score,
-        "signal_count": len(signals),
+        "insufficient_dimensions": [
+            dim for dim, out in dim_outputs.items() if out.score is None
+        ],
+        "overall_score": overall_score,
     }
 
     with engine.begin() as conn:
@@ -1038,15 +1205,15 @@ def _persist_report(
             {
                 "id": run_id,
                 "script_id": script_id,
-                "rubric_version": rubric.rubric_id,
-                "tag_set_ver": ctx.tag_set_ver,
+                "rubric_version": _SCORE_VER,
+                "tag_set_ver": _TAG_SET_VER_NONE,
                 "input_hash": input_hash,
-                "genre_scope": genre_scope,
-                "episode_count": ctx.episode_count,
-                "plot_unit_count": ctx.plot_unit_count,
+                "genre_scope": "default",
+                "episode_count": 0,
+                "plot_unit_count": 0,
                 "quality_flags": json.dumps(quality_flags, ensure_ascii=False),
-                "model_versions": json.dumps(model_versions, ensure_ascii=False),
-                "prompt_versions": json.dumps(prompt_versions, ensure_ascii=False),
+                "model_versions": json.dumps({"primary_model": "rule-only"}, ensure_ascii=False),
+                "prompt_versions": json.dumps({}, ensure_ascii=False),
                 "status": "done",
                 "error": None,
                 "created_at": now,
@@ -1054,44 +1221,28 @@ def _persist_report(
         )
 
         score_rows = []
-        for dim in dim_scores:
-            signal_payload = {
-                str(ref.get("signal_key") or ""): {
-                    "value": ref.get("value"),
-                    "score": ref.get("score"),
-                    "source": ref.get("source"),
-                    "confidence": ref.get("confidence"),
-                    "evidence_refs": ref.get("evidence_refs"),
-                    "primary_dimension": ref.get("primary_dimension"),
-                    "weight_in_dim": ref.get("weight_in_dim"),
-                }
-                for ref in dim.signal_refs
-                if str(ref.get("signal_key") or "").strip()
-            }
-            if dim.top_signals:
-                signal_payload["__top_signals__"] = dim.top_signals
+        for dim, out in dim_outputs.items():
             score_rows.append(
                 {
                     "id": str(uuid.uuid4()),
                     "script_id": script_id,
                     "run_id": run_id,
-                    "dimension": dim.dimension,
-                    "primary_dimension": dim.primary_dimension or dim.dimension,
-                    "score": float(dim.score if dim.score is not None else 0.0),
+                    "dimension": dim,
+                    "primary_dimension": dim,
+                    "score": float(out.score if out.score is not None else 0.0),
                     "percentile": None,
-                    "tier": dim.tier,
-                    "confidence": _DIM_CONFIDENCE_FLOAT.get(dim.confidence, 0.35),
-                    "coverage_ratio": float(dim.coverage_ratio),
-                    "signals": json.dumps(signal_payload, ensure_ascii=False),
-                    "weights": json.dumps(
-                        {
-                            "base_weight": rubric.base_weight.get(dim.dimension, 0.0),
-                        },
-                        ensure_ascii=False,
+                    "tier": _score_to_tier(out.score),
+                    "confidence": _DIM_CONFIDENCE_FLOAT.get(
+                        _LEVEL_TO_CONFIDENCE.get(out.level, "low"), 0.35
                     ),
-                    "tag_set_ver": ctx.tag_set_ver,
-                    "score_ver": rubric.score_ver,
-                    "model_ver": model_versions.get("primary_model", "rule-only"),
+                    "coverage_ratio": 1.0 if out.score is not None else 0.0,
+                    "signals": json.dumps({"reason": out.reason}, ensure_ascii=False),
+                    "weights": json.dumps(
+                        {"base_weight": _DIM_BASE_WEIGHT.get(dim, 0.0)}, ensure_ascii=False
+                    ),
+                    "tag_set_ver": _TAG_SET_VER_NONE,
+                    "score_ver": _SCORE_VER,
+                    "model_ver": "rule-only",
                 }
             )
         if score_rows:
@@ -1126,40 +1277,9 @@ def _persist_report(
                 score_rows,
             )
 
-        if actions:
-            action_rows = [
-                {
-                    "id": action.id,
-                    "run_id": action.run_id,
-                    "script_id": action.script_id,
-                    "dimension": action.dimension,
-                    "signal_key": action.signal_key,
-                    "template_id": action.template_id,
-                    "issue": action.issue,
-                    "target": action.target,
-                    "action_steps": json.dumps(action.action_steps, ensure_ascii=False),
-                    "evidence_refs": json.dumps(action.evidence_refs, ensure_ascii=False),
-                    "estimated_lift": json.dumps(action.estimated_lift, ensure_ascii=False),
-                }
-                for action in actions
-            ]
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO scriptlens.scoring_improvement_actions (
-                        id, run_id, script_id, dimension, signal_key, template_id,
-                        issue, target, action_steps, evidence_refs, estimated_lift, created_at
-                    )
-                    VALUES (
-                        :id, :run_id, :script_id, :dimension, :signal_key, :template_id,
-                        :issue, :target, CAST(:action_steps AS jsonb), CAST(:evidence_refs AS jsonb),
-                        CAST(:estimated_lift AS jsonb), NOW()
-                    )
-                    """
-                ),
-                action_rows,
-            )
-
+        decision_payload = (
+            report_payload.get("decision", {}).get("decision_inputs") or {}
+        )
         conn.execute(
             text("DELETE FROM scriptlens.reports WHERE script_id = :sid"),
             {"sid": script_id},
@@ -1211,37 +1331,6 @@ def _load_script_meta(script_id: str, *, engine: Engine) -> Optional[_ScriptMeta
         total_episodes=int(row["total_episodes"] or 0),
         total_scenes=int(row["total_scenes"] or 0),
     )
-
-
-def _collect_model_versions(signals: dict[str, SignalValue]) -> dict[str, Any]:
-    models: list[str] = []
-    for signal in signals.values():
-        meta = signal.meta if isinstance(signal.meta, dict) else {}
-        model = meta.get("model")
-        if isinstance(model, str) and model.strip():
-            models.append(model.strip())
-    models = sorted(set(models))
-    return {
-        "primary_model": models[0] if models else "rule-only",
-        "models": models,
-    }
-
-
-def _scene_ids_from_signal_refs(signal_refs: list[dict[str, Any]]) -> list[str]:
-    out: list[str] = []
-    seen: set[str] = set()
-    for ref in signal_refs:
-        evidence = ref.get("evidence_refs") if isinstance(ref, dict) else []
-        if not isinstance(evidence, list):
-            continue
-        for item in evidence:
-            if not isinstance(item, dict):
-                continue
-            scene_id = str(item.get("scene_id") or "").strip()
-            if scene_id and scene_id not in seen:
-                seen.add(scene_id)
-                out.append(scene_id)
-    return out
 
 
 def _scene_ids_from_evidence(evidence_ref_ids: list[str]) -> list[str]:

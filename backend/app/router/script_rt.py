@@ -1645,7 +1645,22 @@ def get_script_view(
             "评分报告正在自动生成中，请稍候",
         )
     report_json, _ = payload
-    report = ReportPayload.model_validate(report_json)
+    # 兼容旧版（pre-v1-mvp-6d）写入的过期 payload：schema 升级后 tier 等字段格式变更，
+    # 直接 500 会让前端"加载报告失败"卡死。这里把校验失败统一降级成 409，让前端走
+    # ScriptlensReportProgress 自动重新触发分析；后台用 ERROR 级日志保留现场。
+    from pydantic import ValidationError as _PydanticValidationError  # noqa: PLC0415
+    try:
+        report = ReportPayload.model_validate(report_json)
+    except _PydanticValidationError as exc:
+        logger.error(
+            "ReportPayload schema mismatch (legacy payload), forcing reanalyze",
+            extra={"script_id": script_id, "error": str(exc)},
+        )
+        _raise_api_error(
+            status.HTTP_409_CONFLICT,
+            "REPORT_SCHEMA_OUTDATED",
+            "评分报告格式已升级，请重新生成（页面会自动重新分析）",
+        )
 
     return script_view_service.build_view(
         script_id=script_id,
