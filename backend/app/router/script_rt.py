@@ -865,9 +865,19 @@ def _persist_chat_message(
     question: str,
     answer: str,
     retrieval_content: str | None,
+    display_text: str | None = None,
 ) -> str | None:
+    """持久化 user/assistant 一对消息。
+
+    `question` 是发给 agent / LLM 的真 prompt，可能包含 <SELECTION> block 等
+    内联上下文。`display_text` 是 UI 端的展示版本，含 @selection1 / @scene1
+    短 placeholder，UI 刷新后由前端 renderPromptWithMentionTags 还原成 chip。
+    我们写入 messages.user_question 的是 display_text（缺省回落到 question），
+    确保用户在 chat 历史里看到的是 chip，而不是赤裸的 inline XML。
+    """
     if not answer.strip():
         return None
+    persisted_question = display_text if (display_text and display_text.strip()) else question
     with default_engine.begin() as conn:
         script_row = conn.execute(
             text(
@@ -928,7 +938,7 @@ def _persist_chat_message(
             ),
             {
                 "session_id": session_id,
-                "user_question": question,
+                "user_question": persisted_question,
                 "model_answer": answer,
                 "retrieval_content": retrieval_content,
             },
@@ -1011,11 +1021,31 @@ async def chat_with_script(
     agent = build_chat_agent(script_id=script_id)
     queue: asyncio.Queue = asyncio.Queue()
     sentinel: Tuple[str, Dict[str, Any]] = ("__END__", {})
+    logger.info(
+        "chat: agent ready, runner about to start script_id=%s session_id=%s user_id=%s intent_chars=%d",
+        script_id,
+        session_id,
+        current_user.id,
+        len(user_intent or ""),
+    )
 
     async def _progress_callback(event_type: str, payload: Dict[str, Any]) -> None:
+        # 关键观测点：每个 SSE 事件落 queue 前先 debug log，便于在 docker logs
+        # 里看到 agent 真实推送了哪些 event（start/step/delta/finish/result）。
+        logger.debug(
+            "chat: progress event script_id=%s event=%s payload_keys=%s",
+            script_id,
+            event_type,
+            list(payload.keys()) if isinstance(payload, dict) else None,
+        )
         await queue.put((event_type, dict(payload) if isinstance(payload, dict) else {"data": payload}))
 
     async def _runner() -> None:
+        # 进入 _runner 的第一行 log。如果 docker logs 里看不到这条，说明
+        # asyncio.create_task(_runner()) 创建的 task 根本没获得调度（通常是
+        # client 早早 disconnect 或者上层 BFF 把 fetch 整个 abort 了）。
+        logger.info("chat: _runner started script_id=%s session_id=%s", script_id, session_id)
+
         async def _emit_error_events(payload: Dict[str, Any]) -> None:
             err_payload = dict(payload) if isinstance(payload, dict) else {"message": str(payload)}
             error_text = str(err_payload.get("message") or "执行失败")
@@ -1062,6 +1092,7 @@ async def chat_with_script(
                     user_id=current_user.id,
                     session_id=session_id,
                     question=body.question,
+                    display_text=body.display_text,
                     answer=answer,
                     retrieval_content=retrieval_content,
                 )
@@ -1076,6 +1107,15 @@ async def chat_with_script(
                     session_id,
                 )
                 raise
+            logger.info(
+                "chat: agent.execute finished script_id=%s success=%s intent_type=%s changes=%d file_diffs=%d operation_id=%s",
+                script_id,
+                result_payload["success"],
+                result_payload.get("intent_type"),
+                len(result_payload.get("changes") or []),
+                len(result_payload.get("file_diffs") or []),
+                result_payload.get("operation_id"),
+            )
             # 兼容 doc-studio async 事件名（result），payload 结构与其一致：{ result: {...} }。
             await queue.put(("result", {"result": result_payload}))
             # 保留 ScriptLens 现有 complete 事件，避免破坏旧客户端。
@@ -1102,17 +1142,30 @@ async def chat_with_script(
             })
         finally:
             await queue.put(sentinel)
+            logger.info("chat: _runner exited script_id=%s session_id=%s", script_id, session_id)
 
     runner_task = asyncio.create_task(_runner())
 
     async def _stream() -> AsyncIterator[bytes]:
+        events_yielded = 0
         try:
             while True:
                 event_type, payload = await queue.get()
                 if event_type == "__END__":
                     break
+                events_yielded += 1
                 yield _sse_format(event_type, payload)
         finally:
+            # 关键观测：如果 events_yielded=0 + runner_task 还没 done，
+            # 几乎可以确定是 client 端（BFF / 浏览器）提前断开导致 stream
+            # 被 starlette cancel。这正是 BFF AbortSignal.timeout 击穿
+            # SSE 长连接时的特征——上次 chat 测试就死在这里。
+            logger.info(
+                "chat: _stream closing script_id=%s events_yielded=%d runner_done=%s",
+                script_id,
+                events_yielded,
+                runner_task.done(),
+            )
             if not runner_task.done():
                 runner_task.cancel()
                 try:

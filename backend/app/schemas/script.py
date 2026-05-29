@@ -565,7 +565,13 @@ class ChatHistoryItem(BaseModel):
 class ScriptChatRequest(BaseModel):
     """POST /api/scripts/{id}/chat request."""
 
-    question: str = Field(..., min_length=1, max_length=4000)
+    # 给 agent / LLM 看的 prompt：前端会把 <SELECTION> block 内联进来，可能很长。
+    # 因此 max_length 调大到 32k，避免单选区/多选区时直接被 422 拒绝。
+    question: str = Field(..., min_length=1, max_length=32000)
+    # 持久化到 messages.user_question 的"展示版本"，含 @selection1 / @scene1 这种
+    # 短 placeholder，UI 刷新后还原成 chip。缺省 fallback 到 question——
+    # 保持对旧客户端兼容，但旧客户端刷新后会看到 inline 的 <SELECTION> XML。
+    display_text: Optional[str] = Field(default=None, max_length=4000)
     history: List[ChatHistoryItem] = Field(default_factory=list)
     role: ChatRole = Field("general")
     context: Optional[Dict[str, Any]] = Field(default=None)
