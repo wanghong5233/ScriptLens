@@ -154,6 +154,34 @@ ConfidenceLevel = Literal["high", "medium", "low"]
 TierName = Literal["excellent", "good", "weak", "poor", "insufficient"]
 ComplianceLevel = Literal["high_risk", "medium_risk", "low_risk", "clean"]
 
+# 主要看点 / 钩子 / 反转 / 爽点 / 风险点：与 reward_extractor.RewardEvent 取值对齐，
+# 再补一个 'hook'（开场钩子，从 opening_hook 维度 evidence 派生）和 'risk'（风险点）。
+HighlightType = Literal[
+    "hook",
+    "face_slap",
+    "reversal",
+    "revenge",
+    "cp_progress",
+    "identity_reveal",
+    "villain_fall",
+    "underdog_rise",
+    "scheme_exposed",
+    "risk",
+]
+Recommendation = Literal["recommend", "consider", "pass"]
+BeatType = Literal["opening", "inciting", "midpoint", "climax", "closing", "twist", "reward"]
+CharacterRole = Literal["protagonist", "antagonist", "support", "minor"]
+CharacterRelationType = Literal[
+    "family",
+    "romance",
+    "rival",
+    "ally",
+    "authority",
+    "deception",
+    "mentor",
+]
+RelationPolarity = Literal["positive", "negative", "mixed"]
+
 
 class ReportDecision(BaseModel):
     """决策卡。"""
@@ -217,6 +245,137 @@ class ReportCompliance(BaseModel):
     reason: str = ""
     evidence_ref_ids: List[str] = Field(default_factory=list)
     hits: List[ReportComplianceHit] = Field(default_factory=list)
+
+
+class ReportEvidenceRef(BaseModel):
+    """evidence_refs[]：每条都是带 line_range 锚点的引用，前端高亮使用。
+
+    v3.3 起：start_line/end_line 是**主锚点**，必须由 LLM 在产 evidence 时同次给出
+    （而不是后端字符匹配反推）；quote 仅用于 tooltip 展示，前端绝不再做 quote 字符
+    串匹配。详见 docs/08 §3.8。
+    """
+
+    id: str
+    scene_id: str
+    episode_no: Optional[int] = None
+    scene_no: Optional[str] = None
+    scene_label: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    quote: str = Field(
+        ...,
+        description="该 line_range 对应的原文片段，用作 tooltip / preview。前端跳转**不**依赖此字段",
+    )
+    quote_source: Optional[str] = Field(
+        None,
+        description=(
+            "quote 来源标记：`reward:<event_type>` / `risk_hit` / `fallback_first_line`"
+        ),
+    )
+    scene_summary: Optional[str] = Field(
+        None,
+        description="整场戏摘要（不是 quote 碎片），用于前端「三大看点」卡片",
+    )
+    reason: str
+    confidence: ConfidenceLevel = "medium"
+
+
+class ReportHighlight(BaseModel):
+    """主要看点节点（前端按 type 分组渲染清单）。
+
+    v3.3 line-range anchored：跳转锚点 = (scene_id, start_line, end_line)；
+    `evidence` 仅作 tooltip。
+    """
+
+    id: str = Field(..., description="客户端用作高亮 key（与 evidence_refs.id 同空间）")
+    type: HighlightType
+    scene_id: str
+    episode_no: Optional[int] = None
+    scene_no: Optional[str] = None
+    scene_label: Optional[str] = None
+    start_line: Optional[int] = None
+    end_line: Optional[int] = None
+    oneliner: str = Field(..., description="≤ 40 字一句话点题")
+    evidence: Optional[str] = Field(
+        None,
+        description="≤ 80 字原文片段，仅用于 tooltip / 折叠态展示。前端跳转**不**用此字段定位",
+    )
+
+
+class CoveragePoint(BaseModel):
+    """Coverage Card 的优劣点。`evidence_line_range` 为主锚点，`evidence_quote` 仅 tooltip。"""
+
+    title: str = Field(..., description="≤ 12 字")
+    detail: str = Field(..., description="≤ 80 字，面向选品/编剧/审核的人话说明")
+    anchor_scene_id: Optional[str] = None
+    evidence_line_range: Optional[LineRange] = Field(
+        None,
+        description=(
+            "anchor_scene_id 那场内的行号区间 [start, end]（1-based 闭区间），跳转主锚点。"
+            "anchor_scene_id 为 null 时本字段也为 null。"
+        ),
+    )
+    evidence_quote: Optional[str] = Field(
+        None,
+        description="evidence_line_range 对应的原文片段（≤ 80 字），仅用于 hover tooltip 展示",
+    )
+
+
+class CoverageCard(BaseModel):
+    """30 秒决策层：借鉴 studio coverage 的 logline + recommendation + 优劣点。"""
+
+    logline: str = Field(..., description="≤ 60 字一句话剧情概括")
+    recommendation: Recommendation
+    confidence: ConfidenceLevel = "medium"
+    genre: List[str] = Field(default_factory=list, description="类型标签 1-3 个")
+    core_value: str = Field("", description="≤ 30 字，这份剧本最值得关注的价值")
+    strengths: List[CoveragePoint] = Field(default_factory=list)
+    concerns: List[CoveragePoint] = Field(default_factory=list)
+
+
+class BeatNode(BaseModel):
+    """故事节拍节点，前端点击 anchor_scene_id 跳原文。"""
+
+    type: BeatType
+    summary: str = Field(..., description="≤ 50 字")
+    anchor_scene_id: str
+
+
+class BeatAct(BaseModel):
+    """三幕骨架：开局 / 发展 / 收束。"""
+
+    act: Literal[1, 2, 3]
+    title: str
+    scene_range: List[str] = Field(default_factory=list, min_length=0, max_length=2)
+    beats: List[BeatNode] = Field(default_factory=list)
+
+
+class BeatSheet(BaseModel):
+    acts: List[BeatAct] = Field(default_factory=list)
+
+
+class CharacterGraphNode(BaseModel):
+    id: str
+    name: str
+    role: CharacterRole = "support"
+    motivation: str = ""
+    goal: str = ""
+    obstacle: str = ""
+    first_scene_id: Optional[str] = None
+    appearance_count: int = 0
+
+
+class CharacterGraphEdge(BaseModel):
+    source_id: str
+    target_id: str
+    type: CharacterRelationType = "ally"
+    weight: float = Field(0.0, ge=0.0, le=1.0)
+    polarity: RelationPolarity = "mixed"
+
+
+class CharacterGraph(BaseModel):
+    nodes: List[CharacterGraphNode] = Field(default_factory=list)
+    edges: List[CharacterGraphEdge] = Field(default_factory=list)
 
 
 class ReportDramaTag(BaseModel):
@@ -287,6 +446,7 @@ class EvaluationDimension(BaseModel):
 
 class EvaluationPayload(BaseModel):
     dimensions: List[EvaluationDimension] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
     rewrite_seeds: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -316,8 +476,21 @@ class ReportPayload(BaseModel):
     plot_units: List[ReportPlotUnit] = Field(default_factory=list)
     characters: List[ReportCharacter] = Field(default_factory=list)
     character_relationships: List[ReportCharacterRelationship] = Field(default_factory=list)
+    must_read_scene_ids: List[str] = Field(
+        default_factory=list,
+        description="evidence_refs.id 列表（最多 3 个），不是 scene_id",
+    )
+    evidence_refs: List[ReportEvidenceRef] = Field(default_factory=list)
+    highlights: List[ReportHighlight] = Field(
+        default_factory=list,
+        description="主要看点 / 钩子 / 反转 / 爽点 / 风险节点清单",
+    )
+    coverage_card: Optional[CoverageCard] = None
+    beat_sheet: Optional[BeatSheet] = None
+    character_graph: Optional[CharacterGraph] = None
     pacing_curve: List[PacingCurvePoint] = Field(default_factory=list)
     evaluation: Optional[EvaluationPayload] = None
+    risk_flags: List[str] = Field(default_factory=list)
     report_id: Optional[str] = None
     generated_at: Optional[str] = None
 
@@ -529,6 +702,19 @@ class ViewResponse(BaseModel):
     plot_units: List[ReportPlotUnit] = Field(default_factory=list)
     characters: List[ReportCharacter] = Field(default_factory=list)
     character_relationships: List[ReportCharacterRelationship] = Field(default_factory=list)
+    must_read_scene_ids: List[str] = Field(default_factory=list)
+    risk_flags: List[str] = Field(default_factory=list)
+    evidence_refs: List[ReportEvidenceRef] = Field(
+        default_factory=list,
+        description="原报告里的全部证据片段；前端拿 must_read_scene_ids / scorecard.evidence_ref_ids 去 join",
+    )
+    highlights: List[ReportHighlight] = Field(
+        default_factory=list,
+        description="主要看点 / 钩子 / 反转 / 爽点 / 风险节点清单（透传自 ReportPayload.highlights）",
+    )
+    coverage_card: Optional[CoverageCard] = None
+    beat_sheet: Optional[BeatSheet] = None
+    character_graph: Optional[CharacterGraph] = None
     pacing_curve: List[PacingCurvePoint] = Field(default_factory=list)
     evaluation: Optional[EvaluationPayload] = None
     rewrite_seeds: List[RewriteSeed] = Field(

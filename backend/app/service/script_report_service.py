@@ -1,15 +1,22 @@
-"""Script scoring report pipeline (6 dimensions, action-driven rewrite)."""
+"""Script scoring report pipeline (6 dimensions, action-driven rewrite).
+
+报告内容生成分两层：
+1. 评分层（6 维 rubric/signal/aggregator） —— scorecard + decision + tier_cuts + top_signals
+2. 叙事层（chain 抽取）              —— coverage_card / beat_sheet / character_graph / highlights
+   这层独立于评分，纯为前端 5 个 tab 的内容展示提供结构化数据。
+"""
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Awaitable, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -18,14 +25,18 @@ from service.core.ingestion.script_loader import UnsupportedScriptFormatError
 from service.score_registry import RubricConfig, load_rubric
 from service.script_ingestion_service import ScriptIngestionService
 from service.script_progress_tracker import tracker as progress_tracker
+from service.script_tools.beat_chain import BeatSheet, extract_beat_sheet
+from service.script_tools.character_graph_chain import CharacterGraph, extract_character_graph
 from service.script_tools.compliance_scorer import screen_compliance
+from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
 from service.script_tools.decision_aggregator import decide
 from service.script_tools.dimension_aggregator import DimensionScore, aggregate
 from service.script_tools.genre_weights import apply_genre_weights, infer_genre_scope
 from service.script_tools.improvement_action_generator import ImprovementAction, generate_actions
-from service.script_tools.llm_caller import LlmCaller
+from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
 from service.script_tools.pacing_aggregator import aggregate_pacing_curve_v3 as aggregate_pacing_curve
 from service.script_tools.percentile_tier import resolve_tier
+from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
 from service.script_tools.signal_catalog import SignalValue, build_signal_context, compute_signals
 from service.script_tools.tag_pipeline import run_tag_pipeline
 from utils.database import engine as default_engine
@@ -181,6 +192,142 @@ def _compute_overall_cuts(scorecard: list[dict[str, Any]]) -> dict[str, float]:
         "p50": round(sum(p50_values) / len(p50_values), 4),
         "p75": round(sum(p75_values) / len(p75_values), 4),
     }
+
+
+async def _optional_chain(name: str, coro: Awaitable[Any]) -> Any:
+    """叙事层 chain 可降级为 None；只吞已知业务失败，避免一个 LLM JSON 解析失败把整份报告拖崩。"""
+    try:
+        return await coro
+    except (ScoreLLMError, ValueError) as exc:
+        logger.exception("%s failed and will be stored as null: %s", name, exc)
+        return None
+
+
+def _select_beat_anchor_scenes(beat_sheet: Optional[BeatSheet], *, top_k: int = 3) -> list[str]:
+    """从 beat_sheet 选 top_k 个最值得用户先看的场（用户决策视角：爽 > 反转 > 高潮 > 钩子）。"""
+    if beat_sheet is None:
+        return []
+    priority = {
+        "reward": 0,
+        "twist": 1,
+        "climax": 2,
+        "opening": 3,
+        "inciting": 4,
+        "midpoint": 5,
+        "closing": 6,
+    }
+    beats = [
+        beat
+        for act in beat_sheet.acts
+        for beat in act.beats
+        if beat.anchor_scene_id
+    ]
+    beats.sort(key=lambda b: priority.get(b.type, 99))
+    out: list[str] = []
+    seen: set[str] = set()
+    for beat in beats:
+        if beat.anchor_scene_id in seen:
+            continue
+        seen.add(beat.anchor_scene_id)
+        out.append(beat.anchor_scene_id)
+        if len(out) >= top_k:
+            break
+    return out
+
+
+def _derive_risk_flags(compliance_payload: dict[str, Any]) -> list[str]:
+    """从 compliance.hits 派生兼容字段 risk_flags（前端旧版渲染用）。"""
+    flags: list[str] = []
+    seen: set[str] = set()
+    for hit in compliance_payload.get("hits") or []:
+        if not isinstance(hit, dict):
+            continue
+        category = str(hit.get("category") or "").strip()
+        if not category or category in seen:
+            continue
+        seen.add(category)
+        flags.append(category)
+    return flags
+
+
+_REWARD_TO_HIGHLIGHT_TYPE = {
+    "face_slap": "face_slap",
+    "reversal": "reversal",
+    "revenge": "revenge",
+    "cp_progress": "cp_progress",
+    "identity_reveal": "identity_reveal",
+    "villain_fall": "villain_fall",
+    "underdog_rise": "underdog_rise",
+    "scheme_exposed": "scheme_exposed",
+}
+_REWARD_TYPE_HEADLINE = {
+    "face_slap": "打脸",
+    "reversal": "反转",
+    "revenge": "复仇",
+    "cp_progress": "CP 进展",
+    "identity_reveal": "身份揭露",
+    "villain_fall": "反派落败",
+    "underdog_rise": "逆袭",
+    "scheme_exposed": "阴谋败露",
+}
+
+
+def _trim_oneliner(s: str, max_len: int = 40) -> str:
+    s = (s or "").strip().replace("\n", " ")
+    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+
+
+def _build_highlights_minimal(
+    reward_events: list[RewardEvent],
+    beat_sheet: Optional[BeatSheet],
+) -> list[dict[str, Any]]:
+    """从 reward_events + 开场节拍派生 highlights[]（保留兼容契约，最小版不依赖额外 scene 元数据查询）。"""
+    out: list[dict[str, Any]] = []
+    used: set[str] = set()
+    for ev in reward_events:
+        if ev.scene_id in used:
+            continue
+        hl_type = _REWARD_TO_HIGHLIGHT_TYPE.get(ev.event_type)
+        if hl_type is None:
+            continue
+        headline = _REWARD_TYPE_HEADLINE.get(ev.event_type, "看点")
+        line_range = getattr(ev, "evidence_line_range", None)
+        out.append(
+            {
+                "id": str(uuid.uuid4()),
+                "type": hl_type,
+                "scene_id": ev.scene_id,
+                "episode_no": ev.episode_no,
+                "scene_no": ev.scene_no,
+                "scene_label": None,
+                "start_line": line_range[0] if line_range else None,
+                "end_line": line_range[1] if line_range else None,
+                "oneliner": _trim_oneliner(f"{headline} · {ev.evidence}"),
+                "evidence": ev.evidence,
+            }
+        )
+        used.add(ev.scene_id)
+    if beat_sheet is not None:
+        for act in beat_sheet.acts:
+            for beat in act.beats:
+                if beat.type == "opening" and beat.anchor_scene_id and beat.anchor_scene_id not in used:
+                    out.append(
+                        {
+                            "id": str(uuid.uuid4()),
+                            "type": "hook",
+                            "scene_id": beat.anchor_scene_id,
+                            "episode_no": None,
+                            "scene_no": None,
+                            "scene_label": None,
+                            "start_line": None,
+                            "end_line": None,
+                            "oneliner": _trim_oneliner(f"开场抓人 · {beat.summary}"),
+                            "evidence": beat.summary,
+                        }
+                    )
+                    used.add(beat.anchor_scene_id)
+                    break
+    return out
 
 
 def _load_drama_tags(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
@@ -518,6 +665,51 @@ async def generate_report(
             detail=f"actions={len(actions)} pacing_points={len(pacing_curve)}",
         )
 
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_narrative",
+            "running",
+            detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 看点事件",
+        )
+        reward_events: list[RewardEvent] = (
+            await _optional_chain(
+                "reward_extractor",
+                extract_reward_events(script_id=script_id, caller=caller),
+            )
+            or []
+        )
+        coverage_task = _optional_chain(
+            "coverage_chain",
+            extract_coverage_card(script_id=script_id, caller=caller, engine=engine),
+        )
+        beat_task = _optional_chain(
+            "beat_chain",
+            extract_beat_sheet(
+                script_id=script_id,
+                reward_events=reward_events,
+                caller=caller,
+                engine=engine,
+            ),
+        )
+        graph_task = _optional_chain(
+            "character_graph_chain",
+            extract_character_graph(script_id=script_id, caller=caller, engine=engine),
+        )
+        coverage_card, beat_sheet, character_graph = await asyncio.gather(
+            coverage_task, beat_task, graph_task
+        )
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_narrative",
+            "done",
+            detail=(
+                f"速览{'已生成' if coverage_card else '降级'} · "
+                f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
+                f"人物 {len(character_graph.nodes) if character_graph else 0} 个 · "
+                f"看点 {len(reward_events)}"
+            ),
+        )
+
         report_payload = _build_report_payload(
             meta=meta,
             decision=decision,
@@ -526,6 +718,10 @@ async def generate_report(
             compliance_payload=compliance.to_dict(),
             pacing_curve=pacing_curve,
             actions=actions,
+            coverage_card=coverage_card,
+            beat_sheet=beat_sheet,
+            character_graph=character_graph,
+            reward_events=reward_events,
             engine=engine,
         )
 
@@ -565,6 +761,10 @@ def _build_report_payload(
     pacing_curve: list[dict[str, Any]],
     actions: list[ImprovementAction],
     engine: Engine,
+    coverage_card: Optional[CoverageCard] = None,
+    beat_sheet: Optional[BeatSheet] = None,
+    character_graph: Optional[CharacterGraph] = None,
+    reward_events: Optional[list[RewardEvent]] = None,
 ) -> dict[str, Any]:
     decision_label = _normalize_decision_label(str(decision.decision))
     decision_payload = decision.payload if isinstance(decision.payload, dict) else {}
@@ -601,6 +801,10 @@ def _build_report_payload(
         }
         for action in actions
     ]
+    reward_events = reward_events or []
+    must_read_scene_ids = _select_beat_anchor_scenes(beat_sheet, top_k=3)
+    risk_flags = _derive_risk_flags(compliance_payload)
+    highlights_payload = _build_highlights_minimal(reward_events, beat_sheet)
     return {
             "script_id": meta.script_id,
             "title": meta.title,
@@ -625,6 +829,13 @@ def _build_report_payload(
         "plot_units": _load_plot_units(script_id=meta.script_id, engine=engine),
         "characters": _load_characters(script_id=meta.script_id, engine=engine),
         "character_relationships": _load_character_relationships(script_id=meta.script_id, engine=engine),
+        "must_read_scene_ids": must_read_scene_ids,
+        "evidence_refs": [],
+        "highlights": highlights_payload,
+        "coverage_card": asdict(coverage_card) if coverage_card is not None else None,
+        "beat_sheet": beat_sheet.to_dict() if beat_sheet is not None else None,
+        "character_graph": character_graph.to_dict() if character_graph is not None else None,
+        "risk_flags": risk_flags,
         "pacing_curve": pacing_curve,
         "evaluation": {
             "dimensions": [

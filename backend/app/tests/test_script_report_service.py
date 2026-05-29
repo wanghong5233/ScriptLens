@@ -167,6 +167,52 @@ def test_generate_report_runs_full_tag_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(srs, "aggregate_pacing_curve", lambda _ctx: [])
     monkeypatch.setattr(srs, "_persist_report", lambda **kwargs: None)
     monkeypatch.setattr(srs, "_mark_script_status", lambda **kwargs: None)
+
+    async def _fake_extract_reward_events(*, script_id, caller=None, max_scenes=200):
+        return []
+
+    async def _fake_extract_coverage_card(*, script_id, caller=None, engine=None, max_scenes=18):
+        return srs.CoverageCard(
+            logline="主角逆袭打脸全场",
+            recommendation="recommend",
+            confidence="medium",
+            genre=["都市"],
+            core_value="爽点密集",
+            strengths=[],
+            concerns=[],
+        )
+
+    async def _fake_extract_beat_sheet(*, script_id, reward_events=None, caller=None, engine=None):
+        from service.script_tools.beat_chain import BeatAct, BeatNode
+        return srs.BeatSheet(
+            acts=[
+                BeatAct(
+                    act=1,
+                    title="开局",
+                    scene_range=[],
+                    beats=[
+                        BeatNode(type="opening", summary="主角登场", anchor_scene_id="scene-1"),
+                    ],
+                )
+            ]
+        )
+
+    async def _fake_extract_character_graph(*, script_id, caller=None, engine=None, max_nodes=12, max_edges=30):
+        from service.script_tools.character_graph_chain import CharacterEdge, CharacterNode
+        return srs.CharacterGraph(
+            nodes=[
+                CharacterNode(id="c1", name="主角", role="protagonist", appearance_count=5),
+                CharacterNode(id="c2", name="反派", role="antagonist", appearance_count=3),
+            ],
+            edges=[
+                CharacterEdge(source_id="c1", target_id="c2", type="rival", weight=0.6, polarity="negative"),
+            ],
+        )
+
+    monkeypatch.setattr(srs, "extract_reward_events", _fake_extract_reward_events)
+    monkeypatch.setattr(srs, "extract_coverage_card", _fake_extract_coverage_card)
+    monkeypatch.setattr(srs, "extract_beat_sheet", _fake_extract_beat_sheet)
+    monkeypatch.setattr(srs, "extract_character_graph", _fake_extract_character_graph)
     monkeypatch.setattr(srs, "_load_drama_tags", lambda script_id, engine=None: [{"key": "drama_tags", "value": "都市", "confidence": 0.8}])
     monkeypatch.setattr(
         srs,
@@ -224,16 +270,22 @@ def test_generate_report_runs_full_tag_pipeline(monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["script_ref"] == "sid-1"
     assert calls[0]["tag_set_ver"] == "script"
-    assert "must_read_scene_ids" not in report
-    assert "evidence_refs" not in report
-    assert "highlights" not in report
-    assert "beat_sheet" not in report
-    assert "coverage_card" not in report
-    assert "character_graph" not in report
     assert report["drama_tags"]
     assert report["plot_units"]
     assert report["characters"]
     assert report["character_relationships"]
+    assert report["coverage_card"]["logline"] == "主角逆袭打脸全场"
+    assert report["coverage_card"]["recommendation"] == "recommend"
+    assert report["beat_sheet"]["acts"][0]["beats"][0]["type"] == "opening"
+    assert report["character_graph"]["nodes"]
+    assert report["character_graph"]["edges"]
+    assert report["character_graph"]["nodes"][0]["role"] == "protagonist"
+    assert report["must_read_scene_ids"] == ["scene-1"]
+    assert len(report["highlights"]) == 1
+    assert report["highlights"][0]["type"] == "hook"
+    assert report["highlights"][0]["scene_id"] == "scene-1"
+    assert report["evidence_refs"] == []
+    assert report["risk_flags"] == []
     assert report["evaluation"]["dimensions"][0]["top_signals"]
     assert report["evaluation"]["dimensions"][0]["tier_cuts"]["p50"] == 6.0
     assert report["decision"]["decision_inputs"]["tier_cuts_used"]["story"]["p75"] == 8.0

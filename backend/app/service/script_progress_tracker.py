@@ -65,6 +65,11 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "按 plot_unit 强度序列构建 pacing_curve，并基于弱信号模板生成 improvement_actions",
     ),
     (
+        "extracting_narrative",
+        "抽取速览 / 节拍 / 人物图",
+        "并行抽取速览卡 logline、三幕节拍 beat_sheet、人物关系图 character_graph、看点 reward_events，前端 5 个 tab 的叙事层数据",
+    ),
+    (
         "persisting",
         "写入数据库",
         "事务写入 scoring_runs / script_scores / scoring_improvement_actions / reports.decision_payload",
