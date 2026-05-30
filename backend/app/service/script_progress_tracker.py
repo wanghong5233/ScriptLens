@@ -30,7 +30,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 
-# 6 个流水线阶段，与 service.script_report_service.generate_report 一一对应。
+# 8 个流水线阶段，与 service.script_report_service.generate_report 一一对应。
 # (id, label, description) —— description 用于前端 tooltip / 下方解说，
 # 让用户明白每一步在做什么，而不是单纯看见一堆 spinner。
 #
@@ -52,17 +52,22 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
     (
         "extracting_narrative",
         "抽取叙事层",
-        "并行抽取看点 reward_events、速览卡 logline、三幕节拍 beat_sheet、人物关系图 character_graph、动机回扫 motivation、人物小传 character_bios —— 前端速览 / 节拍 / 人物 / 看点 4 个叙事 tab 的数据源",
-    ),
-    (
-        "scoring_6d",
-        "六维规则评分",
-        "self-contained 规则评分：story / character / concept / emotion / pacing / dialogue 各自从 chain 输出 + scenes 表推导分数，不依赖标签流水线",
+        "并行抽取看点 reward_events、三幕节拍 beat_sheet、人物关系图 character_graph、动机回扫 motivation、人物小传 character_bios —— 前端节拍 / 人物 / 看点 tab 的数据源",
     ),
     (
         "compliance",
         "合规风险扫描",
         "compliance_scorer 独立维度：扫描红线词、二级 LLM 判定后给出 high_risk / medium_risk / low_risk / clean",
+    ),
+    (
+        "composing_coverage",
+        "撰写速览决策卡",
+        "基于全剧聚合的 beat / reward / 人物 / 合规结论，生成 logline + synopsis + 3 优 / 3 劣 —— 不再读单场原文",
+    ),
+    (
+        "scoring_6d",
+        "六维规则评分",
+        "self-contained 规则评分：story / character / concept / emotion / pacing / dialogue 各自从 chain 输出 + scenes 表推导分数，不依赖标签流水线",
     ),
     (
         "building_payload",
