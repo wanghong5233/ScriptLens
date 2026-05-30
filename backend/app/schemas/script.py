@@ -324,28 +324,25 @@ class ReportHighlight(BaseModel):
 
 
 class CoveragePoint(BaseModel):
-    """Coverage Card 的优劣点。`evidence_line_range` 为主锚点，`evidence_quote` 仅 tooltip。"""
+    """Coverage Card 的优劣点（v3.5）：**全剧综合判断纯文本**，不再附 scene anchor / quote。
+
+    与故事 / 看点 / 风险 tab 的 evidence_ref 严格分层——速览只回答全剧综合判断，
+    单场单引用证据在其他 tab 提供。
+    """
 
     title: str = Field(..., description="≤ 12 字")
     detail: str = Field(..., description="≤ 80 字，面向选品/编剧/审核的人话说明")
-    anchor_scene_id: Optional[str] = None
-    evidence_line_range: Optional[LineRange] = Field(
-        None,
-        description=(
-            "anchor_scene_id 那场内的行号区间 [start, end]（1-based 闭区间），跳转主锚点。"
-            "anchor_scene_id 为 null 时本字段也为 null。"
-        ),
-    )
-    evidence_quote: Optional[str] = Field(
-        None,
-        description="evidence_line_range 对应的原文片段（≤ 80 字），仅用于 hover tooltip 展示",
-    )
 
 
 class CoverageCard(BaseModel):
-    """30 秒决策层：借鉴 studio coverage 的 logline + recommendation + 优劣点。"""
+    """30 秒决策层（v3.5）：借鉴 Hollywood Studio Coverage / Final Draft Bullet
+    Summary / NotebookLM Source Summary 的结构。
+
+    `synopsis` 是工业 coverage 必有项：200-300 字全剧故事浓缩。
+    """
 
     logline: str = Field(..., description="≤ 60 字一句话剧情概括")
+    synopsis: str = Field("", description="200-300 字全剧故事浓缩")
     recommendation: Recommendation
     confidence: ConfidenceLevel = "medium"
     genre: List[str] = Field(default_factory=list, description="类型标签 1-3 个")

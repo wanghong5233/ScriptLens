@@ -840,9 +840,28 @@ async def score_one_dimension(
             ),
         )
     elif dimension == "concept":
+        # 单维 debug 模式：用最小聚合输入（不强求 beat / graph / compliance 完整）
+        debug_reward = (
+            await _optional_chain(
+                "reward_extractor",
+                extract_reward_events(script_id=script_id, caller=caller),
+            )
+            or []
+        )
         coverage_card = await _optional_chain(
             "coverage_chain",
-            extract_coverage_card(script_id=script_id, caller=caller, engine=engine),
+            extract_coverage_card(
+                title=meta.title,
+                total_episodes=meta.total_episodes or 0,
+                total_scenes=meta.total_scenes or 0,
+                reward_events=debug_reward,
+                beat_sheet=None,
+                characters=_load_characters(script_id=script_id, engine=engine),
+                relationships=_load_character_relationships(script_id=script_id, engine=engine),
+                compliance_payload={},
+                drama_tags=_load_drama_tags(script_id=script_id, engine=engine),
+                caller=caller,
+            ),
         )
 
     output = _score_one(
@@ -933,10 +952,8 @@ async def generate_report(
             )
             or []
         )
-        coverage_task = _optional_chain(
-            "coverage_chain",
-            extract_coverage_card(script_id=script_id, caller=caller, engine=engine),
-        )
+        # v3.5：coverage 不再并行——它需要等 beat / graph / compliance 全部完成后基于
+        # 聚合结果做全剧综合判断，所以挪到后面单独跑（见下方"composing_coverage"阶段）。
         beat_task = _optional_chain(
             "beat_chain",
             extract_beat_sheet(
@@ -967,11 +984,12 @@ async def generate_report(
         bios_task = write_bios_concurrent(
             entities, scenes=scenes, caller=caller, semaphore_size=4
         )
-        coverage_card, beat_sheet, character_graph, motivation_result, bios = (
+        beat_sheet, character_graph, motivation_result, bios = (
             await asyncio.gather(
-                coverage_task, beat_task, graph_task, motivation_task, bios_task
+                beat_task, graph_task, motivation_task, bios_task
             )
         )
+        coverage_card: Optional[CoverageCard] = None  # 见下方 composing_coverage 阶段
         # 持久化 bios + 把 chain 输出的 enriched edges 写入 character_relationships。
         persist_bios(bios, engine=engine)
         if character_graph is not None:
@@ -983,13 +1001,53 @@ async def generate_report(
             "extracting_narrative",
             "done",
             detail=(
-                f"速览{'已生成' if coverage_card else '降级'} · "
                 f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
                 f"人物 {len(character_graph.nodes) if character_graph else 0} 个 · "
                 f"小传 {sum(1 for b in bios if b.persona_core or b.identity_present)}/{len(bios)} · "
                 f"看点 {len(reward_events)} · "
                 f"动机决策 {len(motivation_result.judged_decisions) if motivation_result else 0}"
             ),
+        )
+
+        progress_tracker.update_stage(
+            script_id, "compliance", "running", detail="合规风险扫描"
+        )
+        compliance = await screen_compliance(script_id=script_id, caller=caller)
+        progress_tracker.update_stage(
+            script_id,
+            "compliance",
+            "done",
+            detail=f"compliance.tier={compliance.tier}",
+        )
+
+        # v3.5：30 秒决策卡基于全剧聚合结论做综合判断（beat / graph / reward / compliance /
+        # drama_tags 已全部就位），不再读场原文也不再附单场 anchor。
+        progress_tracker.update_stage(
+            script_id, "composing_coverage", "running", detail="基于全剧聚合数据撰写决策卡"
+        )
+        drama_tags_for_cov = _load_drama_tags(script_id=script_id, engine=engine)
+        characters_for_cov = _load_characters(script_id=script_id, engine=engine)
+        relationships_for_cov = _load_character_relationships(script_id=script_id, engine=engine)
+        coverage_card = await _optional_chain(
+            "coverage_chain",
+            extract_coverage_card(
+                title=meta.title,
+                total_episodes=meta.total_episodes or 0,
+                total_scenes=meta.total_scenes or 0,
+                reward_events=reward_events,
+                beat_sheet=beat_sheet,
+                characters=characters_for_cov,
+                relationships=relationships_for_cov,
+                compliance_payload=compliance.to_dict(),
+                drama_tags=drama_tags_for_cov,
+                caller=caller,
+            ),
+        )
+        progress_tracker.update_stage(
+            script_id,
+            "composing_coverage",
+            "done",
+            detail=f"速览{'已生成' if coverage_card else '降级'}",
         )
 
         progress_tracker.update_stage(
@@ -1015,17 +1073,6 @@ async def generate_report(
             "scoring_6d",
             "done",
             detail=f"dimensions={len(dim_outputs)} scored={scored_count}",
-        )
-
-        progress_tracker.update_stage(
-            script_id, "compliance", "running", detail="合规风险扫描"
-        )
-        compliance = await screen_compliance(script_id=script_id, caller=caller)
-        progress_tracker.update_stage(
-            script_id,
-            "compliance",
-            "done",
-            detail=f"compliance.tier={compliance.tier}",
         )
 
         progress_tracker.update_stage(

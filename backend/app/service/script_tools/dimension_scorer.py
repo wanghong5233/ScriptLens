@@ -370,13 +370,11 @@ def score_concept(
         parts.append("首集 3 场内无题材标识事件")
     reason = "；".join(parts)
 
+    # v3.5：coverage strengths 不再挂 anchor_scene_id（速览定位是全剧综合判断，不是单场证据）
+    # concept 维度的 evidence 仅靠 keyword_hit_scene_id 这一条本地锚点
     evidence_ref_ids: List[str] = []
     if keyword_hit_scene_id:
         evidence_ref_ids.append(keyword_hit_scene_id)
-    for point in (coverage_card.strengths or [])[:2]:
-        sid = point.anchor_scene_id
-        if sid and sid not in evidence_ref_ids:
-            evidence_ref_ids.append(sid)
 
     return ScoreOutput(score=score, level=level, reason=reason, evidence_ref_ids=evidence_ref_ids)
 

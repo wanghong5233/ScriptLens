@@ -327,12 +327,12 @@ class TokenBudget:
     # ≈ 600 token × 1.7 = 1020 → 1024
     DECISION_AGGREGATE = 1024
 
-    # logline + recommendation + confidence + genre + core_value
-    #   + 3 strengths × (title 12 + detail 80 + evidence_quote 80 = 172 字) ≈ 130 token / 条
-    #   + 3 concerns × (title 12 + detail 80 + evidence_quote 80 = 172 字) ≈ 130 token / 条
-    #   + JSON overhead
-    # 总 ≈ (60 + 30 + 30) + 6 × 130 + 200 overhead ≈ 1100 token × 1.7 ≈ 1870 → 2048
-    # v3.2：新增 evidence_quote 字段后从 1536 提升（详见 docs/08 §6.3 推导）
+    # v3.5：去掉 strengths/concerns 的 anchor + quote，新增 synopsis 200-300 字
+    #   - logline 60 + synopsis 300 + recommendation/confidence/core_value 30 ≈ 400 字 ≈ 300 token
+    #   - 3 strengths × (title 12 + detail 80 ≈ 92 字) ≈ 70 token / 条
+    #   - 3 concerns × (title 12 + detail 80 ≈ 92 字) ≈ 70 token / 条
+    #   - JSON overhead 200
+    # 总 ≈ 300 + 6 × 70 + 200 ≈ 920 token × 1.8（中文 safety margin）≈ 1656 → 2048
     COVERAGE_CARD = 2048
 
     # 3 幕 × 6 节拍 × (type + summary ≤50 字 + anchor_scene_id)
