@@ -187,3 +187,66 @@ def test_build_from_resolver_bridges_top_n_subgraph_orphans() -> None:
                 seen.add(nxt)
                 stack.append(nxt)
     assert seen == node_ids, f"top-N 截断后未重做连通性，bridge 失效：{seen} ≠ {node_ids}"
+
+
+def test_build_from_resolver_hard_bridges_when_no_cross_component_cooccurrence() -> None:
+    """线上稳态兜底：即使完全无跨分量共现，也要强制连通。
+
+    构造：
+    - 主分量：A-B（来自 relationships）
+    - 孤立分量：E-F（只在自己组件内部共现）
+    - A/B 与 E/F 在 scenes 中完全没有同框
+
+    期望：
+    - 仍输出强连通图（通过 hard bridge）
+    - hard bridge 的 weight 使用固定兜底值，避免被误判为高置信关系
+    """
+    characters = [
+        {"id": "ent-a", "name": "顾晓月", "aliases": ["晓月"], "appearance_count": 30},
+        {"id": "ent-b", "name": "顾长卿", "aliases": [], "appearance_count": 25},
+        {"id": "ent-e", "name": "宋芸", "aliases": [], "appearance_count": 22},
+        {"id": "ent-f", "name": "顾老爷子", "aliases": ["老爷子"], "appearance_count": 18},
+    ]
+    relationships = [
+        {"a_id": "ent-a", "b_id": "ent-b", "type": "rival", "polarity": "negative"},
+    ]
+    scenes = [
+        _scene(sid="s1", no="1-1", chars=["顾晓月"]),
+        _scene(sid="s2", no="1-2", chars=["顾长卿"]),
+        _scene(sid="s3", no="2-1", chars=["宋芸", "顾老爷子"]),
+        _scene(sid="s4", no="2-2", chars=["宋芸", "老爷子"]),
+    ]
+
+    nodes, edges = cgc._build_from_resolver(
+        characters, relationships, scenes=scenes, max_nodes=4, max_edges=30
+    )
+    node_ids = {n.id for n in nodes}
+    assert node_ids == {"ent-a", "ent-b", "ent-e", "ent-f"}
+
+    adj: dict = {nid: set() for nid in node_ids}
+    for e in edges:
+        adj[e.source_id].add(e.target_id)
+        adj[e.target_id].add(e.source_id)
+
+    seen = {"ent-a"}
+    stack = ["ent-a"]
+    while stack:
+        cur = stack.pop()
+        for nxt in adj[cur]:
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    assert seen == node_ids, f"无跨分量共现时未触发硬兜底桥接：{seen} ≠ {node_ids}"
+
+    left = {"ent-a", "ent-b"}
+    right = {"ent-e", "ent-f"}
+    cross_edges = [
+        e
+        for e in edges
+        if (e.source_id in left and e.target_id in right)
+        or (e.source_id in right and e.target_id in left)
+    ]
+    assert cross_edges, "硬兜底后应至少存在一条跨分量 bridge edge"
+    assert any(
+        abs(e.weight - cgc._HARD_BRIDGE_WEIGHT) < 1e-9 for e in cross_edges
+    ), "hard bridge 应使用固定低权重，避免伪装高置信"

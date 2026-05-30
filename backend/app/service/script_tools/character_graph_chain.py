@@ -78,6 +78,7 @@ class CharacterGraph:
 _RELATION_TYPES = {"family", "romance", "rival", "ally", "authority", "deception", "mentor"}
 _POLARITIES = {"positive", "negative", "mixed"}
 _ROLES = {"protagonist", "antagonist", "support", "minor"}
+_HARD_BRIDGE_WEIGHT = 0.1
 
 # 真实人物名过滤：剧本里常见的非人物条目（道具、动作描写、群体角色）。
 # 这套黑名单同时被 relationship_candidate_generator 使用，所以保持模块级常量。
@@ -370,9 +371,16 @@ def _bridge_subgraph_orphans(
     ``cooccurrence_candidate_relationships`` 同语义），随后 ``_apply_edge_enrichment``
     会让 LLM 重写为真实关系类型。weight 用 jaccard 兜底，保证前端不至于画成
     "粗细均一"的死边。
+
+    线上稳定性策略：
+    - 先尝试「有证据 bridge」：orphan -> largest（按 cooccur count 最大）
+    - 若完全找不到跨分量共现，启用「硬兜底 bridge」：把最大 orphan 连到
+      largest 内主锚点（出场次数最高节点）。这样可保证最终图强连通，避免 UI
+      上出现完全孤立子图导致用户误判为系统漏抽。
     """
     node_ids = [node.id for node in nodes]
     node_id_set = set(node_ids)
+    node_by_id = {node.id: node for node in nodes}
 
     # name → entity_id（含 alias），用于把 scene.characters 的原始名映射回 UUID。
     # 沿用 character_pipeline 的 _normalize_name 口径：清括号、清前后标点。
@@ -407,6 +415,12 @@ def _bridge_subgraph_orphans(
             for j in range(i + 1, len(ids_in_scene)):
                 a, b = sorted((ids_in_scene[i], ids_in_scene[j]))
                 cooccur[(a, b)] += 1
+
+    # 节点权重：优先 scene 统计，其次 entity.appearance_count（name 清洗失败时兜底）。
+    node_priority: Dict[str, int] = {
+        nid: max(appearance.get(nid, 0), int(getattr(node_by_id.get(nid), "appearance_count", 0) or 0))
+        for nid in node_id_set
+    }
 
     # 现有 edge 的 adjacency
     adj: Dict[str, set] = {nid: set() for nid in node_id_set}
@@ -462,10 +476,28 @@ def _bridge_subgraph_orphans(
                 best_neighbor = cand_neighbor
 
         if best_orphan is None or best_neighbor is None:
-            # 剩余 orphan 与 largest 全无共现——大概率是独立场景的抽取噪声。
-            # 保留节点但不强连一条假边，让前端的"未抽到明显关系的角色"提示
-            # 显式展示，比骗用户更诚实。
-            return
+            # 硬兜底：剩余 orphan 与 largest 全无跨分量共现时，仍强制补桥，保证
+            # 最终图强连通。锚点取 largest 内最高出现节点，避免连到噪声节点。
+            anchor = max(largest, key=lambda nid: (node_priority.get(nid, 0), nid))
+            fallback_orphan = max(
+                orphans, key=lambda nid: (node_priority.get(nid, 0), nid)
+            )
+            key = tuple(sorted((fallback_orphan, anchor)))  # type: ignore[assignment]
+            if key not in edge_by_pair:
+                edge_by_pair[key] = CharacterEdge(
+                    source_id=fallback_orphan,
+                    target_id=anchor,
+                    type="ally",
+                    polarity="mixed",
+                    weight=_HARD_BRIDGE_WEIGHT,
+                )
+            logger.warning(
+                "character_graph_chain: top-N 子图无跨分量共现，启用硬兜底 bridge %s -> %s",
+                fallback_orphan,
+                anchor,
+            )
+            largest.add(fallback_orphan)
+            continue
 
         union = appearance[best_orphan] + appearance[best_neighbor] - best_count
         weight = round(best_count / union, 3) if union > 0 else 0.0
@@ -476,7 +508,7 @@ def _bridge_subgraph_orphans(
                 target_id=best_neighbor,
                 type="ally",
                 polarity="mixed",
-                weight=max(weight, 0.1),
+                weight=max(weight, _HARD_BRIDGE_WEIGHT),
             )
         largest.add(best_orphan)
 
