@@ -343,6 +343,21 @@ class TokenBudget:
     # ≈ 2500 token × 1.6 = 4000 → 4096
     CHARACTER_GRAPH = 4096
 
+    # 启发式切分全失败时的 LLM 兜底切场（script_llm_segmenter）。
+    # 最多 30 场 × (start_para + end_para + scene_label ≤30字 + characters 6个×6字)
+    # ≈ 30 × 75 字 = 2250 字 × 1.5 char/token = 1500 token × 1.7 safety = 2550 → 3072
+    LLM_RESEGMENT = 3072
+
+    # 单角色人物小传一次输出（character_pipeline.write_bios_concurrent，每人一次）。
+    # 字段：identity 三段 (≈ 80×3 = 240 字) + appearance 8 子字段 (≈ 50×8 = 400 字) +
+    #       persona_surface/core/weakness/arc_light/dialogue_style 5 段 (≈ 150×5 = 750 字) +
+    #       catchphrases 5 条 × (quote ≤220 + scene_id 36) = 1280 字 +
+    #       relations_summary 6 条 × (sentence ≤120 + other_id 36) = 936 字 +
+    #       notable_scenes 3 条 × (behavior ≤200 + scene_id 36) = 708 字
+    # 总字符 ≈ 4314 字 × 1.5 char/token (中文) ≈ 2876 token × 1.6 safety = 4602 → 5120
+    # 给 5120 留余量；qwen-max-latest 输出 cap 8K 内安全。
+    BIO_WRITER = 5120
+
     # 单 batch 30 事件 × (scene_no + type + evidence ≤80 字)
     # ≈ 1500 token × 1.7 = 2550 → 2560
     REWARD_EXTRACT = 2560

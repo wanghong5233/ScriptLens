@@ -45,9 +45,14 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "读取剧本基本信息（集数 / 场数 / 字数），用于后续评分时给 LLM 上下文",
     ),
     (
+        "extracting_characters",
+        "归一化人物实体",
+        "从 scenes.characters 聚合频率与共现，按相似度合并 alias，得到该剧本主要角色清单（character_entities）—— 后续 character_graph / 人物小传共用的 id-space 锚点",
+    ),
+    (
         "extracting_narrative",
         "抽取叙事层",
-        "并行抽取看点 reward_events、速览卡 logline、三幕节拍 beat_sheet、人物关系图 character_graph、动机回扫 motivation —— 前端速览 / 节拍 / 人物 / 看点 4 个叙事 tab 的数据源",
+        "并行抽取看点 reward_events、速览卡 logline、三幕节拍 beat_sheet、人物关系图 character_graph、动机回扫 motivation、人物小传 character_bios —— 前端速览 / 节拍 / 人物 / 看点 4 个叙事 tab 的数据源",
     ),
     (
         "scoring_6d",

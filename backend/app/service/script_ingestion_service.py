@@ -229,4 +229,86 @@ class ScriptIngestionService:
             file_path.name,
         )
 
+        # 启发式规则全失败 → LLM 兜底（行业混合 pipeline 的"残段语义分类"）
+        if seg.fallback_strategy == "single_scene" and seg.total_chars >= 5_000:
+            if progress_cb:
+                progress_cb("llm_segmenting", {"chars": seg.total_chars})
+            llm_seg = self._maybe_llm_resegment(paragraphs, seg)
+            if llm_seg is not None:
+                seg = llm_seg
+                logger.info(
+                    "ingest.llm_segmented scenes=%s file=%s (heuristic single_scene → LLM fallback)",
+                    seg.total_scenes, file_path.name,
+                )
+
         return paragraphs, seg
+
+    def _maybe_llm_resegment(
+        self,
+        paragraphs: List[str],
+        seg: SegmentResult,
+    ) -> Optional[SegmentResult]:
+        """规则切分全失败时的 LLM 兜底切场。
+
+        失败返回 None，上层保留原 single_scene 结果（零丢失）。本方法在
+        ``run_in_executor`` 启动的工作线程里调用，线程内无现存事件循环，
+        ``asyncio.run`` 安全。
+        """
+        try:
+            import asyncio  # noqa: WPS433（局部导入：避免顶层引入 asyncio 给同步路径加噪）
+
+            from service.script_tools.llm_caller import LlmCaller
+            from service.script_tools.script_llm_segmenter import llm_resegment
+        except ImportError as exc:
+            logger.warning("ingest._maybe_llm_resegment: import failed err=%s", exc)
+            return None
+
+        # body_start：seg 已经走过 metadata_block 抽取；single_scene 路径下
+        # body_start = len(metadata_paragraphs) 即可还原。这里复用 segmenter
+        # 的同款逻辑：metadata_block 是非空段落以 \n 拼接。
+        if seg.metadata_block:
+            metadata_lines = seg.metadata_block.split("\n")
+            body_start = 0
+            metadata_seen = 0
+            for i, p in enumerate(paragraphs):
+                if not p.strip():
+                    continue
+                if metadata_seen >= len(metadata_lines):
+                    body_start = i
+                    break
+                metadata_seen += 1
+        else:
+            body_start = 0
+
+        body = paragraphs[body_start:]
+        if not body:
+            return None
+
+        try:
+            scenes = asyncio.run(
+                llm_resegment(
+                    body,
+                    body_start_in_full=body_start,
+                    caller=LlmCaller(),
+                )
+            )
+        except Exception as exc:
+            logger.warning("ingest._maybe_llm_resegment: asyncio.run raised err=%s", exc)
+            return None
+
+        if not scenes:
+            return None
+
+        new_warnings = list(seg.parsing_warnings) + [
+            f"启发式规则全失败，已用 LLM 兜底切出 {len(scenes)} 场（结构可能不完美，建议核对）",
+        ]
+        total_chars = sum(len(s.text) for s in scenes)
+        return SegmentResult(
+            metadata_block=seg.metadata_block,
+            scenes=scenes,
+            total_episodes=0,
+            total_scenes=len(scenes),
+            total_chars=total_chars,
+            parsing_warnings=new_warnings,
+            fallback_strategy="llm_resegmented",
+        )

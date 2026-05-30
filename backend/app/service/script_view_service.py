@@ -68,6 +68,7 @@ def build_view(
         plot_units=list(report.plot_units or []),
         characters=list(report.characters or []),
         character_relationships=list(report.character_relationships or []),
+        character_bios=list(report.character_bios or []),
         must_read_scene_ids=list(report.must_read_scene_ids or []),
         risk_flags=list(report.risk_flags or []),
         evidence_refs=list(report.evidence_refs or []),

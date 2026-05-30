@@ -38,8 +38,19 @@ from service.script_ingestion_service import ScriptIngestionService
 from service.script_progress_tracker import tracker as progress_tracker
 from service.script_tools.beat_chain import BeatSheet, extract_beat_sheet
 from service.script_tools.character_graph_chain import CharacterGraph, extract_character_graph
+from service.script_tools.character_pipeline import (
+    CharacterBio,
+    CharacterEntity,
+    cooccurrence_candidate_relationships,
+    persist_bios,
+    persist_entities,
+    persist_relationships,
+    resolve_entities,
+    write_bios_concurrent,
+)
 from service.script_tools.compliance_scorer import screen_compliance
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
+from service.script_tools.scene_repo import get_all_scenes
 from service.script_tools.dimension_scorer import (
     ScoreOutput,
     score_character,
@@ -620,6 +631,52 @@ def _load_characters(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
     return out
 
 
+def _bios_to_payload(bios: Optional[list[CharacterBio]]) -> list[dict[str, Any]]:
+    """character_pipeline.CharacterBio → ReportPayload.character_bios 字典形态。
+
+    字段名严格对齐 schemas.script.ReportCharacterBio；前端 ``CharacterBioDTO``
+    与下游高光集锦物料层都按这份契约消费。
+    """
+    if not bios:
+        return []
+    out: list[dict[str, Any]] = []
+    for bio in bios:
+        appearance = bio.appearance or {}
+        outfit = appearance.get("outfit") or {}
+        out.append(
+            {
+                "id": bio.id,
+                "character_id": bio.character_id,
+                "identity_present": bio.identity_present,
+                "identity_hidden": bio.identity_hidden,
+                "identity_origin": bio.identity_origin,
+                "appearance": {
+                    "age": str(appearance.get("age") or ""),
+                    "height": str(appearance.get("height") or ""),
+                    "build": str(appearance.get("build") or ""),
+                    "facial": str(appearance.get("facial") or ""),
+                    "signature_props": list(appearance.get("signature_props") or []),
+                    "outfit": {
+                        "material": str(outfit.get("material") or ""),
+                        "palette": str(outfit.get("palette") or ""),
+                        "form": str(outfit.get("form") or ""),
+                    },
+                },
+                "persona_surface": bio.persona_surface,
+                "persona_core": bio.persona_core,
+                "weakness": bio.weakness,
+                "arc_light": bio.arc_light,
+                "dialogue_style": getattr(bio, "dialogue_style", "") or "",
+                "catchphrases": list(bio.catchphrases or []),
+                "relations_summary": list(bio.relations_summary or []),
+                "notable_scenes": list(getattr(bio, "notable_scenes", []) or []),
+                "bio_ver": bio.bio_ver,
+                "source": bio.source,
+            }
+        )
+    return out
+
+
 def _load_character_relationships(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
     with engine.connect() as conn:
         rows = conn.execute(
@@ -819,13 +876,40 @@ async def generate_report(
             raise ValueError(f"script_id={script_id} 不存在")
         progress_tracker.update_stage(script_id, "loading_meta", "done", detail=f"title={meta.title}")
 
+        # ① 人物归一化：必须先于 narrative 阶段。entities 是后续 character_graph
+        # nodes / character_bios.character_id / character_relationships.src_dst 三处
+        # 共用的 UUID id-space 锚点。共现得到的 candidate edges 给 chain 当 baseline
+        # edges，避免 chain 在 baseline 路径下 edge_by_pair 为空导致 LLM enrichment
+        # 全部被丢。
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_characters",
+            "running",
+            detail="按场次共现聚类 + 别名归一",
+        )
+        scenes = get_all_scenes(script_id=script_id, engine=engine)
+        entities: list[CharacterEntity] = await resolve_entities(
+            script_id=script_id, scenes=scenes
+        )
+        persist_entities(entities, script_id=script_id, engine=engine)
+        candidate_relationships = cooccurrence_candidate_relationships(entities, scenes)
+        progress_tracker.update_stage(
+            script_id,
+            "extracting_characters",
+            "done",
+            detail=(
+                f"主要角色 {len(entities)} 个 · "
+                f"候选关系边 {len(candidate_relationships)} 条"
+            ),
+        )
+
         progress_tracker.update_stage(
             script_id,
             "extracting_narrative",
             "running",
-            detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 看点 / 动机",
+            detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 人物小传 / 看点 / 动机",
         )
-        # reward 必须先跑（beat_chain 依赖它）；其余 4 个 chain 在 reward 完成后并发
+        # reward 必须先跑（beat_chain 依赖它）；其余 chain 在 reward 完成后并发
         reward_events: list[RewardEvent] = (
             await _optional_chain(
                 "reward_extractor",
@@ -846,17 +930,37 @@ async def generate_report(
                 engine=engine,
             ),
         )
-        # 不传 characters/relationships → 走共现 fallback，零 tag_pipeline 表依赖
+        # 透传 entities + 共现候选关系：chain 走 resolver baseline 路径，节点 id =
+        # entity.id（UUID），LLM enrichment 仅补 motivation/goal/obstacle 与边的
+        # type/polarity；id-space 与 character_bios 严格一致。
         graph_task = _optional_chain(
             "character_graph_chain",
-            extract_character_graph(script_id=script_id, caller=caller, engine=engine),
+            extract_character_graph(
+                script_id=script_id,
+                caller=caller,
+                engine=engine,
+                characters=[e.to_chain_dict() for e in entities],
+                relationships=candidate_relationships,
+            ),
         )
         motivation_task = _optional_chain(
             "motivation_chain",
             score_motivation(script_id=script_id, caller=caller),
         )
-        coverage_card, beat_sheet, character_graph, motivation_result = await asyncio.gather(
-            coverage_task, beat_task, graph_task, motivation_task
+        # 小传与 graph / coverage / beat / motivation 并发：bio 单点失败不影响其他链。
+        bios_task = write_bios_concurrent(
+            entities, scenes=scenes, caller=caller, semaphore_size=4
+        )
+        coverage_card, beat_sheet, character_graph, motivation_result, bios = (
+            await asyncio.gather(
+                coverage_task, beat_task, graph_task, motivation_task, bios_task
+            )
+        )
+        # 持久化 bios + 把 chain 输出的 enriched edges 写入 character_relationships。
+        persist_bios(bios, engine=engine)
+        if character_graph is not None:
+            persist_relationships(
+                character_graph.edges, script_id=script_id, engine=engine
         )
         progress_tracker.update_stage(
             script_id,
@@ -866,6 +970,7 @@ async def generate_report(
                 f"速览{'已生成' if coverage_card else '降级'} · "
                 f"节拍 {len(beat_sheet.acts) if beat_sheet else 0} 幕 · "
                 f"人物 {len(character_graph.nodes) if character_graph else 0} 个 · "
+                f"小传 {sum(1 for b in bios if b.persona_core or b.identity_present)}/{len(bios)} · "
                 f"看点 {len(reward_events)} · "
                 f"动机决策 {len(motivation_result.judged_decisions) if motivation_result else 0}"
             ),
@@ -879,10 +984,10 @@ async def generate_report(
                 dimension=dim,
                 script_id=script_id,
                 meta=meta,
-                reward_events=reward_events,
+            reward_events=reward_events,
                 coverage_card=coverage_card,
                 beat_sheet=beat_sheet,
-                character_graph=character_graph,
+            character_graph=character_graph,
                 motivation_result=motivation_result,
                 engine=engine,
             )
@@ -918,6 +1023,7 @@ async def generate_report(
             coverage_card=coverage_card,
             beat_sheet=beat_sheet,
             character_graph=character_graph,
+            character_bios=bios,
             reward_events=reward_events,
             engine=engine,
         )
@@ -1060,6 +1166,7 @@ def _build_report_payload(
     coverage_card: Optional[CoverageCard] = None,
     beat_sheet: Optional[BeatSheet] = None,
     character_graph: Optional[CharacterGraph] = None,
+    character_bios: Optional[list[CharacterBio]] = None,
     reward_events: Optional[list[RewardEvent]] = None,
 ) -> dict[str, Any]:
     """release/v1-mvp 报告 payload 组装。
@@ -1114,13 +1221,16 @@ def _build_report_payload(
         "summary": decision_reason,
         "scorecard": scorecard,
         "compliance": compliance_payload,
-        # 以下 4 个字段查询自动为 [] —— tag_pipeline 已废弃、对应表无数据
+        # drama_tags / plot_units 仍走 tag_pipeline（已废弃，表为空 → []）
         "drama_tags": _load_drama_tags(script_id=meta.script_id, engine=engine),
         "plot_units": _load_plot_units(script_id=meta.script_id, engine=engine),
+        # characters / character_relationships v1-mvp 由 character_pipeline 写入；
+        # 直接从表读出，与 character_graph nodes 共享 UUID id-space。
         "characters": _load_characters(script_id=meta.script_id, engine=engine),
         "character_relationships": _load_character_relationships(
             script_id=meta.script_id, engine=engine
         ),
+        "character_bios": _bios_to_payload(character_bios),
         "must_read_scene_ids": must_read_scene_ids,
         "evidence_refs": evidence_refs_payload,
         "highlights": highlights_payload,
@@ -1224,7 +1334,7 @@ def _persist_report(
         for dim, out in dim_outputs.items():
             score_rows.append(
                 {
-                    "id": str(uuid.uuid4()),
+            "id": str(uuid.uuid4()),
                     "script_id": script_id,
                     "run_id": run_id,
                     "dimension": dim,

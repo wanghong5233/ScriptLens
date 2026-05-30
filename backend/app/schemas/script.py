@@ -419,6 +419,77 @@ class ReportCharacterRelationship(BaseModel):
     triangle: str = ""
 
 
+class CharacterBioOutfit(BaseModel):
+    """外貌 → 服装结构化子字段，给下游 T2I/Seedance 拼 prompt 用。"""
+
+    material: str = ""
+    palette: str = ""
+    form: str = ""
+
+
+class CharacterBioAppearance(BaseModel):
+    """外貌结构化字段。空字段一律保留 ""，下游拼 prompt 时按需取用。"""
+
+    age: str = ""
+    height: str = ""
+    build: str = ""
+    facial: str = ""
+    signature_props: List[str] = Field(default_factory=list)
+    outfit: CharacterBioOutfit = Field(default_factory=CharacterBioOutfit)
+
+
+class CharacterBioCatchphrase(BaseModel):
+    quote: str
+    scene_id: str = ""
+
+
+class CharacterBioRelation(BaseModel):
+    other_id: str
+    sentence: str
+
+
+class CharacterBioNotableScene(BaseModel):
+    """该角色最具代表性的某场行为；scene_id 必须命中 scenes 真实 id。
+
+    behavior 是"该角色在该场做了什么"的一段描述，不是场景梗概；前端"关键场景"
+    子区段渲染时点击可跳到 scene_id 对应位置（与台词卡的 onTraceEvidence 同一通道）。
+    """
+
+    scene_id: str
+    behavior: str = ""
+
+
+class ReportCharacterBio(BaseModel):
+    """单个角色的小传 payload；character_id 关联 ReportCharacter.id。
+
+    字段语义对齐 docs/prompt.jpg：身份（三段）/ 外貌（结构化）/ 性格 / 经典台词 /
+    与关键角色关系。前端在「人物」tab 卡片展开态渲染；下游高光集锦
+    （docs/2026-05-29-...-需求与方案.md §5.1 物料层）拼 T2I/Seedance prompt
+    时直接读 appearance / signature_props / outfit。
+
+    v2（08_extend_character_bios）新增：
+    - dialogue_style：说话风格段落（对齐 Sudowrite Dialogue Style）
+    - notable_scenes：3 场代表行为（带 scene_id 回链，前端可点跳原文）
+    """
+
+    id: str
+    character_id: str
+    identity_present: str = ""
+    identity_hidden: str = ""
+    identity_origin: str = ""
+    appearance: CharacterBioAppearance = Field(default_factory=CharacterBioAppearance)
+    persona_surface: str = ""
+    persona_core: str = ""
+    weakness: str = ""
+    arc_light: str = ""
+    dialogue_style: str = ""
+    catchphrases: List[CharacterBioCatchphrase] = Field(default_factory=list)
+    relations_summary: List[CharacterBioRelation] = Field(default_factory=list)
+    notable_scenes: List[CharacterBioNotableScene] = Field(default_factory=list)
+    bio_ver: str = "v1"
+    source: str = "llm"
+
+
 class PacingCurvePoint(BaseModel):
     episode_no: int
     plot_unit_count: int = 0
@@ -476,6 +547,13 @@ class ReportPayload(BaseModel):
     plot_units: List[ReportPlotUnit] = Field(default_factory=list)
     characters: List[ReportCharacter] = Field(default_factory=list)
     character_relationships: List[ReportCharacterRelationship] = Field(default_factory=list)
+    character_bios: List[ReportCharacterBio] = Field(
+        default_factory=list,
+        description=(
+            "人物小传清单（character_id 关联 characters[].id）。"
+            "前端「人物」tab 卡片展开态渲染；下游高光集锦物料层用 appearance 拼 T2I prompt。"
+        ),
+    )
     must_read_scene_ids: List[str] = Field(
         default_factory=list,
         description="evidence_refs.id 列表（最多 3 个），不是 scene_id",
@@ -708,6 +786,10 @@ class ViewResponse(BaseModel):
     plot_units: List[ReportPlotUnit] = Field(default_factory=list)
     characters: List[ReportCharacter] = Field(default_factory=list)
     character_relationships: List[ReportCharacterRelationship] = Field(default_factory=list)
+    character_bios: List[ReportCharacterBio] = Field(
+        default_factory=list,
+        description="人物小传清单；透传自 ReportPayload.character_bios。",
+    )
     must_read_scene_ids: List[str] = Field(default_factory=list)
     risk_flags: List[str] = Field(default_factory=list)
     evidence_refs: List[ReportEvidenceRef] = Field(
