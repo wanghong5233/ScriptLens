@@ -63,6 +63,9 @@ class CoverageCard:
     core_value: str = ""
     strengths: List[CoveragePoint] = field(default_factory=list)
     concerns: List[CoveragePoint] = field(default_factory=list)
+    # 业内对照：抖音红果 / 快手星芒选品判断必看「同类爆款」。
+    # LLM 给 2-3 部题材相近、规模相当的已成爆款，给选品端「这部像哪部」的直接锚点。
+    comparable_titles: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -74,6 +77,7 @@ class CoverageCard:
             "core_value": self.core_value,
             "strengths": [p.to_dict() for p in self.strengths],
             "concerns": [p.to_dict() for p in self.concerns],
+            "comparable_titles": list(self.comparable_titles),
         }
 
 
@@ -129,7 +133,8 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
     {{"title": "≤12字综合风险 1", "detail": "≤80字解释（可指出某段塌陷集数范围，但不引用单场原文）"}},
     {{"title": "≤12字综合风险 2", "detail": "≤80字解释"}},
     {{"title": "≤12字综合风险 3", "detail": "≤80字解释"}}
-  ]
+  ],
+  "comparable_titles": ["≤16字 同类爆款 1（剧名 或 剧名+赛道说明）", "≤16字 同类爆款 2", "≤16字 同类爆款 3"]
 }}
 
 【重要规则】
@@ -139,6 +144,9 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
 4. synopsis 不要只是 logline 的扩写，要真的把"开局→中段→结局"讲出来。
 5. 不要写空话（「剧情还不错」「节奏可以」）。
 6. core_value 要具体到品类卖点（"穿书救赎 + 双男主 CP"），不要写「内容优质」。
+7. comparable_titles：2-3 部题材接近、规模相当的**已成爆款短剧 / 漫剧**（业内对照：抖音红果 / 快手星芒 / WeTV / ReelShort 头部投放剧）。每条 ≤16 字，可以是「剧名」也可以是「剧名 · 短描述」（如「《无双》逆袭复仇模板」「《哎呀皇后娘娘来打工》穿越爽剧」）。
+   - 优先选**同赛道 + 同题材**（如逆袭复仇 / 穿越打脸 / 战神归来 / 重生甜宠）的真实存在剧目；不要编造剧名
+   - 不要写"类似某某剧"，直接给出对比锚点；如果实在无可类比，最多回 1 条或留空数组，不要凑数
 """
 
 
@@ -306,6 +314,7 @@ async def extract_coverage_card(
         core_value=_truncate(str(parsed.get("core_value") or ""), 30),
         strengths=_points(parsed.get("strengths")),
         concerns=_points(parsed.get("concerns")),
+        comparable_titles=_string_list(parsed.get("comparable_titles"), limit=3, item_max=16),
     )
 
 

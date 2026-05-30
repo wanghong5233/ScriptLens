@@ -349,6 +349,12 @@ class CoverageCard(BaseModel):
     core_value: str = Field("", description="≤ 30 字，这份剧本最值得关注的价值")
     strengths: List[CoveragePoint] = Field(default_factory=list)
     concerns: List[CoveragePoint] = Field(default_factory=list)
+    # 业内对照：抖音红果 / 快手星芒选品必看「同类爆款」做对照判断。
+    # 由 LLM 在 coverage 阶段产出 2-3 部题材相近、规模相当的已成爆款，给选品端"这部像哪部"的直接锚点。
+    comparable_titles: List[str] = Field(
+        default_factory=list,
+        description="同类爆款 2-3 部，每条 ≤ 16 字（剧名 或 剧名+赛道说明）",
+    )
 
 
 class BeatNode(BaseModel):
