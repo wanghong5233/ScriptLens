@@ -76,6 +76,7 @@ async def screen_compliance(
             "confirmed_by_llm": hit.confirmed_by_llm,
             "evidence_line_range": list(hit.evidence_line_range) if hit.evidence_line_range else None,
             "excerpt": hit.excerpt,
+            "quote_verified": hit.quote_verified,
         }
         for hit in risk.hits
     ]

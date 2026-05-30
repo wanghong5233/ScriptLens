@@ -250,9 +250,11 @@ class ReportCompliance(BaseModel):
 class ReportEvidenceRef(BaseModel):
     """evidence_refs[]：每条都是带 line_range 锚点的引用，前端高亮使用。
 
-    v3.3 起：start_line/end_line 是**主锚点**，必须由 LLM 在产 evidence 时同次给出
-    （而不是后端字符匹配反推）；quote 仅用于 tooltip 展示，前端绝不再做 quote 字符
-    串匹配。详见 docs/08 §3.8。
+    v3.4 起（W3C TextQuoteSelector + Anthropic Citations pattern）：
+    - quote 字段是 LLM verbatim 输出，**后端在 scene_text 内 reconcile 通过**才落
+      库（quote_verified=True）；reconcile 失败时 line_range 留 None，前端做整场跳转。
+    - quote_verified 用于前端区分「精确跳到行 / 仅整场跳转」的视觉与 tooltip 文案。
+    - start_line / end_line 仍是跳转主锚点；quote 兼作 tooltip 与可选的 verbatim 二次确认。
     """
 
     id: str
@@ -264,12 +266,20 @@ class ReportEvidenceRef(BaseModel):
     end_line: Optional[int] = None
     quote: str = Field(
         ...,
-        description="该 line_range 对应的原文片段，用作 tooltip / preview。前端跳转**不**依赖此字段",
+        description="LLM 输出的 verbatim 片段（W3C TextQuoteSelector.exact），后端 reconcile 通过则用作 tooltip / preview",
     )
     quote_source: Optional[str] = Field(
         None,
         description=(
             "quote 来源标记：`reward:<event_type>` / `risk_hit` / `fallback_first_line`"
+        ),
+    )
+    quote_verified: bool = Field(
+        False,
+        description=(
+            "verbatim 是否在 scene_text 内被 reconcile 唯一定位成功。"
+            "True 表示前端可精确高亮 quote/line_range；False 表示该 ref 没拿到 verbatim 行号锚点，"
+            "前端应做整场跳转并在 tooltip 提示「仅定位到场」"
         ),
     )
     scene_summary: Optional[str] = Field(
