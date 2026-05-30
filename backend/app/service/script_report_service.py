@@ -50,6 +50,7 @@ from service.script_tools.character_pipeline import (
 )
 from service.script_tools.compliance_scorer import screen_compliance
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
+from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.scene_repo import get_all_scenes
 from service.script_tools.dimension_scorer import (
     ScoreOutput,
@@ -1245,8 +1246,8 @@ def _build_report_payload(
         character_graph                     : 5 chain 输出
       - reward / evidence_refs / highlights /
         must_read_scene_ids                 : 看点 + 证据锚点
-      - pacing_curve                        : v1-mvp 暂留空 []，后续按 reward+scene
-                                              分布派生（无 plot_units 依赖）
+      - pacing_curve                        : v3.5 event-based 按集聚合（reward + scenes，
+                                              零 plot_unit 依赖）—— 故事 tab 折线图
       - evaluation.rewrite_seeds            : v1-mvp 暂留空 []（Batch3 actions 体系
                                               已废弃，rewrite 由 doc-studio agent 接管）
     """
@@ -1301,7 +1302,11 @@ def _build_report_payload(
         "beat_sheet": beat_sheet.to_dict() if beat_sheet is not None else None,
         "character_graph": character_graph.to_dict() if character_graph is not None else None,
         "risk_flags": risk_flags,
-        "pacing_curve": [],
+        "pacing_curve": aggregate_pacing_curve(
+            script_id=meta.script_id,
+            reward_events=list(reward_events or []),
+            engine=engine,
+        ),
         "evaluation": {
             "dimensions": [
                 {

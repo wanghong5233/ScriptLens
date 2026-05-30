@@ -509,14 +509,19 @@ class ReportCharacterBio(BaseModel):
 
 
 class PacingCurvePoint(BaseModel):
+    """集级节奏点（v3.5 event-based）。
+
+    数据来源：reward_events + scenes，零 plot_unit / tag_pipeline 依赖。
+    前端用 event_count 画折线 + spike，可定位关键剧情集 / 塌陷段。
+    """
+
     episode_no: int
-    plot_unit_count: int = 0
-    intensity_avg: float = Field(0.0, ge=0, le=8)
-    intensity_max: int = Field(0, ge=0, le=8)
+    scene_count: int = 0
+    event_count: int = 0
     hooks: int = 0
-    payoffs: int = 0
-    conflicts: int = 0
-    drivers_distribution: Dict[str, int] = Field(default_factory=dict)
+    twists: int = 0
+    reward_events: int = 0
+    sentiment: float = Field(0.0, ge=-1, le=1)
 
 
 class EvaluationDimension(BaseModel):
