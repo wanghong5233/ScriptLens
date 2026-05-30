@@ -1265,8 +1265,9 @@ def _build_report_payload(
         character_graph                     : 5 chain 输出
       - reward / evidence_refs / highlights /
         must_read_scene_ids                 : 看点 + 证据锚点
-      - pacing_curve                        : v3.5 event-based 按集聚合（reward + scenes，
-                                              零 plot_unit 依赖）—— 故事 tab 折线图
+      - pacing_curve                        : v4 emotion-arc（reward + beat_sheet + scenes，
+                                              零 plot_unit 依赖）。详见
+                                              docs/2026-05-30-pacing-curve-v4.md
       - evaluation.rewrite_seeds            : v1-mvp 暂留空 []（Batch3 actions 体系
                                               已废弃，rewrite 由 doc-studio agent 接管）
     """
@@ -1324,6 +1325,7 @@ def _build_report_payload(
         "pacing_curve": aggregate_pacing_curve(
             script_id=meta.script_id,
             reward_events=list(reward_events or []),
+            beat_sheet=beat_sheet,
             engine=engine,
         ),
         "evaluation": {

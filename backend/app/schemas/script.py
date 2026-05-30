@@ -509,19 +509,61 @@ class ReportCharacterBio(BaseModel):
 
 
 class PacingCurvePoint(BaseModel):
-    """集级节奏点（v3.5 event-based）。
+    """场景粒度节奏点（v4 emotion-arc）。详见 docs/2026-05-30-pacing-curve-v4.md。"""
 
-    数据来源：reward_events + scenes，零 plot_unit / tag_pipeline 依赖。
-    前端用 event_count 画折线 + spike，可定位关键剧情集 / 塌陷段。
-    """
-
-    episode_no: int
-    scene_count: int = 0
-    event_count: int = 0
-    hooks: int = 0
-    twists: int = 0
-    reward_events: int = 0
+    progress: float = Field(..., ge=0, le=1)
+    episode_no: Optional[int] = None
+    scene_no: str
+    scene_id: str
     sentiment: float = Field(0.0, ge=-1, le=1)
+
+
+class PacingCurveBeat(BaseModel):
+    """曲线上的节拍/反转锚点；前端点击 scene_id 跳原文。"""
+
+    progress: float = Field(..., ge=0, le=1)
+    beat_type: Literal[
+        "opening",
+        "inciting",
+        "midpoint",
+        "climax",
+        "closing",
+        "reward_spike",
+    ]
+    label: str
+    summary: str = ""
+    scene_id: str
+
+
+class PacingCurveDeadZone(BaseModel):
+    """死区段：连续 ≥6 场无情感波动且无 reward 命中。"""
+
+    start_progress: float = Field(..., ge=0, le=1)
+    end_progress: float = Field(..., ge=0, le=1)
+    span_scenes: int = 0
+
+
+PacingCurveShape = Literal[
+    "rags_to_riches",
+    "tragedy",
+    "man_in_hole",
+    "icarus",
+    "cinderella",
+    "oedipus",
+    "flat",
+    "complex",
+]
+
+
+class PacingCurve(BaseModel):
+    """节奏曲线（v4）：情感命运曲线 + 节拍锚点 + 死区。"""
+
+    shape: PacingCurveShape = "complex"
+    shape_label: str = "复杂"
+    climax_progress: float = Field(0.0, ge=0, le=1)
+    points: List[PacingCurvePoint] = Field(default_factory=list)
+    beats: List[PacingCurveBeat] = Field(default_factory=list)
+    dead_zones: List[PacingCurveDeadZone] = Field(default_factory=list)
 
 
 class EvaluationDimension(BaseModel):
@@ -589,7 +631,7 @@ class ReportPayload(BaseModel):
     coverage_card: Optional[CoverageCard] = None
     beat_sheet: Optional[BeatSheet] = None
     character_graph: Optional[CharacterGraph] = None
-    pacing_curve: List[PacingCurvePoint] = Field(default_factory=list)
+    pacing_curve: Optional[PacingCurve] = None
     evaluation: Optional[EvaluationPayload] = None
     risk_flags: List[str] = Field(default_factory=list)
     report_id: Optional[str] = None
@@ -826,7 +868,7 @@ class ViewResponse(BaseModel):
     coverage_card: Optional[CoverageCard] = None
     beat_sheet: Optional[BeatSheet] = None
     character_graph: Optional[CharacterGraph] = None
-    pacing_curve: List[PacingCurvePoint] = Field(default_factory=list)
+    pacing_curve: Optional[PacingCurve] = None
     evaluation: Optional[EvaluationPayload] = None
     rewrite_seeds: List[RewriteSeed] = Field(
         default_factory=list,

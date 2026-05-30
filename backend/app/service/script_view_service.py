@@ -76,7 +76,7 @@ def build_view(
         coverage_card=report.coverage_card,
         beat_sheet=report.beat_sheet,
         character_graph=report.character_graph,
-        pacing_curve=list(report.pacing_curve or []),
+        pacing_curve=report.pacing_curve,
         evaluation=report.evaluation,
         rewrite_seeds=rewrite_seeds,
         task_status=task_status,
