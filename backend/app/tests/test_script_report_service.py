@@ -320,7 +320,9 @@ def test_build_evidence_refs_minimal_merges_reward_and_risk() -> None:
             scene_no="1-1",
             episode_no=1,
             event_type="reversal",
-            evidence="主角揭穿身份",
+            claim="主角揭穿身份反转",
+            quote_verbatim="主角揭穿身份",
+            quote_verified=True,
             evidence_line_range=(3, 5),
         ),
         # duplicate (scene_id, line_range) should be skipped
@@ -329,7 +331,9 @@ def test_build_evidence_refs_minimal_merges_reward_and_risk() -> None:
             scene_no="1-1",
             episode_no=1,
             event_type="face_slap",
-            evidence="紧接着的连续打脸",
+            claim="紧接着的连续打脸",
+            quote_verbatim="紧接着的连续打脸",
+            quote_verified=True,
             evidence_line_range=(3, 5),
         ),
         RewardEvent(
@@ -337,7 +341,9 @@ def test_build_evidence_refs_minimal_merges_reward_and_risk() -> None:
             scene_no="2-2",
             episode_no=2,
             event_type="cp_progress",
-            evidence="CP 牵手",
+            claim="CP 牵手",
+            quote_verbatim="CP 牵手",
+            quote_verified=True,
             evidence_line_range=(10, 12),
         ),
     ]

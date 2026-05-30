@@ -26,7 +26,7 @@ from service.script_tools.scene_repo import (
     format_scene_for_llm,
     get_all_scenes,
     locate_scenes_by_keyword,
-    parse_line_range,
+    reconcile_text_quote_selector,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,17 +36,42 @@ logger = logging.getLogger(__name__)
 class RewardEvent:
     """单条 reward 事件。
 
-    v3.3 line-range anchored：
-    - `evidence_line_range` 是 LLM 二筛时同次给出的场内行号区间（1-based 闭区间）
-    - `evidence` 仅作 tooltip 展示文本（≤ LLM_EVIDENCE_MAX_LEN 字）
+    v3.4 W3C TextQuoteSelector 锚定（取代 v3.3 的 line_range 契约）：
+
+    - `claim`              LLM 自由摘要（≤ 80 字），用于 UI 卡片描述
+    - `quote_verbatim`     LLM 给的 verbatim 原文片段；后端 reconcile 不通过则为空
+    - `quote_verified`     verbatim 是否在 scene 内被唯一定位（W3C 标准 fail-closed）
+    - `evidence_line_range`后端从 quote_verbatim 反算的行号；verified=False 时为 None
+    - `evidence`           **下游展示主字段**（向后兼容）：
+                           - verified=True  → 取 quote_verbatim（前端可逐字高亮）
+                           - verified=False → 取 claim（前端只能跳整场，不再误导性高亮某行）
+
+    业内对照：
+    - W3C Web Annotation Data Model §4.2.4 TextQuoteSelector
+    - Anthropic Claude Citations API（GA 2026）—— "citations are guaranteed to
+      contain valid pointers to the provided documents"
+    - AI Alliance Semiont reconcileSelector —— "LLM does NOT supply offsets; it
+      supplies `exact` (a verbatim substring); our code computes start/end by
+      searching the source"
     """
 
     scene_id: str
     scene_no: str
     episode_no: Optional[int]
     event_type: str  # face_slap | reversal | revenge | romantic_progress | identity_reveal | humiliate_villain | underdog_rise | scheme_exposed
-    evidence: str  # 命中片段（≤90 字），tooltip-only
+    claim: str
+    quote_verbatim: str
+    quote_verified: bool
     evidence_line_range: Optional[tuple[int, int]] = None
+
+    @property
+    def evidence(self) -> str:
+        """下游 (`script_report_service` 等) 沿用的展示字段。
+
+        verified 时给 verbatim 原文，未 verified 时给 LLM 的 claim 摘要——
+        二者都是 ≤80 字，UI tooltip / 卡片描述都能用。
+        """
+        return self.quote_verbatim if self.quote_verified else self.claim
 
 
 # LLM 二级判定单批容量
@@ -70,22 +95,32 @@ _PROMPT_TEMPLATE = """你是中文短剧爆款分析师。下面是 N 个候选�
 【候选场景】
 {scenes_block}
 
-输出 JSON，严格遵循契约：
+输出 JSON（严格遵循契约 / W3C TextQuoteSelector 范式）：
 {{
   "events": [
     {{
       "scene_no": "<必须是上面给出的 scene_no>",
       "event_type": "face_slap|reversal|revenge|romantic_progress|identity_reveal|humiliate_villain|underdog_rise|scheme_exposed",
-      "evidence_line_range": [<起始行号>, <结束行号>],
-      "evidence": "<line_range 那段原文摘要，≤{evidence_max_len} 字>"
+      "claim": "<对该 reward 的中文摘要 ≤{evidence_max_len} 字（你的判断，不要照抄原文）>",
+      "quote": {{
+        "exact": "<原文逐字片段：必须是上面 [L{{n}}] 标注里 100% 一字不差出现过的连续文本，10-80 字>",
+        "prefix": "<exact 前面紧邻的 5-15 字原文，用于消歧（可选，留空字符串也行）>",
+        "suffix": "<exact 后面紧邻的 5-15 字原文，用于消歧（可选，留空字符串也行）>"
+      }}
     }}
   ]
 }}
 
-evidence_line_range 规则：
-- 引用该场内的 [L{{n}}] 行号（1-based 闭区间），例如 [4, 9] 表示 L4 到 L9
-- 区间应**整段覆盖** reward 事件发生的那段戏（典型 4-10 行），不要给单行碎片
-- 不要给整场 [1, 99]，要切到事件真正发生的那段
+quote.exact 是核心字段（用户跳转高亮就用这段原文）：
+- **必须**是上面对应 scene 的 [L{{n}}] 标注里**逐字出现**的连续文本，不能改写、概括、合并多行
+- **不能**写成"姜栀枝走进房间"这种叙述句——那是你的 claim
+- **要**写成"姜栀枝：你闭嘴。"或"△陆斯言把裤子提了上来"这种原文里真有的台词或动作行
+- 长度 10-80 字；选 reward 事件最关键的那一句台词或动作行
+- 如果原文里同样的话出现了多次（"等下" "好" 之类），用 prefix/suffix 写紧邻上下文消歧
+
+claim vs quote.exact 的分工：
+- claim = 你对该 reward 的诠释（"打脸 X，因为 Y" / "反转 X 揭露 Y"）
+- exact = 原文里真实出现过的那句台词，证据本身
 
 未命中的场景不要列出。如果没有任何场景命中，返回 {{"events": []}}。"""
 
@@ -197,6 +232,8 @@ async def _judge_batch(batch: List[Scene], caller: LlmCaller) -> List[RewardEven
     events_raw = parsed.get("events", []) if isinstance(parsed.get("events"), list) else []
     out: List[RewardEvent] = []
     by_no = {sc.scene_no: sc for sc in batch}
+    verified_count = 0
+    rejected_count = 0
     for ev in events_raw:
         if not isinstance(ev, dict):
             continue
@@ -207,19 +244,60 @@ async def _judge_batch(batch: List[Scene], caller: LlmCaller) -> List[RewardEven
         etype = str(ev.get("event_type") or "").strip()
         if etype not in REWARD_TERMS:
             continue
-        evidence = str(ev.get("evidence") or "").strip()[: LLM_EVIDENCE_MAX_LEN + 10]
-        if not evidence:
+
+        claim = str(ev.get("claim") or ev.get("evidence") or "").strip()[: LLM_EVIDENCE_MAX_LEN + 10]
+        if not claim:
             continue
-        scene_lc = len((scene.text or "").split("\n"))
-        line_range = parse_line_range(ev.get("evidence_line_range"), scene_line_count=scene_lc)
+
+        quote_raw = ev.get("quote")
+        exact = ""
+        prefix = ""
+        suffix = ""
+        if isinstance(quote_raw, dict):
+            exact = str(quote_raw.get("exact") or "").strip()
+            prefix = str(quote_raw.get("prefix") or "").strip()
+            suffix = str(quote_raw.get("suffix") or "").strip()
+
+        line_range: Optional[tuple[int, int]] = None
+        verified = False
+        if exact:
+            line_range = reconcile_text_quote_selector(
+                scene_text=scene.text or "",
+                exact=exact,
+                prefix=prefix or None,
+                suffix=suffix or None,
+            )
+            if line_range is not None:
+                verified = True
+                verified_count += 1
+            else:
+                rejected_count += 1
+                logger.warning(
+                    "reward_extractor.quote_unverified scene_no=%s type=%s exact_head=%r "
+                    "(LLM 给的 verbatim 在 scene 里搜不到或多义无法消歧 → 降级为整场跳转)",
+                    sno,
+                    etype,
+                    exact[:40],
+                )
+
         out.append(
             RewardEvent(
                 scene_id=scene.id,
                 scene_no=scene.scene_no,
                 episode_no=scene.episode_no,
                 event_type=etype,
-                evidence=evidence,
+                claim=claim,
+                quote_verbatim=exact[: LLM_EVIDENCE_MAX_LEN + 10] if verified else "",
+                quote_verified=verified,
                 evidence_line_range=line_range,
             )
+        )
+    if out:
+        logger.info(
+            "reward_extractor.batch_verified n=%s verified=%s rejected=%s (verbatim 命中率=%s)",
+            len(out),
+            verified_count,
+            rejected_count,
+            f"{verified_count * 100 / len(out):.0f}%",
         )
     return out

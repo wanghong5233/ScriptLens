@@ -416,6 +416,131 @@ def locate_quote_in_scene(
     return None
 
 
+def reconcile_text_quote_selector(
+    *,
+    scene_text: str,
+    exact: str,
+    prefix: Optional[str] = None,
+    suffix: Optional[str] = None,
+) -> Optional[tuple[int, int]]:
+    """W3C Web Annotation Data Model §4.2.4 TextQuoteSelector 的服务端重锚定。
+
+    - 输入：LLM 给的 verbatim 原文片段 `exact`（必须）+ 可选 `prefix`/`suffix` 上下文
+    - 输出：(start_line, end_line) 1-based 闭区间；无法可信定位时返回 None
+    - 算法：
+      1. 归一化（去空白/标点/全角差异），在归一化后的 scene_text 里 substring 搜 exact
+      2. 0 命中 → 返回 None（LLM 写错了 verbatim）
+      3. 1 命中 → 反算行号
+      4. 多命中 → 用 prefix + suffix disambiguate；唯一命中 → OK；仍多义 → None
+    - 拒绝长度 < 4 的 exact（这种 quote 在剧本里命中率太高，无法定位）
+
+    业内对照：
+    - W3C REC: https://www.w3.org/TR/annotation-model/#text-quote-selector
+    - Anthropic Citations API: API 层强制 `cited_text` 必须 verbatim
+    - AI Alliance Semiont reconcileSelector: 写入侧做 verbatim → normalize → fail-closed
+
+    设计原则：**LLM 不写 offset，offset 由后端从源文本反算**；写入失败 fail-closed
+    比"软兜底高亮整场"更诚实——前端可降级显示 quote_verified=false 的视觉样式。
+    """
+    if not scene_text or not exact or len(exact) < 4:
+        return None
+
+    raw_lines = scene_text.split("\n")
+    if not raw_lines:
+        return None
+
+    norm_scene, line_to_norm_offset = _normalize_with_line_index(raw_lines)
+    norm_exact = _normalize_for_quote_match(exact)
+    if not norm_exact or len(norm_exact) < 4:
+        return None
+
+    occurrences: List[int] = []
+    cursor = 0
+    while True:
+        pos = norm_scene.find(norm_exact, cursor)
+        if pos == -1:
+            break
+        occurrences.append(pos)
+        cursor = pos + 1
+    if not occurrences:
+        return None
+
+    if len(occurrences) > 1 and (prefix or suffix):
+        norm_prefix = _normalize_for_quote_match(prefix or "")
+        norm_suffix = _normalize_for_quote_match(suffix or "")
+        filtered: List[int] = []
+        for pos in occurrences:
+            ok_pre = (
+                not norm_prefix
+                or norm_scene[max(0, pos - len(norm_prefix)) : pos].endswith(norm_prefix)
+            )
+            ok_suf = (
+                not norm_suffix
+                or norm_scene[pos + len(norm_exact) : pos + len(norm_exact) + len(norm_suffix)]
+                == norm_suffix
+            )
+            if ok_pre and ok_suf:
+                filtered.append(pos)
+        occurrences = filtered
+
+    if len(occurrences) != 1:
+        # 0 命中 / 多命中无法消歧 → fail-closed
+        return None
+
+    pos = occurrences[0]
+    end_pos = pos + len(norm_exact) - 1
+    start_line = _line_for_norm_offset(line_to_norm_offset, pos)
+    end_line = _line_for_norm_offset(line_to_norm_offset, end_pos)
+    if start_line is None or end_line is None:
+        return None
+    return (start_line, max(start_line, end_line))
+
+
+# 归一化：去空白 + 常见中英标点（与前端 audit_evidence._norm 同口径）
+_QUOTE_NORM_DROP = "\t\n\r 　\u00a0、，。！？：；,.!?:;\"'\\\"'（）()【】[]《》<>·…—-"
+_QUOTE_NORM_TABLE = str.maketrans("", "", _QUOTE_NORM_DROP)
+
+
+def _normalize_for_quote_match(text_: str) -> str:
+    if not text_:
+        return ""
+    return text_.translate(_QUOTE_NORM_TABLE)
+
+
+def _normalize_with_line_index(
+    raw_lines: List[str],
+) -> tuple[str, List[int]]:
+    """归一化整 scene 文本，并记录每行起点在归一化串里的偏移。
+
+    返回 (norm_text, line_starts) 其中 line_starts[i] = 第 i+1 行（1-based）在
+    norm_text 里的起始 offset；最后多一个哨兵 = norm_text 长度，便于二分。
+    """
+    pieces: List[str] = []
+    line_starts: List[int] = []
+    cursor = 0
+    for ln in raw_lines:
+        line_starts.append(cursor)
+        norm_ln = _normalize_for_quote_match(ln)
+        pieces.append(norm_ln)
+        cursor += len(norm_ln)
+    line_starts.append(cursor)
+    return "".join(pieces), line_starts
+
+
+def _line_for_norm_offset(line_starts: List[int], offset: int) -> Optional[int]:
+    """二分定位 offset 落在第几行（1-based）；越界返回 None。"""
+    if not line_starts or offset < 0 or offset >= line_starts[-1]:
+        return None
+    lo, hi = 0, len(line_starts) - 1
+    while lo + 1 < hi:
+        mid = (lo + hi) // 2
+        if line_starts[mid] <= offset:
+            lo = mid
+        else:
+            hi = mid
+    return lo + 1
+
+
 def parse_line_range(
     raw: object,
     *,

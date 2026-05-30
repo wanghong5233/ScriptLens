@@ -41,7 +41,9 @@ def _reward(*, scene_id: str, count: int = 1):  # type: ignore[no-untyped-def]
             scene_no="x",
             episode_no=None,
             event_type="reversal",
-            evidence="test",
+            claim="test",
+            quote_verbatim="",
+            quote_verified=False,
         )
         for _ in range(count)
     ]
