@@ -16,20 +16,19 @@ from service.script_tools.scene_repo import (
     LLM_EVIDENCE_MAX_LEN,
     format_scene_for_llm,
     get_all_scenes,
-    parse_line_range,
+    reconcile_text_quote_selector,
 )
 from utils.database import engine as default_engine
 
 
 @dataclass
 class CoveragePoint:
-    """30 秒判断卡的单条 strength / concern（v3.3 line-range anchored）。
+    """30 秒判断卡的单条 strength / concern（v3.4 W3C TextQuoteSelector 锚定）。
 
-    跳转锚点：(anchor_scene_id, evidence_line_range)；evidence_quote 仅 tooltip。
-
-    业内对照 (GitHub PR review / Cursor codebase index / NotebookLM citation /
-    Sudowrite Manuscript Analysis)：卡片描述 + 跳转锚点 + 证据展示文本必须由同一次
-    LLM 调用同时输出，下游不允许"反查另一个 evidence 表拿 quote"补救。
+    跳转锚点：(anchor_scene_id, evidence_line_range)
+    - evidence_line_range 由后端在 scene_text 里 reconcile quote.exact 反算
+    - evidence_quote 是 verified verbatim 原文（未 verified 时为 None）
+    - LLM 不再写 offset；W3C / Anthropic Citations / Semiont 标准 pattern
     """
 
     title: str
@@ -37,6 +36,7 @@ class CoveragePoint:
     anchor_scene_id: Optional[str] = None
     evidence_line_range: Optional[tuple[int, int]] = None
     evidence_quote: Optional[str] = None
+    quote_verified: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -45,6 +45,7 @@ class CoveragePoint:
             "anchor_scene_id": self.anchor_scene_id,
             "evidence_line_range": list(self.evidence_line_range) if self.evidence_line_range else None,
             "evidence_quote": self.evidence_quote,
+            "quote_verified": self.quote_verified,
         }
 
 
@@ -82,7 +83,7 @@ _PROMPT = """下面是剧本前部场景与若干全剧线索。请输出 30 秒
 【场景】（每场原文都按行打了 [L1] [L2] ... 行号标注，便于你在下方引用）
 {scenes_block}
 
-【输出 JSON】
+【输出 JSON】（严格遵循 W3C TextQuoteSelector 范式）
 {{
   "logline": "≤60字一句话概括这部剧讲什么",
   "recommendation": "recommend|consider|pass",
@@ -92,10 +93,13 @@ _PROMPT = """下面是剧本前部场景与若干全剧线索。请输出 30 秒
   "strengths": [
     {{
       "title": "≤12字",
-      "detail": "≤80字",
+      "detail": "≤80字（你的诠释，不要照抄原文）",
       "anchor_scene_id": "<上面给出的 scene_id 之一，无法定位则 null>",
-      "evidence_line_range": [<起始行号>, <结束行号>],
-      "evidence_quote": "<line_range 区间对应的原文摘要，≤{evidence_max_len} 字，给 hover 用>"
+      "quote": {{
+        "exact": "<原文逐字片段：必须是上方 anchor scene 的 [L{{n}}] 标注里 100% 一字不差出现过的连续文本，10-{evidence_max_len} 字>",
+        "prefix": "<exact 前面紧邻的 5-15 字原文，用于消歧（可选）>",
+        "suffix": "<exact 后面紧邻的 5-15 字原文，用于消歧（可选）>"
+      }}
     }}
   ],
   "concerns": [...同上结构...]
@@ -104,14 +108,14 @@ _PROMPT = """下面是剧本前部场景与若干全剧线索。请输出 30 秒
 规则：
 1. strengths 恰好 3 条；concerns 恰好 3 条。
 2. anchor_scene_id 必须来自上方场景；无法定位则填 null。
-3. **evidence_line_range 是核心字段**——用户跳转后会高亮这一段：
-   - 引用的是该场内的 [L{{n}}] 行号区间（1-based 闭区间），例如 [3, 9] 表示 L3 到 L9
-   - 区间应**整段覆盖**能证明 detail 所说的那段戏（典型 4-10 行，含动作行 + 关键对白）
-   - **不要**只给单行（除非 detail 真的是单行就讲清楚的）；**不要**给整场 [1, 99]
-   - 如果 anchor_scene_id 为 null，evidence_line_range 也填 null
-4. evidence_quote 是 line_range 那段的原文摘要（不超过 {evidence_max_len} 字），仅作 hover 提示。
-5. recommendation 不是分数换算，而是「是否值得继续投入阅读/讨论/推进」。
-6. 不要写泛泛而谈的空话，例如「剧情不错」「节奏可以」。
+3. **quote.exact 是核心字段**——用户跳转高亮就用这段原文：
+   - **必须**是 anchor scene 的 [L{{n}}] 标注里**逐字出现**的连续文本，不能改写、合并多行、概括
+   - 选最能证明 detail 的那一句台词或动作行；动作行（△ 开头）和对白行都可以
+   - 长度 10-{evidence_max_len} 字；不足 10 字时把紧邻上下文带上凑够
+   - 如 anchor_scene_id 为 null，quote.exact 留空字符串
+   - **不要**写成"姜栀枝走进房间"这种叙述句——那是你的 detail；exact 写真原文台词或动作行
+4. recommendation 不是分数换算，而是「是否值得继续投入阅读/讨论/推进」。
+5. 不要写泛泛而谈的空话，例如「剧情不错」「节奏可以」。
 """
 
 
@@ -128,11 +132,10 @@ async def extract_coverage_card(
         raise ValueError(f"script_id={script_id} 没有可分析的场景")
 
     allowed_scene_ids = {s.id for s in scenes}
-    scene_line_count: dict[str, int] = {}
+    scene_text_by_id: dict[str, str] = {s.id: (s.text or "") for s in scenes}
     blocks = []
     for scene in scenes:
         scene_text = scene.text or ""
-        scene_line_count[scene.id] = len(scene_text.split("\n")) if scene_text else 0
         annotated = format_scene_for_llm(scene_text=scene_text, max_chars=900)
         blocks.append(
             f"[scene_id={scene.id}] [第{scene.episode_no or '?'}集] "
@@ -167,15 +170,15 @@ async def extract_coverage_card(
         confidence=confidence,
         genre=_string_list(parsed.get("genre"), limit=3),
         core_value=_truncate(str(parsed.get("core_value") or ""), 30),
-        strengths=_points(parsed.get("strengths"), allowed_scene_ids, scene_line_count),
-        concerns=_points(parsed.get("concerns"), allowed_scene_ids, scene_line_count),
+        strengths=_points(parsed.get("strengths"), allowed_scene_ids, scene_text_by_id),
+        concerns=_points(parsed.get("concerns"), allowed_scene_ids, scene_text_by_id),
     )
 
 
 def _points(
     raw: object,
     allowed_scene_ids: set[str],
-    scene_line_count: dict[str, int],
+    scene_text_by_id: dict[str, str],
 ) -> List[CoveragePoint]:
     if not isinstance(raw, list):
         return []
@@ -194,14 +197,32 @@ def _points(
 
         line_range: Optional[tuple[int, int]] = None
         evidence_quote: Optional[str] = None
+        quote_verified = False
+
         if anchor_id:
-            line_range = parse_line_range(
-                item.get("evidence_line_range"),
-                scene_line_count=scene_line_count.get(anchor_id, 0),
-            )
-            evidence_raw = item.get("evidence_quote")
-            if isinstance(evidence_raw, str):
-                evidence_quote = _truncate(evidence_raw, LLM_EVIDENCE_MAX_LEN) or None
+            quote_raw = item.get("quote")
+            exact = ""
+            prefix = ""
+            suffix = ""
+            if isinstance(quote_raw, dict):
+                exact = str(quote_raw.get("exact") or "").strip()
+                prefix = str(quote_raw.get("prefix") or "").strip()
+                suffix = str(quote_raw.get("suffix") or "").strip()
+            if exact:
+                scene_text = scene_text_by_id.get(anchor_id, "")
+                line_range = reconcile_text_quote_selector(
+                    scene_text=scene_text,
+                    exact=exact,
+                    prefix=prefix or None,
+                    suffix=suffix or None,
+                )
+                if line_range is not None:
+                    quote_verified = True
+                    evidence_quote = _truncate(exact, LLM_EVIDENCE_MAX_LEN) or None
+                else:
+                    # verbatim 没匹配上：line_range 留 None，前端会做整场跳转
+                    # evidence_quote 留 None 以避免 UI 展示与原文不符的"伪原文"
+                    evidence_quote = None
 
         out.append(CoveragePoint(
             title=title,
@@ -209,6 +230,7 @@ def _points(
             anchor_scene_id=anchor_id,
             evidence_line_range=line_range,
             evidence_quote=evidence_quote,
+            quote_verified=quote_verified,
         ))
     return out
 

@@ -34,7 +34,7 @@ from service.script_tools.scene_repo import (
     Scene,
     format_scene_for_llm,
     locate_scenes_by_keyword,
-    parse_line_range,
+    reconcile_text_quote_selector,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,10 +44,16 @@ logger = logging.getLogger(__name__)
 class RiskHit:
     """单条 risk 命中。
 
-    v3.3 line-range anchored：
-    - `evidence_line_range` 是 LLM 二筛时同次给出的场内行号区间（1-based 闭区间）
-      （low_risk 不过 LLM，行号通过关键词位置反推；high/medium 由 LLM 直接给）
-    - `excerpt` 仅作 tooltip 展示文本
+    v3.4 W3C TextQuoteSelector 锚定（取代 v3.3 line_range 契约）：
+    - `quote_verbatim`     在 scene 内被唯一 verbatim 定位的原文片段；未通过则空串
+    - `quote_verified`     verbatim 在 scene 内唯一定位成功 → 跳转可精确到行
+    - `evidence_line_range`后端从 quote_verbatim 反算的行号；verified=False 时为 None
+    - `excerpt`            UI 展示（向后兼容）：verified 时 = verbatim quote，否则 = rationale
+                           或关键词所在行（low_risk 路径）
+    - `rationale`          LLM 给的判定理由（high/medium）；低风险无 LLM 时为空
+
+    设计原则同 reward_extractor：LLM 不写 offset，offset 由后端从 scene_text
+    反算（W3C / Anthropic Citations / Semiont reconcileSelector pattern）。
     """
 
     scene_id: str
@@ -56,9 +62,23 @@ class RiskHit:
     level: str  # high_risk | medium_risk | low_risk
     category: str  # underage_sexual / wealth_worship / vulgar_language / ...
     matched_term: str
-    excerpt: str  # 命中片段（≤120 字），tooltip-only
     confirmed_by_llm: bool
+    quote_verbatim: str = ""
+    quote_verified: bool = False
+    rationale: str = ""
     evidence_line_range: Optional[tuple[int, int]] = None
+
+    @property
+    def excerpt(self) -> str:
+        """下游展示主字段（保留向后兼容）。
+
+        verified 时给 verbatim 原文（用户跳转点击 → 高亮该行），未 verified
+        时给 LLM rationale（或关键词所在行片段），都 ≤120 字。
+        """
+        if self.quote_verified and self.quote_verbatim:
+            tail = f"｜判定：{self.rationale}" if self.rationale else ""
+            return (self.quote_verbatim + tail)[:120]
+        return (self.rationale or "")[:120]
 
 
 @dataclass
@@ -81,16 +101,22 @@ _JUDGE_PROMPT = """下面是中文短剧场景片段（按行打了 [L{{n}}] 行
 [scene_no={scene_no}] [{scene_label}]
 {text}
 
-输出 JSON：
+输出 JSON（严格遵循 W3C TextQuoteSelector 范式）：
 {{
   "is_real_violation": <true|false>,
-  "rationale": "<≤60 字>",
-  "evidence_line_range": [<违规内容起始行号>, <结束行号>]
+  "rationale": "<≤60 字判定理由>",
+  "quote": {{
+    "exact": "<原文逐字片段：必须是上面 [L{{n}}] 标注里 100% 一字不差出现过的连续文本，10-80 字；is_real_violation=false 时填空字符串>",
+    "prefix": "<exact 前面紧邻的 5-15 字原文，用于消歧（可选）>",
+    "suffix": "<exact 后面紧邻的 5-15 字原文，用于消歧（可选）>"
+  }}
 }}
 
-evidence_line_range 规则：
-- 仅在 is_real_violation=true 时填写；为 false 时填 null
-- 引用 [L{{n}}] 行号（1-based 闭区间），覆盖违规内容真正出现的那段（典型 1-3 行）"""
+quote.exact 规则（核心）：
+- **必须**是 [L{{n}}] 标注里逐字出现过的连续文本，不能改写、合并、概括
+- 选包含违规关键词「{term}」的那一句台词或动作行；如关键词出现多次，选最强证据那一处
+- is_real_violation=false 时 exact 留空字符串
+- 长度 10-80 字；如原文该处不足 10 字，把紧邻上下文带上凑够"""
 
 
 async def screen_risks(
@@ -127,7 +153,19 @@ async def screen_risks(
     # low_risk 量大且容错率高 → 跳过 LLM，直接采信关键词
     confirmed_high = await _confirm_with_llm(high_records, caller)
     confirmed_medium = await _confirm_with_llm(medium_records, caller)
-    confirmed_low = [_to_hit(rec, confirmed=False) for rec in low_records]
+    # low_risk 不过 LLM，但仍用关键词位置反推 verbatim 行——前端跳转能精确到行而非整场 dump
+    confirmed_low = []
+    for rec in low_records:
+        kw_line = _locate_keyword_line(rec.scene.text or "", rec.matched_term)
+        line_range = kw_line
+        verbatim = _line_text(rec.scene.text or "", kw_line[0])[:120] if kw_line else ""
+        confirmed_low.append(_to_hit(
+            rec,
+            confirmed=False,
+            quote_verbatim=verbatim,
+            quote_verified=False,
+            line_range=line_range,
+        ))
 
     all_hits = confirmed_high + confirmed_medium + confirmed_low
     level, score, reason = _aggregate(confirmed_high, confirmed_medium, confirmed_low)
@@ -206,28 +244,85 @@ async def _judge_one(rec: _Record, caller: LlmCaller) -> Optional[RiskHit]:
 
     parsed = resp.parsed if isinstance(resp.parsed, dict) else {}
     is_real = bool(parsed.get("is_real_violation", False))
-    line_range = None
+    rationale = str(parsed.get("rationale") or "")[:120]
+
+    quote_verbatim = ""
+    quote_verified = False
+    line_range: Optional[tuple[int, int]] = None
+
     if is_real:
-        scene_lc = len(raw_text.split("\n")) if raw_text else 0
-        line_range = parse_line_range(parsed.get("evidence_line_range"), scene_line_count=scene_lc, max_span=8)
+        quote_raw = parsed.get("quote")
+        exact = ""
+        prefix = ""
+        suffix = ""
+        if isinstance(quote_raw, dict):
+            exact = str(quote_raw.get("exact") or "").strip()
+            prefix = str(quote_raw.get("prefix") or "").strip()
+            suffix = str(quote_raw.get("suffix") or "").strip()
+        if exact:
+            line_range = reconcile_text_quote_selector(
+                scene_text=raw_text,
+                exact=exact,
+                prefix=prefix or None,
+                suffix=suffix or None,
+            )
+            if line_range is not None:
+                quote_verified = True
+                quote_verbatim = exact[:120]
+            else:
+                logger.warning(
+                    "risk_screener.quote_unverified scene_no=%s term=%s category=%s "
+                    "exact_head=%r (verbatim 在 scene 内搜不到或多义无法消歧 → 整场跳转)",
+                    rec.scene.scene_no, rec.matched_term, rec.category, exact[:40],
+                )
+        # verbatim 兜底：LLM 既然判 is_real_violation=true，至少把关键词所在行扯出来
+        if not quote_verified:
+            kw_line = _locate_keyword_line(raw_text, rec.matched_term)
+            if kw_line is not None:
+                line_range = kw_line
+                quote_verbatim = _line_text(raw_text, kw_line[0])[:120]
+                # 不标 verified —— 这是关键词反推不是 LLM verbatim，UI 应可视化区分
+
     return _to_hit(
         rec,
         confirmed=is_real,
-        rationale=str(parsed.get("rationale") or "")[:120],
+        quote_verbatim=quote_verbatim,
+        quote_verified=quote_verified,
+        rationale=rationale,
         line_range=line_range,
     )
+
+
+def _locate_keyword_line(scene_text: str, term: str) -> Optional[tuple[int, int]]:
+    """关键词所在行（1-based 闭区间，单行）。term 命中多行时取首行。"""
+    if not scene_text or not term:
+        return None
+    for idx, line in enumerate(scene_text.split("\n"), start=1):
+        if term in line:
+            return (idx, idx)
+    return None
+
+
+def _line_text(scene_text: str, line_no_1based: int) -> str:
+    """取 1-based 行号对应的整行文本（用于 low_risk 关键词反推 verbatim）。"""
+    if not scene_text or line_no_1based < 1:
+        return ""
+    lines = scene_text.split("\n")
+    idx = line_no_1based - 1
+    if idx >= len(lines):
+        return ""
+    return lines[idx]
 
 
 def _to_hit(
     rec: _Record,
     *,
     confirmed: bool,
+    quote_verbatim: str = "",
+    quote_verified: bool = False,
     rationale: str = "",
     line_range: Optional[tuple[int, int]] = None,
 ) -> RiskHit:
-    excerpt = (rec.scene.text or "")[:120]
-    if rationale:
-        excerpt = f"{excerpt}｜判定：{rationale}"
     return RiskHit(
         scene_id=rec.scene.id,
         scene_no=rec.scene.scene_no,
@@ -235,8 +330,10 @@ def _to_hit(
         level=rec.level,
         category=rec.category,
         matched_term=rec.matched_term,
-        excerpt=excerpt,
         confirmed_by_llm=confirmed,
+        quote_verbatim=quote_verbatim,
+        quote_verified=quote_verified,
+        rationale=rationale,
         evidence_line_range=line_range,
     )
 
