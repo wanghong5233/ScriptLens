@@ -265,8 +265,19 @@ class ReportEvidenceRef(BaseModel):
     start_line: Optional[int] = None
     end_line: Optional[int] = None
     quote: str = Field(
-        ...,
-        description="LLM 输出的 verbatim 片段（W3C TextQuoteSelector.exact），后端 reconcile 通过则用作 tooltip / preview",
+        "",
+        description=(
+            "**仅 quote_verified=True 时填**：LLM 给的 verbatim 原文片段（W3C TextQuoteSelector.exact），"
+            "已通过后端 reconcile 在 scene_text 内被唯一定位。"
+            "verified=False 时为空字符串（不再用 claim 兜底，避免污染 quote 字段语义）"
+        ),
+    )
+    claim: str = Field(
+        "",
+        description=(
+            "LLM 对该 evidence 的中文诠释（≤80 字），与原文 quote 解耦。"
+            "always 可用，前端 tooltip / 卡片描述主字段。"
+        ),
     )
     quote_source: Optional[str] = Field(
         None,
@@ -279,7 +290,7 @@ class ReportEvidenceRef(BaseModel):
         description=(
             "verbatim 是否在 scene_text 内被 reconcile 唯一定位成功。"
             "True 表示前端可精确高亮 quote/line_range；False 表示该 ref 没拿到 verbatim 行号锚点，"
-            "前端应做整场跳转并在 tooltip 提示「仅定位到场」"
+            "前端应做整场跳转，tooltip 展示 claim 文本"
         ),
     )
     scene_summary: Optional[str] = Field(

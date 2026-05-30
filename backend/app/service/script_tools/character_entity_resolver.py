@@ -170,7 +170,7 @@ async def _llm_should_merge(
             prompt_ver=f"{tag_set_ver}:character_alias_merge:a",
             dim="character_alias_merge",
             seed=seed,
-            tier=ModelTier.MINI,
+            tier=ModelTier.PRIMARY,
             max_tokens=128,
         )
         parsed = resp.parsed if isinstance(resp.parsed, dict) else {}

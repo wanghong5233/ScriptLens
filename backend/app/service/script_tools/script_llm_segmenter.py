@@ -149,7 +149,7 @@ async def llm_resegment(
     try:
         resp = await caller.call_json(
             prompt=prompt,
-            tier=ModelTier.MINI,  # 切分是结构活，便宜模型够用
+            tier=ModelTier.PRIMARY,  # 全部走 primary：用户要求所有分析链路用强模型
             system_message=_SYSTEM_PROMPT,
             temperature=0.1,
             max_tokens=TokenBudget.LLM_RESEGMENT,

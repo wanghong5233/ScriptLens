@@ -235,7 +235,7 @@ async def _judge_one(rec: _Record, caller: LlmCaller) -> Optional[RiskHit]:
     )
     try:
         resp = await caller.call_json(
-            prompt, tier=ModelTier.MINI, temperature=0,
+            prompt, tier=ModelTier.PRIMARY, temperature=0,
             max_tokens=TokenBudget.RISK_CONFIRM,
         )
     except ScoreLLMError as e:

@@ -357,6 +357,7 @@ def _build_evidence_refs_minimal(
             if ev.event_type in {"reversal", "face_slap", "identity_reveal"}
             else "medium"
         )
+        verified = bool(getattr(ev, "quote_verified", False))
         refs.append(
             {
                 "id": f"evi_reward_{ev.scene_id}_{ev.event_type}",
@@ -366,9 +367,11 @@ def _build_evidence_refs_minimal(
                 "scene_label": None,
                 "start_line": start_line,
                 "end_line": end_line,
-                "quote": ev.evidence,
+                # v3.5：quote 仅在 verified 时填 verbatim 原文；否则留空（避免被 audit 当 unverifiable）
+                "quote": ev.quote_verbatim if verified else "",
+                "claim": ev.claim,  # 诠释文本（always 可用，前端 tooltip 主字段）
                 "quote_source": f"reward:{ev.event_type}",
-                "quote_verified": bool(getattr(ev, "quote_verified", False)),
+                "quote_verified": verified,
                 "scene_summary": None,
                 "reason": f"看点：{_REWARD_TYPE_HEADLINE.get(ev.event_type, '看点')}",
                 "confidence": confidence,
@@ -389,6 +392,10 @@ def _build_evidence_refs_minimal(
         level = str(hit.get("level") or "low_risk")
         confidence = {"high_risk": "high", "medium_risk": "medium"}.get(level, "low")
         category = str(hit.get("category") or "compliance")
+        risk_verified = bool(hit.get("quote_verified", False))
+        # risk hit 的 excerpt = verified 时是 verbatim 原文 + rationale，未 verified 时仅 rationale
+        # 拆字段：verified 时 quote 是原文；未 verified 时 quote 留空，rationale 走 claim
+        excerpt = str(hit.get("excerpt") or "")
         refs.append(
             {
                 "id": f"evi_risk_{scene_id}_{idx}",
@@ -398,9 +405,10 @@ def _build_evidence_refs_minimal(
                 "scene_label": None,
                 "start_line": start_line,
                 "end_line": end_line,
-                "quote": str(hit.get("excerpt") or ""),
+                "quote": excerpt if risk_verified else "",
+                "claim": excerpt if not risk_verified else "",
                 "quote_source": "risk_hit",
-                "quote_verified": bool(hit.get("quote_verified", False)),
+                "quote_verified": risk_verified,
                 "scene_summary": None,
                 "reason": f"合规风险：{category}",
                 "confidence": confidence,
@@ -439,6 +447,8 @@ def _build_highlights_minimal(
             continue
         headline = _REWARD_TYPE_HEADLINE.get(ev.event_type, "看点")
         line_range = getattr(ev, "evidence_line_range", None)
+        verified = bool(getattr(ev, "quote_verified", False))
+        # oneliner 始终用 claim（诠释文本，描述 reward 是什么），不再混 quote 进来
         out.append(
             {
                 "id": evi_id,
@@ -449,8 +459,12 @@ def _build_highlights_minimal(
                 "scene_label": None,
                 "start_line": line_range[0] if line_range else None,
                 "end_line": line_range[1] if line_range else None,
-                "oneliner": _trim_oneliner(f"{headline} · {ev.evidence}"),
-                "evidence": ev.evidence,
+                "oneliner": _trim_oneliner(f"{headline} · {ev.claim}"),
+                "claim": ev.claim,
+                "quote": ev.quote_verbatim if verified else "",
+                "quote_verified": verified,
+                # legacy `evidence` 字段保留兼容旧前端（与 evidence_ref.quote 同语义：verified 时 verbatim，否则空）
+                "evidence": ev.quote_verbatim if verified else ev.claim,
             }
         )
         used.add(ev.scene_id)

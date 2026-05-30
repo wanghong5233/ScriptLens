@@ -127,35 +127,46 @@ underdog_rise（逆袭）：主角凭具体行为击败长期压制者，需有*
 【候选场景】
 {scenes_block}
 
-【输出 JSON】
+【输出 JSON】（字段顺序很重要：必须**先选原文 quote.exact，再写 claim**）
 {{
   "events": [
     {{
       "scene_no": "<必须是上面给出的 scene_no>",
       "event_type": "face_slap|reversal|revenge|romantic_progress|identity_reveal|humiliate_villain|underdog_rise|scheme_exposed",
-      "confidence": "high|medium|low",
-      "claim": "<对该 reward 的中文诠释 ≤{evidence_max_len} 字（你的判断，不要照抄原文）>",
       "quote": {{
-        "exact": "<原文逐字片段：[L{{n}}] 标注里 100% 一字不差的连续文本，10-80 字>",
+        "exact": "<从场内 [L{{n}}] 行里直接 Ctrl+C / Ctrl+V 出来的一句台词或动作行，10-80 字，必须 100% 一字不差>",
         "prefix": "<exact 前面紧邻的 5-15 字原文，可选>",
         "suffix": "<exact 后面紧邻的 5-15 字原文，可选>"
-      }}
+      }},
+      "confidence": "high|medium|low",
+      "claim": "<在 quote 选定之后再写：对该 reward 的中文诠释 ≤{evidence_max_len} 字>"
     }}
   ]
 }}
 
-【confidence 自评门槛（核心 precision 控制）】
-- **high**：场内原文证据完整满足上面"必要条件"的全部要点；reversal 必须能在原文里同时点出"以为 X"和"实际 ¬X"两段。
-- **medium**：方向看起来对但有疑点（如只有 claim 没有显式原文锚定 / 单段台词难以构成完整对照）。
-- **low**：勉强沾边。
-- **我们只采纳 confidence=high 的事件；medium/low 都会被直接丢弃**，所以请严格自评。
+【quote.exact 契约 —— 最容易翻车的地方，读三遍】
+1. **复制粘贴**模式：从场内的 [L{{n}}] 行里选一行，**整行**或**该行的一个连续片段**复制下来。
+   - 一行可能长这样：「姜栀枝（OS）：他又不傻，他肯定不会喝。」整行可作 exact。
+   - 也可选行内的连续片段，如「他又不傻，他肯定不会喝」。
+2. **绝不允许合成 / 概括 / 改写**。下面这些都是**合成句**（严禁作为 quote.exact）：
+   - "邢醒从愤怒指责姜栀枝转变为恳切认错" ← 这是 claim 文本，不是原文台词
+   - "顾聿之以为浴室无人，实际发现陆斯言藏在里面" ← 这是 claim 文本
+   - "陆斯言半跪亲吻姜栀枝手指，两人关系发生实质性升级" ← 这是 claim 文本
+3. **写完 exact 后自我校验一遍**：你写的这串字符，能不能在上面给的场原文的**某一 [L{{n}}] 行里 Ctrl+F 完全搜得到**？搜不到就重选。
+4. 优先选**有明确说话人 / 动作标记**的行：「姓名：xxx」、「△ xxx」开头的最稳。
+5. reversal 优先选"实际 ¬X"那段（即转折发生的那一句原文）。
+6. 同样的话原文多次出现时，用 prefix/suffix 写紧邻上下文消歧。
 
-【quote.exact 契约】
-- **必须**是该 scene [L{{n}}] 标注里**逐字出现**的连续文本，不能改写、概括、合并多行。
-- **不能**写成"姜栀枝走进房间"这种叙述句——那是 claim。
-- **要**写成"姜栀枝：你闭嘴。"或"△陆斯言把裤子提了上来"这种原文里真有的台词或动作行。
-- 选 reward 事件**最关键的那一句**台词或动作行；reversal 优先选"实际 ¬X"那段。
-- 同样的话原文多次出现时，用 prefix/suffix 写紧邻上下文消歧。
+【confidence 自评门槛（precision 控制）】
+- **high**：场内原文证据完整满足上面"必要条件"，且 quote.exact 你已经在原文里**Ctrl+F 验证过**能搜到。
+- **medium**：方向对但 quote 不太好选 / 不确定 verbatim 能搜到 / 必要条件只满足一半（如 reversal 只有 X 没有 ¬X）。
+- **low**：勉强沾边。
+- **只采纳 high 的事件；medium/low 直接丢弃**，请严格自评。
+
+【claim 字段】
+- 在 quote 选定之后再写。
+- 是你对 reward 的**诠释**（"打脸 X，因为 Y"），≤{evidence_max_len} 字。
+- claim 是给用户看的 tooltip 描述，**不要复述 quote 内容**，要补充上下文与因果。
 
 【最终输出原则】
 - 大多数场景应当**不出现在结果里**。返回空数组 `{{"events": []}}` 是非常正常的。

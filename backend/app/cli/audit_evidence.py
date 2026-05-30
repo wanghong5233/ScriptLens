@@ -196,6 +196,8 @@ def _audit_one(script_id: str) -> AuditReport:
     for er in evidence_refs:
         sid = str(er.get("scene_id") or "")
         scene_text = text_by_sid.get(sid)
+        verified = bool(er.get("quote_verified", False))
+        quote = str(er.get("quote") or "")
         if scene_text is None:
             rep.records.append(
                 AuditRecord(
@@ -206,17 +208,30 @@ def _audit_one(script_id: str) -> AuditReport:
                     event_or_type=str(er.get("quote_source") or ""),
                     start_line=er.get("start_line"),
                     end_line=er.get("end_line"),
-                    quote_head=(er.get("quote") or "")[:40],
+                    quote_head=quote[:40],
                     verdict="scene_missing",
                 )
             )
             continue
-        verdict, detail = _check_quote_against_range(
-            quote=str(er.get("quote") or ""),
-            scene_text=scene_text,
-            start=er.get("start_line"),
-            end=er.get("end_line"),
-        )
+
+        # 按 verified 状态走两套校验：
+        # - verified=true: quote 必须实打实是原文 → 跑 exact/short/line_drift/unverifiable 判定
+        # - verified=false: quote 应为空 (v3.5 契约)；如果有内容那是 legacy 残留
+        if verified:
+            verdict, detail = _check_quote_against_range(
+                quote=quote,
+                scene_text=scene_text,
+                start=er.get("start_line"),
+                end=er.get("end_line"),
+            )
+        else:
+            if quote:
+                verdict = "legacy_filled"
+                detail = "quote 非空但 verified=false（应为空，可能是旧契约残留）"
+            else:
+                verdict = "by_design_empty"
+                detail = "verified=false 且 quote 为空（符合 v3.5 契约）"
+
         rep.records.append(
             AuditRecord(
                 source="evidence_ref",
@@ -226,7 +241,7 @@ def _audit_one(script_id: str) -> AuditReport:
                 event_or_type=str(er.get("quote_source") or ""),
                 start_line=er.get("start_line"),
                 end_line=er.get("end_line"),
-                quote_head=(er.get("quote") or "")[:40],
+                quote_head=quote[:40],
                 verdict=verdict,
                 detail=detail,
             )
@@ -235,6 +250,14 @@ def _audit_one(script_id: str) -> AuditReport:
     for hl in highlights:
         sid = str(hl.get("scene_id") or "")
         scene_text = text_by_sid.get(sid)
+        verified = bool(hl.get("quote_verified", False))
+        # highlights 新契约：quote 是 verbatim（verified 时填）；evidence 是 legacy 兼容
+        quote = str(hl.get("quote") or "")
+        if not quote and not verified:
+            # 旧报告兼容：legacy evidence 字段可能仍存 claim
+            legacy_evidence = str(hl.get("evidence") or "")
+            quote = legacy_evidence
+
         if scene_text is None:
             rep.records.append(
                 AuditRecord(
@@ -245,17 +268,27 @@ def _audit_one(script_id: str) -> AuditReport:
                     event_or_type=str(hl.get("type") or ""),
                     start_line=hl.get("start_line"),
                     end_line=hl.get("end_line"),
-                    quote_head=(hl.get("evidence") or "")[:40],
+                    quote_head=quote[:40],
                     verdict="scene_missing",
                 )
             )
             continue
-        verdict, detail = _check_quote_against_range(
-            quote=str(hl.get("evidence") or ""),
-            scene_text=scene_text,
-            start=hl.get("start_line"),
-            end=hl.get("end_line"),
-        )
+
+        if verified:
+            verdict, detail = _check_quote_against_range(
+                quote=str(hl.get("quote") or ""),
+                scene_text=scene_text,
+                start=hl.get("start_line"),
+                end=hl.get("end_line"),
+            )
+        else:
+            if str(hl.get("quote") or ""):
+                verdict = "legacy_filled"
+                detail = "highlight.quote 非空但 verified=false"
+            else:
+                verdict = "by_design_empty"
+                detail = "verified=false 且 highlight.quote 为空（符合 v3.5 契约）"
+
         rep.records.append(
             AuditRecord(
                 source="highlight",
@@ -265,7 +298,7 @@ def _audit_one(script_id: str) -> AuditReport:
                 event_or_type=str(hl.get("type") or ""),
                 start_line=hl.get("start_line"),
                 end_line=hl.get("end_line"),
-                quote_head=(hl.get("evidence") or "")[:40],
+                quote_head=quote[:40],
                 verdict=verdict,
                 detail=detail,
             )
@@ -293,19 +326,29 @@ def _print_report(rep: AuditReport, *, show_detail: bool, json_out: bool) -> Non
     short = smry.get("short", 0)
     line_drift = smry.get("line_drift", 0)
     unverifiable = smry.get("unverifiable", 0)
-    other = sum(v for k, v in smry.items() if k not in {"exact", "short", "line_drift", "unverifiable"})
+    by_design_empty = smry.get("by_design_empty", 0)
+    legacy_filled = smry.get("legacy_filled", 0)
+    other = sum(
+        v for k, v in smry.items()
+        if k not in {"exact", "short", "line_drift", "unverifiable", "by_design_empty", "legacy_filled"}
+    )
 
+    verified_n = exact + short + line_drift + unverifiable
     print(f"=== {rep.script_title} ({rep.script_id}) ===")
     print(f"  evidence_refs + highlights total = {n}")
-    print(f"  exact (quote ⊂ line_range)        = {exact} ({_pct(exact, n)})")
-    print(f"  short (quote_head ⊂ line_range)   = {short} ({_pct(short, n)})")
-    print(f"  line_drift (in scene, off range)  = {line_drift} ({_pct(line_drift, n)})")
-    print(f"  unverifiable (not in scene at all)= {unverifiable} ({_pct(unverifiable, n)})")
+    print(f"  --- quote_verified=true 路径（必须 verbatim）{verified_n} 条 ---")
+    print(f"    exact (quote ⊂ line_range)        = {exact} ({_pct(exact, verified_n)})")
+    print(f"    short (quote_head ⊂ line_range)   = {short} ({_pct(short, verified_n)})")
+    print(f"    line_drift (in scene, off range)  = {line_drift} ({_pct(line_drift, verified_n)})")
+    print(f"    unverifiable (not in scene)       = {unverifiable} ({_pct(unverifiable, verified_n)})")
+    print(f"  --- quote_verified=false 路径（quote 应为空，走整场跳转）---")
+    print(f"    by_design_empty (契约正确)         = {by_design_empty}")
+    print(f"    legacy_filled  (旧契约残留 ⚠ )     = {legacy_filled}")
     if other:
         print(f"  other (no_quote/no_range/scene_missing) = {other}")
 
     if show_detail:
-        bad = [r for r in rep.records if r.verdict in {"line_drift", "unverifiable"}]
+        bad = [r for r in rep.records if r.verdict in {"line_drift", "unverifiable", "legacy_filled"}]
         if bad:
             print("\n  --- problematic records ---")
             for r in bad:

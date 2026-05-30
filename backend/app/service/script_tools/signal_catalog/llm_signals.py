@@ -130,7 +130,7 @@ async def compute_llm_signals(
             context_block=context_block,
         )
 
-        tier = ModelTier.PRIMARY if bundle.scope == "script" else ModelTier.MINI
+        tier = ModelTier.PRIMARY  # 用户要求所有分析链路统一走 primary（qwen 全系列）
         prompt_ver = f"{rubric.score_ver}:{bundle.id}"
         try:
             resp = await caller.call_json_deterministic(

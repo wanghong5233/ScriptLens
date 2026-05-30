@@ -197,7 +197,7 @@ async def _filter_real_decisions(
     )
     try:
         resp = await caller.call_json(
-            prompt, tier=ModelTier.MINI, temperature=0.1,
+            prompt, tier=ModelTier.PRIMARY, temperature=0.1,
             max_tokens=TokenBudget.DECISION_FILTER,
         )
     except ScoreLLMError as e:
