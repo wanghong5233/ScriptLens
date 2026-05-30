@@ -369,7 +369,9 @@ def _cooccurrence_graph(
 
     # Jaccard 归一：cooccur(a,b) / (appear(a) + appear(b) - cooccur(a,b))。
     # 避免「一场宴会同框 6 人 → 6 人两两共现都=1.0」导致的家族节点全塌成一点。
-    edges: List[CharacterEdge] = []
+    # v3 阈值下调 0.12 → 0.05：长剧主角与配角共现 jaccard 经常 < 0.12，过高的阈
+    # 值会把主线弱关系全剪掉。下面会做连通性兜底，所以放低安全。
+    raw_edges: List[Tuple[float, str, str]] = []
     for (a, b), count in cooccur.most_common(max_edges * 4):
         if a not in top_set or b not in top_set:
             continue
@@ -377,17 +379,18 @@ def _cooccurrence_graph(
         if union <= 0:
             continue
         weight = round(count / union, 3)
-        if weight < 0.12:
+        if weight < 0.05:
             continue
-        edges.append(
-            CharacterEdge(
-                source_id=_node_id(a),
-                target_id=_node_id(b),
-                weight=weight,
-            )
+        raw_edges.append((weight, a, b))
+
+    edges: List[CharacterEdge] = [
+        CharacterEdge(
+            source_id=_node_id(a),
+            target_id=_node_id(b),
+            weight=weight,
         )
-        if len(edges) >= max_edges:
-            break
+        for weight, a, b in raw_edges[:max_edges]
+    ]
 
     nodes = [
         CharacterNode(
@@ -398,7 +401,92 @@ def _cooccurrence_graph(
         )
         for name in top_names
     ]
+
+    # 连通性兜底：每个孤立节点都补一条到其最高共现邻居的 bridge edge。
+    edges = _bridge_orphans(
+        nodes=nodes,
+        edges=edges,
+        cooccur=cooccur,
+        appearance=appearance,
+    )
     return nodes, edges
+
+
+def _bridge_orphans(
+    *,
+    nodes: List[CharacterNode],
+    edges: List[CharacterEdge],
+    cooccur: Counter[tuple[str, str]],
+    appearance: Counter[str],
+) -> List[CharacterEdge]:
+    """对最大连通分量之外的节点强制补一条 bridge edge。
+
+    bridge edge 的 weight 用真实 jaccard（即使 < 0.05），让前端按粗细可见。
+    type / polarity 走 chain ``_apply_edge_enrichment`` 默认，LLM 来重写。
+    """
+    if not nodes:
+        return edges
+
+    name_to_node = {node.name: node for node in nodes}
+    edge_pairs = {(_node_id(e.source_id), _node_id(e.target_id)) for e in edges}
+    edge_pairs |= {(b, a) for a, b in edge_pairs}
+
+    # adjacency by node name（_cooccurrence_graph 内部用 name 操作 cooccur，对齐口径）。
+    adj: Dict[str, set] = {n.name: set() for n in nodes}
+    for edge in edges:
+        # 反查 name：这里 source/target_id 是 slug，需要从 nodes 列表反推
+        a_name = next((n.name for n in nodes if _node_id(n.name) == edge.source_id), None)
+        b_name = next((n.name for n in nodes if _node_id(n.name) == edge.target_id), None)
+        if a_name and b_name:
+            adj[a_name].add(b_name)
+            adj[b_name].add(a_name)
+
+    # 找最大连通分量
+    largest: set = set()
+    seen: set = set()
+    for name in adj:
+        if name in seen:
+            continue
+        component: set = {name}
+        stack = [name]
+        while stack:
+            cur = stack.pop()
+            for nxt in adj.get(cur, ()):
+                if nxt not in component:
+                    component.add(nxt)
+                    stack.append(nxt)
+        seen.update(component)
+        if len(component) > len(largest):
+            largest = component
+
+    bridged = list(edges)
+    for orphan in adj:
+        if orphan in largest:
+            continue
+        best_neighbor: Optional[str] = None
+        best_count = 0
+        for (a, b), count in cooccur.items():
+            if a == orphan:
+                other = b
+            elif b == orphan:
+                other = a
+            else:
+                continue
+            if other in largest and count > best_count:
+                best_count = count
+                best_neighbor = other
+        if best_neighbor is None:
+            continue
+        union = appearance[orphan] + appearance[best_neighbor] - best_count
+        weight = round(best_count / union, 3) if union > 0 else 0.0
+        bridged.append(
+            CharacterEdge(
+                source_id=_node_id(orphan),
+                target_id=_node_id(best_neighbor),
+                weight=weight,
+            )
+        )
+    return bridged
 
 
 async def _enrich_graph(

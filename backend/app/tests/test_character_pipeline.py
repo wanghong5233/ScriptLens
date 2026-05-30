@@ -148,6 +148,44 @@ def test_cooccurrence_candidate_relationships_uses_entity_ids_and_jaccard() -> N
         assert rel["b_id"] in {e.id for e in entities}
 
 
+def test_cooccurrence_candidate_relationships_bridges_orphan_entities() -> None:
+    """v3 连通性兜底：阈值过滤后的孤立 entity 必须强制补一条 bridge edge。
+
+    场景：A 与 B 频繁同框（强边），D 仅与 A 共现 1 场（弱信号，jaccard < 0.05）。
+    阈值过滤后 D 没边 → 应被识别为孤立点 → 补一条 D-A bridge。
+    """
+    e_a = cp.CharacterEntity(id="ent-a", script_id="s-1", canonical_name="A")
+    e_b = cp.CharacterEntity(id="ent-b", script_id="s-1", canonical_name="B")
+    e_d = cp.CharacterEntity(id="ent-d", script_id="s-1", canonical_name="D")
+    entities = [e_a, e_b, e_d]
+    # A 出场 30 场, B 出场 28 场, D 出场 1 场 —— A-D jaccard = 1/30 ≈ 0.033 < 0.05
+    scenes = [
+        _scene(sid=f"sc-{i}", no=f"1-{i}", chars=["A", "B"]) for i in range(28)
+    ]
+    scenes.extend([
+        _scene(sid="sc-extra-1", no="2-1", chars=["A"]),
+        _scene(sid="sc-extra-2", no="2-2", chars=["A", "D"]),  # 唯一一场 A-D 同框
+    ])
+    rels = cp.cooccurrence_candidate_relationships(entities, scenes, max_edges=20)
+    pairs = {tuple(sorted((r["a_id"], r["b_id"]))) for r in rels}
+    assert ("ent-a", "ent-b") in pairs  # 强边
+    assert ("ent-a", "ent-d") in pairs  # 连通性兜底补的 bridge
+
+
+def test_cooccurrence_disabled_connectivity_keeps_orphans() -> None:
+    """``enforce_connectivity=False`` 时，弱信号 entity 不会自动补边（保留 v2 行为给特殊场景用）。"""
+    e_a = cp.CharacterEntity(id="ent-a", script_id="s-1", canonical_name="A")
+    e_d = cp.CharacterEntity(id="ent-d", script_id="s-1", canonical_name="D")
+    entities = [e_a, e_d]
+    # A 在 30 场，A-D 仅 1 场共现 → jaccard ≈ 0.033 < 0.05
+    scenes = [_scene(sid=f"sc-{i}", no=f"1-{i}", chars=["A"]) for i in range(29)]
+    scenes.append(_scene(sid="sc-rare", no="2-1", chars=["A", "D"]))
+    rels = cp.cooccurrence_candidate_relationships(
+        entities, scenes, enforce_connectivity=False
+    )
+    assert rels == []
+
+
 def test_normalize_appearance_fills_missing_fields_with_empty() -> None:
     out = cp._normalize_appearance({"age": "二十", "outfit": {"palette": "玄黑"}})
     assert out["age"] == "二十"
@@ -211,20 +249,47 @@ def test_normalize_notable_scenes_rejects_unknown_scene_ids_entirely() -> None:
     assert [r["scene_id"] for r in out] == ["sc-1", "sc-3", "sc-4"]
 
 
-def test_normalize_catchphrases_drops_unknown_scene_ids_and_caps_to_5() -> None:
+def test_normalize_catchphrases_decouples_scene_id_and_caps_to_max() -> None:
+    """v3：经典台词与场景解耦——scene_id 一律置空，去重 quote，上限 _MAX_CATCHPHRASES。"""
     raw = [
         {"quote": "台词1", "scene_id": "sc-1"},
-        {"quote": "台词2", "scene_id": "sc-fake"},  # 不在 valid 集合 → 落空
+        {"quote": "台词2", "scene_id": "sc-fake"},  # scene_id 任何值都会被忽略
         {"quote": "", "scene_id": "sc-1"},  # 空台词丢弃
-        {"quote": "台词3", "scene_id": "sc-2"},
-        {"quote": "台词4", "scene_id": "sc-1"},
-        {"quote": "台词5", "scene_id": "sc-1"},
-        {"quote": "台词6", "scene_id": "sc-1"},  # 第 6 条被截掉
+        {"quote": "台词3"},  # 不带 scene_id 也合法
+        {"quote": "台词1"},  # 重复 quote 去重
+        {"quote": "台词4"},
+        {"quote": "台词5"},
+        {"quote": "台词6"},
+        {"quote": "台词7"},
+        {"quote": "台词8"},
+        {"quote": "台词9"},  # 第 9 条被 _MAX_CATCHPHRASES=8 截掉
     ]
     out = cp._normalize_catchphrases(raw, valid_scene_ids={"sc-1", "sc-2"})
-    assert len(out) == 5
-    # 第二条 scene_id 被洗为空（保留台词，丢错误锚点）
-    assert out[1]["scene_id"] == ""
+    assert len(out) == cp._MAX_CATCHPHRASES  # 8
+    # 所有条目 scene_id 统一为空字符串
+    assert all(item["scene_id"] == "" for item in out)
+    # quote 被去重 + 顺序保留
+    assert [c["quote"] for c in out] == [
+        "台词1",
+        "台词2",
+        "台词3",
+        "台词4",
+        "台词5",
+        "台词6",
+        "台词7",
+        "台词8",
+    ]
+
+
+def test_normalize_catchphrases_returns_empty_for_no_valuable_quotes() -> None:
+    """v3：宁缺勿滥——没有金句就返回空数组，不再凑数。"""
+    out_empty = cp._normalize_catchphrases([], valid_scene_ids=set())
+    assert out_empty == []
+    out_all_blank = cp._normalize_catchphrases(
+        [{"quote": ""}, {"quote": "   "}, {"not_a_dict": True}],
+        valid_scene_ids=set(),
+    )
+    assert out_all_blank == []
 
 
 def test_empty_bio_keeps_character_id_for_join() -> None:

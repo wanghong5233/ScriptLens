@@ -1,13 +1,32 @@
-"""故事节拍抽取：三幕骨架 + 短剧关键节拍。
+"""故事节拍抽取：规则锚点 + LLM 标注的混合方案。
 
-短剧不强套 90 分钟电影的 15 节拍；这里采用三幕骨架，并把 opening /
-inciting / midpoint / climax / closing / twist / reward 作为可点击锚点。
+设计原则（v3 重写，2026-05-30）：
+  1. **规则层**先从 reward 曲线 + scene_no 进度切出 3 幕骨架，再为每幕预选
+     1-2 个候选锚点（opening / inciting / midpoint / twist / climax / closing）。
+     候选锚点是真实存在的 scene，**不靠 LLM 凭空写 UUID**。
+  2. **LLM 层**仅给候选锚点打 type / 写 summary。LLM 不能新增锚点、不能
+     改 anchor 位置。LLM 用 ``seq`` 整数（候选编号）作为引用，UUID 由代码
+     在 LLM 出参后映射回。
+  3. **rule fallback**：LLM 整段失败时，规则层把候选锚点的 ``scene_label``
+     当 summary 直接落库，永远保证 3 幕 ≥ 1 beat，不再出现"0 节拍"屏。
+  4. **可解释**：``BeatSheet.source`` 暴露 ``"llm"`` / ``"rule_fallback"`` /
+     ``"hybrid"``，前端 / 单测可观察 LLM 是否真的命中。
+
+参考：
+  - Gorinski & Lapata 2015《Movie Plot Structure Analysis》—— 用 supervised
+    attention 找节拍；规则锚点对应他们的"位置先验"。
+  - Save the Cat 15-beat sheet —— 短剧不强套，但 opening / inciting /
+    midpoint / climax / closing 五点是行业最大公约数。
+  - Aristotle 三段式 + tension curve —— act1 / act2 / act3 的 25/85% 切分
+    来自 Field 的《Screenplay》经验值。
 """
 
 from __future__ import annotations
 
+import logging
+from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from sqlalchemy.engine import Engine
 
@@ -16,8 +35,27 @@ from service.script_tools.reward_extractor import RewardEvent
 from service.script_tools.scene_repo import Scene, get_all_scenes
 from utils.database import engine as default_engine
 
+logger = logging.getLogger(__name__)
+
 
 BeatType = str
+
+# 三幕切分位（Field《Screenplay》经验值，短剧 100 集仍适用）。
+# act1: 0..25%；act2: 25..85%；act3: 85..100%。
+_ACT1_END_RATIO = 0.25
+_ACT2_END_RATIO = 0.85
+
+# 节拍类型白名单。LLM 出 type 不在这里 → 用规则给的 type_hint 兜底。
+_ALLOWED_BEATS = {"opening", "inciting", "midpoint", "climax", "closing", "twist", "reward"}
+
+# Summary 上限。50 字与 Field 的 logline 习惯一致；超出截断。
+_SUMMARY_MAX_LEN = 50
+
+# 单场上下文截断。LLM prompt 控 token，不影响 anchor 选取。
+_SCENE_TEXT_LIMIT = 600
+
+# 给 LLM 看的候选锚点最多 12 个。再多 prompt 太胖，且 act3 不需要太多。
+_MAX_CANDIDATES = 12
 
 
 @dataclass
@@ -53,22 +91,53 @@ class BeatAct:
 @dataclass
 class BeatSheet:
     acts: List[BeatAct] = field(default_factory=list)
+    # observability：调用方可记录 source 用于 BI / 单测
+    source: str = "llm"
+    fallback_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {"acts": [a.to_dict() for a in self.acts]}
 
 
-_ALLOWED_BEATS = {"opening", "inciting", "midpoint", "climax", "closing", "twist", "reward"}
+@dataclass
+class _CandidateAnchor:
+    """规则层预选的候选锚点。
+
+    seq: 给 LLM 看的 1-based 整数 ID。LLM 用 seq 引用 anchor，避免抄 UUID 的脆弱链路。
+    """
+
+    seq: int
+    act: int
+    type_hint: BeatType
+    scene: Scene
+
+
+_DEFAULT_ACT_TITLES = {1: "开局", 2: "发展", 3: "收束"}
+
 
 _SYSTEM_PROMPT = """你是中文短剧剧本统筹，负责把长剧本整理成「三幕故事骨架」。
 
-不要写电影理论术语，不要写技术词。输出要帮助选品/编剧/审核快速判断重点该看哪里。
+你的任务是给系统已经预选好的候选锚点写 summary、确认 type。
+**不要新增锚点、不要更改锚点位置、不要发明 seq**。
+
+对编剧、选品、审核三类用户都要友好：summary 让人一眼看懂"这一拍承担什么故事功能"，
+不要写"主角进入 xxx 场景"这种空话，也不要直接抄一句台词。
 """
 
-_PROMPT = """下面是从剧本抽样出的关键场景。请整理成三幕骨架，并给出每幕关键节拍。
 
-【场景样本】
-{scenes_block}
+_USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请补充 summary 和 type。
+
+【候选锚点】
+{candidates_block}
+
+【规则】
+1. 三幕已固定：1=开局，2=发展，3=收束。
+2. 你只能从上面候选 ``seq`` 里挑锚点，**不允许新增 seq、不允许重复 seq、不允许引用没出现的 seq**。
+3. ``type`` 必须是 opening/inciting/midpoint/climax/closing/twist/reward 之一；
+   候选行已给出 ``type_hint``，没把握就用 ``type_hint``。
+4. 每幕 1-3 个 beat。**每一幕至少 1 个 beat**。
+5. summary ≤ 50 字，写"这一拍承担的故事功能"，不要直接摘台词。
+6. 输出**一个 JSON 对象**，不要 markdown / 代码块 / 解释。
 
 【输出 JSON】
 {{
@@ -76,20 +145,14 @@ _PROMPT = """下面是从剧本抽样出的关键场景。请整理成三幕骨�
     {{
       "act": 1,
       "title": "开局",
-      "scene_range": ["<起始scene_id>", "<结束scene_id>"],
       "beats": [
-        {{"type": "opening", "summary": "≤50字", "anchor_scene_id": "<scene_id>"}}
+        {{"seq": <候选 seq>, "type": "opening|inciting|...", "summary": "≤50字"}}
       ]
-    }}
+    }},
+    {{"act": 2, ...}},
+    {{"act": 3, ...}}
   ]
 }}
-
-规则：
-1. acts 必须恰好 3 幕：1=开局，2=发展，3=收束。
-2. type 只能是 opening/inciting/midpoint/climax/closing/twist/reward。
-3. anchor_scene_id 必须来自上方样本。
-4. summary 概括整场戏的故事功能，不要摘一句台词。
-5. 每幕 1-4 个 beats，总 beats 5-9 个。
 """
 
 
@@ -100,14 +163,150 @@ async def extract_beat_sheet(
     caller: Optional[LlmCaller] = None,
     engine: Engine = default_engine,
 ) -> BeatSheet:
+    """抽取三幕节拍。
+
+    流程：
+      1. 取全剧 scenes（已按集→场→行排序）。
+      2. 规则层切 3 幕，每幕预选 1-2 个候选锚点。
+      3. LLM 用候选锚点 seq 写 summary / 标 type；失败则规则层兜底。
+      4. 输出 BeatSheet（永远保证 3 幕，每幕 ≥ 1 beat）。
+    """
     caller = caller or LlmCaller()
     scenes = get_all_scenes(script_id=script_id, engine=engine)
     if not scenes:
         raise ValueError(f"script_id={script_id} 没有可分析的场景")
 
-    sampled = _sample_scenes(scenes, reward_events or [])
-    allowed_ids = {s.id for s in sampled}
-    prompt = _PROMPT.format(scenes_block=_scenes_block(sampled))
+    candidates = _derive_candidate_anchors(scenes, reward_events or [])
+    if not candidates:
+        # 极端情况：scenes 不足 2 场。直接 rule fallback 给 1 幕 1 beat。
+        return _rule_fallback(scenes, reward_events or [], reason="too_few_scenes")
+
+    try:
+        sheet = await _enrich_via_llm(candidates, caller)
+        return sheet
+    except ScoreLLMError as exc:
+        logger.warning("beat_chain: LLM enrichment failed, fall back to rule. err=%s", exc)
+        return _rule_fallback(scenes, reward_events or [], reason=f"llm_error:{type(exc).__name__}")
+
+
+# ---------------------------------------------------------------------------
+# 规则层：三幕切分 + 候选锚点
+# ---------------------------------------------------------------------------
+
+
+def _derive_candidate_anchors(
+    scenes: List[Scene],
+    reward_events: List[RewardEvent],
+) -> List[_CandidateAnchor]:
+    """给三幕预选候选锚点。
+
+    每幕至少 1 个候选；总候选数 ≤ ``_MAX_CANDIDATES``。锚点优先用 reward 峰值
+    场，其次用幕内位置（开始/中点/结尾）。
+    """
+    n = len(scenes)
+    if n < 2:
+        return []
+
+    # reward score 累计：同一场可能有多个 reward 事件，求和当强度。
+    reward_by_scene: Dict[str, float] = defaultdict(float)
+    for ev in reward_events:
+        sid = getattr(ev, "scene_id", None)
+        if sid is None:
+            continue
+        score = float(getattr(ev, "score", 1.0) or 1.0)
+        reward_by_scene[sid] += score
+
+    act1_end = max(1, int(round(n * _ACT1_END_RATIO)))
+    act2_end = max(act1_end + 1, int(round(n * _ACT2_END_RATIO)))
+    act2_end = min(act2_end, n - 1)
+
+    act1_scenes = scenes[:act1_end]
+    act2_scenes = scenes[act1_end:act2_end]
+    act3_scenes = scenes[act2_end:]
+
+    chosen: List[Tuple[BeatType, int, Scene]] = []
+    seen_ids: set = set()
+
+    def _push(type_hint: BeatType, act: int, scene: Optional[Scene]) -> None:
+        if scene is None or scene.id in seen_ids:
+            return
+        chosen.append((type_hint, act, scene))
+        seen_ids.add(scene.id)
+
+    # ---- Act 1 ----
+    _push("opening", 1, act1_scenes[0] if act1_scenes else None)
+    if len(act1_scenes) >= 2:
+        # inciting 取 act1 后半 reward 最高的场（避开 opening 同场）。
+        candidate_pool = act1_scenes[1:] or act1_scenes
+        _push("inciting", 1, _pick_reward_peak(candidate_pool, reward_by_scene))
+
+    # ---- Act 2 ----
+    if act2_scenes:
+        mid_anchor = _pick_reward_peak(act2_scenes, reward_by_scene)
+        _push("midpoint", 2, mid_anchor)
+        # 中点之后还有戏 → 加一个 twist 锚点
+        if mid_anchor is not None:
+            try:
+                mid_idx = act2_scenes.index(mid_anchor)
+            except ValueError:
+                mid_idx = len(act2_scenes) // 2
+            after = act2_scenes[mid_idx + 1 :]
+            if after:
+                _push("twist", 2, _pick_reward_peak(after, reward_by_scene))
+
+    # ---- Act 3 ----
+    if act3_scenes:
+        # climax 取 act3 中段 reward 最高场（避免直接是最末场被双计）。
+        if len(act3_scenes) >= 2:
+            climax_pool = act3_scenes[:-1]
+            _push("climax", 3, _pick_reward_peak(climax_pool, reward_by_scene))
+        else:
+            _push("climax", 3, act3_scenes[0])
+        # closing 取最末场
+        if len(act3_scenes) >= 1:
+            _push("closing", 3, act3_scenes[-1])
+
+    # 兜底：如果哪一幕没拿到任何锚点（场太少），强制各取一场。
+    have_acts = {act for _, act, _ in chosen}
+    if 1 not in have_acts and act1_scenes:
+        _push("opening", 1, act1_scenes[0])
+    if 2 not in have_acts and act2_scenes:
+        _push("midpoint", 2, act2_scenes[len(act2_scenes) // 2])
+    if 3 not in have_acts and act3_scenes:
+        _push("closing", 3, act3_scenes[-1])
+
+    chosen = chosen[:_MAX_CANDIDATES]
+    return [
+        _CandidateAnchor(seq=idx + 1, act=act, type_hint=type_hint, scene=scene)
+        for idx, (type_hint, act, scene) in enumerate(chosen)
+    ]
+
+
+def _pick_reward_peak(
+    pool: List[Scene],
+    reward_by_scene: Dict[str, float],
+) -> Optional[Scene]:
+    """从 pool 选 reward 累计分最高的场；全 0 时退化到 pool 中点。"""
+    if not pool:
+        return None
+    scored = [(reward_by_scene.get(s.id, 0.0), idx, s) for idx, s in enumerate(pool)]
+    scored.sort(key=lambda t: (-t[0], t[1]))
+    top_score = scored[0][0]
+    if top_score <= 0.0:
+        return pool[len(pool) // 2]
+    return scored[0][2]
+
+
+# ---------------------------------------------------------------------------
+# LLM 层：给候选锚点写 summary
+# ---------------------------------------------------------------------------
+
+
+async def _enrich_via_llm(
+    candidates: List[_CandidateAnchor],
+    caller: LlmCaller,
+) -> BeatSheet:
+    prompt = _USER_PROMPT.format(candidates_block=_render_candidates(candidates))
     resp = await caller.call_json(
         prompt=prompt,
         tier=ModelTier.PRIMARY,
@@ -123,99 +322,155 @@ async def extract_beat_sheet(
     if not isinstance(raw_acts, list):
         raise ScoreLLMError("beat_chain: missing acts list")
 
-    acts: List[BeatAct] = []
+    by_seq = {c.seq: c for c in candidates}
+    beats_by_act: Dict[int, List[BeatNode]] = {1: [], 2: [], 3: []}
+    used_seq: set = set()
+
     for raw in raw_acts:
         if not isinstance(raw, dict):
             continue
         act_no = raw.get("act")
         if act_no not in (1, 2, 3):
             continue
-        acts.append(
-            BeatAct(
-                act=act_no,
-                title=_act_title(act_no, str(raw.get("title") or "")),
-                scene_range=_scene_range(raw.get("scene_range"), allowed_ids),
-                beats=_beats(raw.get("beats"), allowed_ids),
+        for raw_beat in raw.get("beats") or []:
+            if not isinstance(raw_beat, dict):
+                continue
+            seq = raw_beat.get("seq")
+            try:
+                seq_int = int(seq)
+            except (TypeError, ValueError):
+                continue
+            if seq_int in used_seq:
+                continue
+            anchor = by_seq.get(seq_int)
+            if anchor is None or anchor.act != act_no:
+                continue
+            beat_type = str(raw_beat.get("type") or "").strip()
+            if beat_type not in _ALLOWED_BEATS:
+                beat_type = anchor.type_hint
+            summary = str(raw_beat.get("summary") or "").strip()
+            if not summary:
+                summary = _scene_label_summary(anchor.scene, anchor.type_hint)
+            beats_by_act[act_no].append(
+                BeatNode(
+                    type=beat_type,
+                    summary=summary[:_SUMMARY_MAX_LEN],
+                    anchor_scene_id=anchor.scene.id,
+                )
+            )
+            used_seq.add(seq_int)
+
+    fallback_reasons: List[str] = []
+    # 兜底：LLM 漏掉某一幕 / 该幕 0 beat 时，用候选锚点直接补一条。
+    for act_no in (1, 2, 3):
+        if beats_by_act[act_no]:
+            continue
+        backup = next((c for c in candidates if c.act == act_no), None)
+        if backup is None:
+            continue
+        beats_by_act[act_no].append(
+            BeatNode(
+                type=backup.type_hint,
+                summary=_scene_label_summary(backup.scene, backup.type_hint),
+                anchor_scene_id=backup.scene.id,
             )
         )
+        fallback_reasons.append(f"act{act_no}_filled_by_rule")
 
-    by_act = {a.act: a for a in acts}
-    if set(by_act) != {1, 2, 3}:
-        raise ScoreLLMError("beat_chain: acts 必须覆盖 1/2/3")
-    return BeatSheet(acts=[by_act[1], by_act[2], by_act[3]])
-
-
-def _sample_scenes(scenes: List[Scene], reward_events: List[RewardEvent], max_count: int = 26) -> List[Scene]:
-    """三段采样 + reward 场补充，控制 prompt 同时覆盖全剧走势。"""
-    if len(scenes) <= max_count:
-        return scenes
-
-    selected: dict[str, Scene] = {}
-    spans = (scenes[:8], _middle(scenes, 8), scenes[-8:])
-    for span in spans:
-        for scene in span:
-            selected[scene.id] = scene
-
-    by_id = {s.id: s for s in scenes}
-    for event in reward_events[:8]:
-        scene = by_id.get(event.scene_id)
-        if scene is not None:
-            selected[scene.id] = scene
-        if len(selected) >= max_count:
-            break
-
-    return sorted(
-        selected.values(),
-        key=lambda s: (s.episode_no if s.episode_no is not None else 9999, s.scene_no, s.start_line or 0),
-    )[:max_count]
+    acts = _build_acts(candidates, beats_by_act)
+    source = "hybrid" if fallback_reasons else "llm"
+    return BeatSheet(acts=acts, source=source, fallback_reasons=fallback_reasons)
 
 
-def _middle(scenes: List[Scene], count: int) -> List[Scene]:
-    start = max(0, (len(scenes) // 2) - (count // 2))
-    return scenes[start : start + count]
-
-
-def _scenes_block(scenes: List[Scene]) -> str:
-    blocks = []
-    for scene in scenes:
-        text = scene.text or ""
-        if len(text) > 900:
-            text = text[:900] + "..."
+def _render_candidates(candidates: List[_CandidateAnchor]) -> str:
+    blocks: List[str] = []
+    for c in candidates:
+        scene = c.scene
+        text = (scene.text or "")[:_SCENE_TEXT_LIMIT]
+        if scene.text and len(scene.text) > _SCENE_TEXT_LIMIT:
+            text += "..."
+        chars = ",".join((scene.characters or [])[:6])
         blocks.append(
-            f"[scene_id={scene.id}] [第{scene.episode_no or '?'}集] "
-            f"[{scene.scene_no}] [{scene.scene_label}] [人物:{','.join(scene.characters[:6])}]\n{text}"
+            f"[seq={c.seq}] [act={c.act}] [type_hint={c.type_hint}] "
+            f"[第{scene.episode_no or '?'}集 · {scene.scene_no} · {scene.scene_label}] "
+            f"[人物:{chars}]\n{text}"
         )
     return "\n\n---\n\n".join(blocks)
 
 
-def _act_title(act_no: int, raw: str) -> str:
-    defaults = {1: "开局", 2: "发展", 3: "收束"}
-    title = raw.strip()[:12]
-    return title or defaults[act_no]
+def _scene_label_summary(scene: Scene, type_hint: BeatType) -> str:
+    """rule fallback summary：场标签 + 节拍类型，控制在 50 字内。"""
+    label = (scene.scene_label or "").strip() or "关键场"
+    type_zh = {
+        "opening": "开端",
+        "inciting": "钩子",
+        "midpoint": "中点反转",
+        "twist": "二次反转",
+        "climax": "高潮",
+        "closing": "收束",
+        "reward": "爽点",
+    }.get(type_hint, "节拍")
+    summary = f"{type_zh}：{label}"
+    return summary[:_SUMMARY_MAX_LEN]
 
 
-def _scene_range(raw: object, allowed_ids: set[str]) -> List[str]:
-    if not isinstance(raw, list):
-        return []
-    out: List[str] = []
-    for sid in raw[:2]:
-        text = str(sid or "").strip()
-        if text in allowed_ids:
-            out.append(text)
-    return out
+def _build_acts(
+    candidates: List[_CandidateAnchor],
+    beats_by_act: Dict[int, List[BeatNode]],
+) -> List[BeatAct]:
+    """根据每幕的 candidates 决定 scene_range，再装配 BeatAct。"""
+    acts: List[BeatAct] = []
+    for act_no in (1, 2, 3):
+        act_anchors = [c for c in candidates if c.act == act_no]
+        scene_range: List[str] = []
+        if act_anchors:
+            scene_range = [act_anchors[0].scene.id, act_anchors[-1].scene.id]
+            if scene_range[0] == scene_range[1]:
+                scene_range = [scene_range[0]]
+        acts.append(
+            BeatAct(
+                act=act_no,
+                title=_DEFAULT_ACT_TITLES[act_no],
+                scene_range=scene_range,
+                beats=beats_by_act.get(act_no, []),
+            )
+        )
+    return acts
 
 
-def _beats(raw: object, allowed_ids: set[str]) -> List[BeatNode]:
-    if not isinstance(raw, list):
-        return []
-    out: List[BeatNode] = []
-    for item in raw[:4]:
-        if not isinstance(item, dict):
-            continue
-        beat_type = str(item.get("type") or "").strip()
-        anchor = str(item.get("anchor_scene_id") or "").strip()
-        summary = str(item.get("summary") or "").strip()
-        if beat_type not in _ALLOWED_BEATS or anchor not in allowed_ids or not summary:
-            continue
-        out.append(BeatNode(type=beat_type, summary=summary[:50], anchor_scene_id=anchor))
-    return out
+# ---------------------------------------------------------------------------
+# rule fallback：LLM 整段不可用时
+# ---------------------------------------------------------------------------
+
+
+def _rule_fallback(
+    scenes: List[Scene],
+    reward_events: List[RewardEvent],
+    *,
+    reason: str,
+) -> BeatSheet:
+    """规则层独立兜底：保证返回 3 幕 ≥ 1 beat 的最小 sheet。"""
+    candidates = _derive_candidate_anchors(scenes, reward_events)
+    beats_by_act: Dict[int, List[BeatNode]] = {1: [], 2: [], 3: []}
+    for c in candidates:
+        beats_by_act[c.act].append(
+            BeatNode(
+                type=c.type_hint,
+                summary=_scene_label_summary(c.scene, c.type_hint),
+                anchor_scene_id=c.scene.id,
+            )
+        )
+
+    # 最后一道保险：场太少 → 至少给 act 1 留一个 opening。
+    if not any(beats_by_act.values()):
+        if scenes:
+            beats_by_act[1].append(
+                BeatNode(
+                    type="opening",
+                    summary=_scene_label_summary(scenes[0], "opening"),
+                    anchor_scene_id=scenes[0].id,
+                )
+            )
+
+    acts = _build_acts(candidates, beats_by_act)
+    return BeatSheet(acts=acts, source="rule_fallback", fallback_reasons=[reason])

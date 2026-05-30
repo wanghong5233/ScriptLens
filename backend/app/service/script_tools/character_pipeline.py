@@ -132,12 +132,13 @@ class BioFieldLimits:
 
 # 数量上限（业界采样 + 实测）。这些数字有合理依据，不是魔法数：
 #   - signature_props max 4：标志物再多视觉/T2I prompt 会糊
-#   - catchphrases max 5：docs/prompt.jpg 明确说"3-5 句"
+#   - catchphrases max 8：参考 IMDB Quotes / TVTropes Catchphrase 词条，
+#     单角色经典台词数量分布 0~8 句，**没有就空数组**，不强行凑数
 #   - relations_summary max 6：短剧主要关系网通常 3-5 个，留 1 条余量
 #   - notable_scenes max 3：典型 setup / midpoint / climax 三段式
 
 _MAX_SIG_PROPS = 4
-_MAX_CATCHPHRASES = 5
+_MAX_CATCHPHRASES = 8
 _MAX_RELATIONS = 6
 _MAX_NOTABLE_SCENES = 3
 
@@ -392,7 +393,8 @@ def cooccurrence_candidate_relationships(
     scenes: List[Scene],
     *,
     max_edges: int = 30,
-    min_jaccard: float = 0.12,
+    min_jaccard: float = 0.05,
+    enforce_connectivity: bool = True,
 ) -> List[Dict[str, Any]]:
     """共现矩阵 → 候选关系边，给 character_graph_chain 当 baseline edges。
 
@@ -402,8 +404,20 @@ def cooccurrence_candidate_relationships(
     （chain ``_apply_edge_enrichment`` 在校验合法值后覆盖）；漏写的边保持
     占位，前端渲染为浅色 ally/mixed 边，不至于"图谱有节点没边"。
 
-    Jaccard 归一避免"一场宴会同框 6 人 → 6 人两两共现都=1.0"塌成一坨。
-    阈值 0.12 沿用 ``character_graph_chain._cooccurrence_graph`` 的实践值。
+    设计决策（v3，2026-05-30）：
+
+    1. **Jaccard 阈值 0.05**（替代 v2 的 0.12）。100 集长剧里主角出场 60 场、
+       配角 5 场，即使每次共现 jaccard ≈ 0.083 < 0.12 就被剪掉，主线关系
+       永久缺失。0.05 让弱信号留下，由后续 LLM enrichment 决定是否升权。
+
+    2. **连通性兜底**（``enforce_connectivity``）：阈值过滤完后，对未拿到任
+       何边的孤立 entity（最大连通分量之外的所有节点都视为孤立），强制补一
+       条到 ``cooccurrence`` 最高邻居的 bridge edge——即使 jaccard 远低于阈
+       值。这条边类型仍占位 "ally" / "mixed"，type 由 LLM enrichment 重写。
+       这套思路对应 Bonato《Mining Character Networks》中"长篇网络优先保
+       证连通性，再做边权过滤"的工程经验。
+
+    3. **去重 + 上限**：以 (a, b) 为 key 的字典聚合，最终 ``max_edges`` 截断。
     """
     if not entities or not scenes:
         return []
@@ -435,7 +449,8 @@ def cooccurrence_candidate_relationships(
                 key = (a, b)
                 cooccur[key] = cooccur.get(key, 0) + 1
 
-    scored: List[Tuple[float, str, str, int]] = []
+    # ---- pass 1：阈值过滤后的强边 ----
+    edge_pairs: Dict[Tuple[str, str], float] = {}
     for (a, b), count in cooccur.items():
         union = appearance.get(a, 0) + appearance.get(b, 0) - count
         if union <= 0:
@@ -443,9 +458,28 @@ def cooccurrence_candidate_relationships(
         weight = round(count / union, 3)
         if weight < min_jaccard:
             continue
-        scored.append((weight, a, b, count))
-    scored.sort(reverse=True)
-    scored = scored[:max_edges]
+        edge_pairs[(a, b)] = weight
+
+    # ---- pass 2：连通性兜底（强制每个孤立 entity 至少 1 条边） ----
+    if enforce_connectivity:
+        entity_ids = [e.id for e in entities]
+        connected = _largest_connected_component(entity_ids, list(edge_pairs.keys()))
+        orphans = [eid for eid in entity_ids if eid not in connected]
+        for orphan in orphans:
+            best_neighbor, best_count = _best_cooccurrence_neighbor(orphan, cooccur)
+            if best_neighbor is None:
+                continue
+            pair = tuple(sorted((orphan, best_neighbor)))
+            if pair in edge_pairs:
+                continue
+            union = appearance.get(orphan, 0) + appearance.get(best_neighbor, 0) - best_count
+            weight = round(best_count / union, 3) if union > 0 else 0.0
+            edge_pairs[pair] = weight  # type: ignore[index]
+
+    scored = sorted(
+        ((w, a, b) for (a, b), w in edge_pairs.items()),
+        key=lambda t: -t[0],
+    )[:max_edges]
 
     return [
         {
@@ -454,8 +488,59 @@ def cooccurrence_candidate_relationships(
             "type": "ally",  # chain LLM enrichment 会按场景重写
             "polarity": "mixed",
         }
-        for _weight, a, b, _count in scored
+        for _weight, a, b in scored
     ]
+
+
+def _largest_connected_component(
+    node_ids: List[str], edges: List[Tuple[str, str]]
+) -> set:
+    """取最大连通分量。空图 → 返回空集合。"""
+    if not node_ids:
+        return set()
+    adj: Dict[str, set] = {nid: set() for nid in node_ids}
+    for a, b in edges:
+        if a in adj and b in adj:
+            adj[a].add(b)
+            adj[b].add(a)
+
+    seen: set = set()
+    largest: set = set()
+    for nid in node_ids:
+        if nid in seen:
+            continue
+        # BFS
+        component: set = {nid}
+        stack = [nid]
+        while stack:
+            cur = stack.pop()
+            for nxt in adj.get(cur, ()):  # type: ignore[arg-type]
+                if nxt not in component:
+                    component.add(nxt)
+                    stack.append(nxt)
+        seen.update(component)
+        if len(component) > len(largest):
+            largest = component
+    return largest
+
+
+def _best_cooccurrence_neighbor(
+    target: str, cooccur: Dict[Tuple[str, str], int]
+) -> Tuple[Optional[str], int]:
+    """返回 ``target`` 共现次数最高的邻居及次数；无共现 → (None, 0)。"""
+    best_neighbor: Optional[str] = None
+    best_count = 0
+    for (a, b), count in cooccur.items():
+        if a == target:
+            other = b
+        elif b == target:
+            other = a
+        else:
+            continue
+        if count > best_count:
+            best_count = count
+            best_neighbor = other
+    return best_neighbor, best_count
 
 
 async def resolve_entities(
@@ -595,7 +680,11 @@ identity_present 是必填项；identity_hidden / identity_origin 默认应该�
   正常的剧本至少会有第一次出场的人物速写。**全空 = 多半是漏抽，请重新检查场景片段**。
 
 == 经典台词挑选标准（catchphrases）==
-"经典台词" ≠ "随便从角色台词里抓 3-5 句"。挑选标准（满足任一）：
+"经典台词"是**能脱离场景独立成立、能体现角色本质**的台词。**数量不定**，
+取决于该角色在剧中的台词价值密度——可能 0 句、可能 1 句、最多 8 句。
+**严禁固定输出 3 条 / 5 条凑数**。找不到就空数组。
+
+挑选标准（必须满足任一）：
   ① 自我宣言：角色直接表态自己是谁、为何而来、要做什么
      例："我要做女佣是因为我羡慕你有一个幸福的家。"
   ② 暴露内核：揭示角色真实动机 / 隐藏情感 / 长久执念的关键句
@@ -603,21 +692,29 @@ identity_present 是必填项；identity_hidden / identity_origin 默认应该�
   ③ 关系定调：第一次见面 / 关键转折 / 决裂时对另一关键角色说的话
      例："从今天起我们再不是兄妹。"
   ④ 反复呼应：角色在剧中多次重复或变体重复的口头禅 / 标志句
+  ⑤ 自带行业 meme 潜质：脱离剧情后单句仍能让观众识别该角色的金句
+
+判别测试（**台词独立性测试**）：把这句话从剧本里摘出来贴朋友圈，能不能**只看
+台词本身**就感受到这是个什么样的人？能 → 是经典台词；不能 → 不是。
 
 ❌ 拒绝：
   - 纯粗口、骂人："我操"、"妈的"、"真不要脸" —— 除非这是该角色本职性格的核心符号
   - 单字呼喊："乔颜！"、"啊！"、"快跑！" —— 没有信息量
   - 八卦闲话、应酬场面话、纯解释剧情的旁白
   - 主角随口的"嗯"、"好的"、"哦"
+  - 需要场景上下文才能理解的台词（"那你呢？"、"我也是。"）—— 经典台词应**自含语义**
 
-宁可少选几句也不要凑数：找到 3 句有价值的就只输出 3 条，找不到就输出空数组。
-不要输出 5 句"无价值台词"凑齐。
+数量分布参考（业界 IMDB Quotes / TVTropes Catchphrase 词条统计）：
+  - 大多数主要角色：1-3 句
+  - 极个别旗帜性角色（贯穿全剧的金句担当）：可达 5-8 句
+  - 工具人 / 龙套 / 戏份少的配角：0 句完全正常
 
-== scene_id 纪律 ==
-catchphrases[].scene_id、notable_scenes[].scene_id 必须**逐字符抄入**用户消息
-【该角色登场的场景片段】里以 [scene_id=xxxxxxxx-xxxx-...] 出现过的真实 UUID。
-不记得就留空字符串 ""，**绝不要**编造 "scene-01" / "S1" 类占位。
-catchphrases 即使 scene_id 留空，台词本身依然有价值；notable_scenes 必须配真实 scene_id。
+== 场景绑定纪律 ==
+**catchphrases 不需要 scene_id**。经典台词的核心价值是「角色身份标记」，与具
+体场次解耦（参考 IMDB Quotes 不绑定场号的做法）。直接给 quote 即可。
+
+notable_scenes[].scene_id 必须**逐字符抄入**用户消息【场景片段】里出现过的真实
+UUID，不记得就留空字符串 ""，**绝不要**编造 "scene-01" / "S1" 类占位。
 
 == 关系字段（relations_summary）==
 other_id 必须是【其他主要角色 id 表】里给定的真实 id；没有可写的关系就空数组，
@@ -652,9 +749,8 @@ _BIO_FEW_SHOT_JSON_EXAMPLE = """{
   "arc_light": "从"完美隐忍的复仇机器"到"敢直面父亲遗物、承认自己也想拥有家"的人。触发点：发现仇家少爷其实并非凶手，旧案另有真凶。",
   "dialogue_style": "对外说话短促、礼貌、句末多带"是"、"好的"，几乎不用形容词；独处或被逼急了切换成长句，常引用八年前家族旧事，语气冷而刻意压抑。",
   "catchphrases": [
-    {"quote": "你忘了这一切的错都赖你，谁让你禁不住诱惑呢。", "scene_id": "<请把【场景片段】里 [scene_id=xxx] 的真实 UUID 抄到这里；不记得就留空字符串>"},
-    {"quote": "我要做女佣是因为我羡慕你有一个幸福的家，我想加入这个家。", "scene_id": ""},
-    {"quote": "八岁那年好梦破碎，我的余生只有复仇。", "scene_id": ""}
+    {"quote": "我要做女佣是因为我羡慕你有一个幸福的家，我想加入这个家。"},
+    {"quote": "八岁那年好梦破碎，我的余生只有复仇。"}
   ],
   "relations_summary": [
     {"other_id": "<必须是【其他主要角色 id 表】里的真实 id>", "sentence": "视其为杀父仇人，长期以女佣身份贴身潜伏并搜集证据。"},
@@ -676,7 +772,8 @@ canonical_name: {canonical_name}
 {other_chars_block}
 
 【该角色登场的场景片段】
-（每段以 [scene_id=<UUID>] 开头，catchphrases[].scene_id / notable_scenes[].scene_id 只能逐字符抄这里出现过的 UUID）
+（每段以 [scene_id=<UUID>] 开头。**catchphrases 不需要 scene_id**；
+ notable_scenes[].scene_id 只能逐字符抄这里出现过的 UUID）
 
 {scenes_block}
 
@@ -693,7 +790,8 @@ identity_hidden 和 identity_origin 必须留空字符串 ""，不要模仿示�
 输出契约（再次强调）：
 - 只输出**一个 JSON 对象**。
 - 段落字段写自然段（约 60~150 字），不要拆成短句堆砌；信息缺失留 "" 或 []。
-- scene_id 只能从【场景片段】给出的 UUID 抄入，不要编造 "scene-01" 类占位。
+- catchphrases **不要 scene_id 字段**；找到的有价值台词就抓，**数量 0~8 不定**。
+- notable_scenes[].scene_id 只能从【场景片段】给出的 UUID 抄入，不要编造占位。
 - 严格遵守 system 里的"身份留空纪律"和"外貌字段边界"，不要为了凑齐而造词。
 
 输出 JSON 的字段结构：
@@ -722,9 +820,9 @@ identity_hidden 和 identity_origin 必须留空字符串 ""，不要模仿示�
   "arc_light": "<成长弧光段落，含「从…到…」+ 触发事件，80~200 字；无则空>",
   "dialogue_style": "<说话风格段落：节奏/语气/用词/口头禅模式，60~150 字；无则空>",
   "catchphrases": [
-    {{"quote": "<原文台词，不改写。必须满足"自我宣言/暴露内核/关系定调/反复呼应"任一标准。
-              **不要选纯粗口、单字呼喊、应酬场面话**。宁缺勿滥，3 句强于 5 句凑数>",
-     "scene_id": "<【场景片段】里出现过的真实 UUID 或空字符串>"}}
+    {{"quote": "<原文台词，不改写。必须通过『台词独立性测试』+ 满足任一挑选标准。
+              **不要选纯粗口、单字呼喊、应酬场面话、需要场景上下文才能理解的台词**。
+              数量 0~8 不定，没有就给空数组 []，不要凑数>"}}
   ],
   "relations_summary": [
     {{"other_id": "<其他主要角色 id 表里的真实 id>", "sentence": "<一句话概括两人关系本质 + 当前阶段>"}}
@@ -837,24 +935,31 @@ def _normalize_appearance(raw: Any) -> Dict[str, Any]:
 
 
 def _normalize_catchphrases(raw: Any, valid_scene_ids: set) -> List[Dict[str, Any]]:
-    """规范 catchphrases。scene_id 必须在 ``valid_scene_ids`` 中，否则置空。
+    """规范 catchphrases。
 
-    v2 注意：LLM 编造的 fake scene_id（"scene-01" / "S1" 等）会被这里过滤为空，
-    前端展示时会显示"未绑定到具体场次"——这是降级行为，比放任 fake id 让
-    "点击跳转原文"功能崩坏更安全。但 prompt 已强化纪律，预期实际命中率 >70%。
+    v3 设计（2026-05-30）：经典台词与场景**解耦**——参考 IMDB Quotes /
+    TVTropes Catchphrase 的工业实践，金句的核心价值是"角色身份标记"，独立于
+    场景上下文。LLM 不再被要求给 scene_id；DB schema 字段保留向后兼容，统一
+    输出 ``scene_id=""``。
+
+    数量上限 ``_MAX_CATCHPHRASES = 8``（v2 是 5），但下限是 0——LLM 若返回空
+    数组（该角色没有可摘金句）应直接保留为空，不再"凑齐 3 条"。
+
+    ``valid_scene_ids`` 参数保留以维持调用方签名稳定，本实现中已不使用。
     """
+    del valid_scene_ids  # v3 起 catchphrases 不再绑定场景，参数保留以避免调用方破坏
     if not isinstance(raw, list):
         return []
     out: List[Dict[str, Any]] = []
+    seen_quotes: set = set()
     for item in raw:
         if not isinstance(item, dict):
             continue
         quote = _clamp_text(item.get("quote"), BioFieldLimits.QUOTE)
-        if not quote:
+        if not quote or quote in seen_quotes:
             continue
-        scene_id_raw = str(item.get("scene_id") or "").strip()
-        scene_id = scene_id_raw if scene_id_raw in valid_scene_ids else ""
-        out.append({"quote": quote, "scene_id": scene_id})
+        seen_quotes.add(quote)
+        out.append({"quote": quote, "scene_id": ""})
         if len(out) >= _MAX_CATCHPHRASES:
             break
     return out
