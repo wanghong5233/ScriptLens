@@ -943,48 +943,67 @@ async def generate_report(
             script_id,
             "extracting_narrative",
             "running",
-            detail="并行抽取速览卡 / 三幕节拍 / 人物关系图 / 人物小传 / 看点 / 动机",
+            detail="并行抽取看点 / 三幕节拍 / 人物关系图 / 人物小传 / 动机 / 合规",
         )
-        # reward 必须先跑（beat_chain 依赖它）；其余 chain 在 reward 完成后并发
-        reward_events: list[RewardEvent] = (
-            await _optional_chain(
+        # v3.6 并行调度（依赖图见 docs/08 §6）：
+        #   reward / graph / motivation / bios / compliance 五条链全部独立
+        #     —— 启动后**立即并发**，不再串行等 reward
+        #   beat 唯一依赖 reward → reward.done() 后立即启动，藏进 bios 长尾
+        #   coverage 依赖 beat + graph + compliance + reward → 串行（真依赖）
+        # 预估端到端：max(graph, motivation, bios, compliance, reward+beat) + coverage
+        reward_task = asyncio.create_task(
+            _optional_chain(
                 "reward_extractor",
                 extract_reward_events(script_id=script_id, caller=caller),
             )
-            or []
-        )
-        # v3.5：coverage 不再并行——它需要等 beat / graph / compliance 全部完成后基于
-        # 聚合结果做全剧综合判断，所以挪到后面单独跑（见下方"composing_coverage"阶段）。
-        beat_task = _optional_chain(
-            "beat_chain",
-            extract_beat_sheet(
-                script_id=script_id,
-                reward_events=reward_events,
-                caller=caller,
-                engine=engine,
-            ),
         )
         # 透传 entities + 共现候选关系：chain 走 resolver baseline 路径，节点 id =
         # entity.id（UUID），LLM enrichment 仅补 motivation/goal/obstacle 与边的
         # type/polarity；id-space 与 character_bios 严格一致。
-        graph_task = _optional_chain(
-            "character_graph_chain",
-            extract_character_graph(
-                script_id=script_id,
-                caller=caller,
-                engine=engine,
-                characters=[e.to_chain_dict() for e in entities],
-                relationships=candidate_relationships,
-            ),
+        graph_task = asyncio.create_task(
+            _optional_chain(
+                "character_graph_chain",
+                extract_character_graph(
+                    script_id=script_id,
+                    caller=caller,
+                    engine=engine,
+                    characters=[e.to_chain_dict() for e in entities],
+                    relationships=candidate_relationships,
+                ),
+            )
         )
-        motivation_task = _optional_chain(
-            "motivation_chain",
-            score_motivation(script_id=script_id, caller=caller),
+        motivation_task = asyncio.create_task(
+            _optional_chain(
+                "motivation_chain",
+                score_motivation(script_id=script_id, caller=caller),
+            )
         )
-        # 小传与 graph / coverage / beat / motivation 并发：bio 单点失败不影响其他链。
-        bios_task = write_bios_concurrent(
-            entities, scenes=scenes, caller=caller, semaphore_size=4
+        # 小传与 graph / beat / motivation 并发：bio 单点失败不影响其他链。
+        bios_task = asyncio.create_task(
+            write_bios_concurrent(
+                entities, scenes=scenes, caller=caller, semaphore_size=4
+            )
         )
+        # v3.6：合规扫描提前到 narrative 阶段并行——只依赖 scenes 表，不依赖任何 chain
+        # 结果，并发收益 30-60s。compliance 阶段下方仅等 task 完成（大概率已 done）。
+        compliance_task = asyncio.create_task(
+            screen_compliance(script_id=script_id, caller=caller)
+        )
+
+        # reward 一完成立刻启动 beat（reward 通常 ~30s，bios 通常更长）
+        reward_events: list[RewardEvent] = (await reward_task) or []
+        beat_task = asyncio.create_task(
+            _optional_chain(
+                "beat_chain",
+                extract_beat_sheet(
+                    script_id=script_id,
+                    reward_events=reward_events,
+                    caller=caller,
+                    engine=engine,
+                ),
+            )
+        )
+
         beat_sheet, character_graph, motivation_result, bios = (
             await asyncio.gather(
                 beat_task, graph_task, motivation_task, bios_task
@@ -1011,9 +1030,9 @@ async def generate_report(
         )
 
         progress_tracker.update_stage(
-            script_id, "compliance", "running", detail="合规风险扫描"
+            script_id, "compliance", "running", detail="等待合规并行 task 完成"
         )
-        compliance = await screen_compliance(script_id=script_id, caller=caller)
+        compliance = await compliance_task
         progress_tracker.update_stage(
             script_id,
             "compliance",
