@@ -211,7 +211,11 @@ async def extract_character_graph(
         return CharacterGraph()
 
     nodes, raw_edges = _build_from_resolver(
-        characters or [], relationships or [], max_nodes=max_nodes, max_edges=max_edges
+        characters or [],
+        relationships or [],
+        scenes=scenes,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
     )
     if not nodes:
         nodes, raw_edges = _cooccurrence_graph(
@@ -252,6 +256,7 @@ def _build_from_resolver(
     characters: List[Dict],
     relationships: List[Dict],
     *,
+    scenes: List[Scene],
     max_nodes: int,
     max_edges: int,
 ) -> Tuple[List[CharacterNode], List[CharacterEdge]]:
@@ -260,12 +265,27 @@ def _build_from_resolver(
     输入字段约定（与 script_report_service._load_characters /
     _load_character_relationships 输出一致）：
 
-      characters[i]    : id, name, archetype, role_in_arc, arc_type,
-                          agency_level, appearance_count
+      characters[i]    : id, name, aliases, appearance_count,
+                          archetype, role_in_arc, arc_type, agency_level
       relationships[i] : a_id, b_id, type, polarity
 
     返回的 ``CharacterNode.id`` 是 character_entities.id（UUID），保证和
     report payload 里的 characters[] / character_relationships[] 同 id-space。
+
+    **subgraph 连通性兜底**（v4，2026-05-30）
+    -----------------------------------------
+    历史 bug：``character_pipeline.cooccurrence_candidate_relationships``
+    虽然在**全集** entity 上做了 bridge 兜底，但本函数截 top-N（默认 12）之后，
+    凡是连接到 "非 top-N" entity 的 bridge 全部被丢，导致再次出现孤立组件。
+
+    修复：截 top-N 后，**在 top-N 子集上重新做** (1) scene 共现统计 →
+    (2) 最大连通分量识别 → (3) bridge edge 补齐到最大邻居。
+
+    业内对照：
+    - Labatut & Bost (2019) "Extraction and Analysis of Fictional Character
+      Networks: A Survey" (ACM CSUR) — 子图截断必须重做连通性。
+    - Bonato et al. (2016) "Mining Character Networks" — 长篇网络连通性优先。
+    - SINNET / GraphRAG —— 工程上始终在"最终 N 上做 MST 兜底"。
     """
     valid_chars = [
         c
@@ -321,8 +341,144 @@ def _build_from_resolver(
             weight=0.5,
         )
 
+    # ===== subgraph 连通性兜底 =====
+    # 用 top-N 子集 + scenes 重算共现，给孤立节点补 bridge edge。
+    # 不直接信任 cooccurrence_candidate_relationships 的全集 bridge——它的 bridge
+    # 可能连到 top-N 之外的 entity，截断后等于没连。
+    if scenes and len(nodes) >= 2:
+        _bridge_subgraph_orphans(
+            nodes=nodes,
+            edge_by_pair=edge_by_pair,
+            characters=top,
+            scenes=scenes,
+        )
+
     edges = list(edge_by_pair.values())[:max_edges]
     return nodes, edges
+
+
+def _bridge_subgraph_orphans(
+    *,
+    nodes: List[CharacterNode],
+    edge_by_pair: Dict[Tuple[str, str], CharacterEdge],
+    characters: List[Dict],
+    scenes: List[Scene],
+) -> None:
+    """在 top-N 子集上做 LCC + bridge。``edge_by_pair`` 原地修改。
+
+    bridge edge 用 type="ally"、polarity="mixed" 占位（与
+    ``cooccurrence_candidate_relationships`` 同语义），随后 ``_apply_edge_enrichment``
+    会让 LLM 重写为真实关系类型。weight 用 jaccard 兜底，保证前端不至于画成
+    "粗细均一"的死边。
+    """
+    node_ids = [node.id for node in nodes]
+    node_id_set = set(node_ids)
+
+    # name → entity_id（含 alias），用于把 scene.characters 的原始名映射回 UUID。
+    # 沿用 character_pipeline 的 _normalize_name 口径：清括号、清前后标点。
+    name_to_id: Dict[str, str] = {}
+    for character in characters:
+        ent_id = str(character.get("id") or "")
+        if not ent_id:
+            continue
+        names = [character.get("name") or ""]
+        aliases = character.get("aliases") or []
+        if isinstance(aliases, list):
+            names.extend(str(a) for a in aliases)
+        for raw in names:
+            cleaned = _clean_name(raw)
+            if cleaned:
+                name_to_id[cleaned] = ent_id
+
+    appearance: Dict[str, int] = {nid: 0 for nid in node_id_set}
+    cooccur: Counter[tuple[str, str]] = Counter()
+    for scene in scenes:
+        ids_in_scene: List[str] = []
+        seen: set[str] = set()
+        for raw in scene.characters or []:
+            cleaned = _clean_name(raw)
+            ent_id = name_to_id.get(cleaned)
+            if ent_id and ent_id in node_id_set and ent_id not in seen:
+                seen.add(ent_id)
+                ids_in_scene.append(ent_id)
+        for ent_id in ids_in_scene:
+            appearance[ent_id] += 1
+        for i in range(len(ids_in_scene)):
+            for j in range(i + 1, len(ids_in_scene)):
+                a, b = sorted((ids_in_scene[i], ids_in_scene[j]))
+                cooccur[(a, b)] += 1
+
+    # 现有 edge 的 adjacency
+    adj: Dict[str, set] = {nid: set() for nid in node_id_set}
+    for (a, b) in edge_by_pair:
+        adj[a].add(b)
+        adj[b].add(a)
+
+    # 最大连通分量
+    largest: set[str] = set()
+    seen_nodes: set[str] = set()
+    for nid in node_ids:
+        if nid in seen_nodes:
+            continue
+        component: set[str] = {nid}
+        stack = [nid]
+        while stack:
+            cur = stack.pop()
+            for nxt in adj.get(cur, ()):
+                if nxt not in component:
+                    component.add(nxt)
+                    stack.append(nxt)
+        seen_nodes.update(component)
+        if len(component) > len(largest):
+            largest = component
+
+    if len(largest) == len(node_id_set):
+        return  # 已全连通
+
+    # 多轮迭代：处理顺序依赖问题 —— 如果 orphan F 只和 orphan E 共现，必须
+    # 先把 E 接到 largest，F 才能在下轮通过 E 接上。单轮 + set 无序遍历会因
+    # F 先处理而永久孤立（详见 test_build_from_resolver_bridges_top_n_subgraph_orphans
+    # 的 BFS 失败用例）。改成"每轮选共现 count 最高的 orphan→largest 桥接 1 条，
+    # 直到没有 orphan 能接到 largest"——保证拓扑稳定。
+    while True:
+        orphans = node_id_set - largest
+        if not orphans:
+            return
+
+        # 在所有 orphan→largest 候选中找 cooccur count 最大的一条
+        best_orphan: Optional[str] = None
+        best_neighbor: Optional[str] = None
+        best_count = 0
+        for (a, b), count in cooccur.items():
+            if a in orphans and b in largest:
+                cand_orphan, cand_neighbor = a, b
+            elif b in orphans and a in largest:
+                cand_orphan, cand_neighbor = b, a
+            else:
+                continue
+            if count > best_count:
+                best_count = count
+                best_orphan = cand_orphan
+                best_neighbor = cand_neighbor
+
+        if best_orphan is None or best_neighbor is None:
+            # 剩余 orphan 与 largest 全无共现——大概率是独立场景的抽取噪声。
+            # 保留节点但不强连一条假边，让前端的"未抽到明显关系的角色"提示
+            # 显式展示，比骗用户更诚实。
+            return
+
+        union = appearance[best_orphan] + appearance[best_neighbor] - best_count
+        weight = round(best_count / union, 3) if union > 0 else 0.0
+        key = tuple(sorted((best_orphan, best_neighbor)))  # type: ignore[assignment]
+        if key not in edge_by_pair:
+            edge_by_pair[key] = CharacterEdge(
+                source_id=best_orphan,
+                target_id=best_neighbor,
+                type="ally",
+                polarity="mixed",
+                weight=max(weight, 0.1),
+            )
+        largest.add(best_orphan)
 
 
 def _initial_role(character: Dict, index: int) -> str:

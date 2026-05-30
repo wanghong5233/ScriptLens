@@ -5,7 +5,24 @@ LLM enrichment / scene 共现 fallback 走集成测试和 e2e；这里聚焦
 确保从 character_graph_builder 收编进来的过滤规则没有丢失。
 """
 
+from typing import List
+
 from service.script_tools import character_graph_chain as cgc
+from service.script_tools.scene_repo import Scene
+
+
+def _scene(*, sid: str, no: str, chars: List[str], episode: int = 1) -> Scene:
+    return Scene(
+        id=sid,
+        script_id="s-1",
+        episode_no=episode,
+        scene_no=no,
+        scene_label=f"E{episode:02d}-S{no}",
+        characters=chars,
+        start_line=None,
+        end_line=None,
+        text="",
+    )
 
 
 def test_is_real_character_name_filters_tool_npc_and_action_residue() -> None:
@@ -71,7 +88,7 @@ def test_build_from_resolver_filters_and_orders_by_appearance_count() -> None:
     ]
 
     nodes, edges = cgc._build_from_resolver(
-        characters, relationships, max_nodes=12, max_edges=30
+        characters, relationships, scenes=[], max_nodes=12, max_edges=30
     )
 
     node_ids = [n.id for n in nodes]
@@ -102,7 +119,9 @@ def test_build_from_resolver_uses_uuid_id_space() -> None:
             "appearance_count": 12,
         },
     ]
-    nodes, _ = cgc._build_from_resolver(characters, [], max_nodes=12, max_edges=30)
+    nodes, _ = cgc._build_from_resolver(
+        characters, [], scenes=[], max_nodes=12, max_edges=30
+    )
     assert nodes
     assert nodes[0].id == "11111111-2222-3333-4444-555555555555"
 
@@ -112,6 +131,59 @@ def test_build_from_resolver_empty_when_no_real_characters() -> None:
         {"id": "c1", "name": "电话", "appearance_count": 5},
         {"id": "c2", "name": "保镖", "appearance_count": 3},
     ]
-    nodes, edges = cgc._build_from_resolver(characters, [], max_nodes=12, max_edges=30)
+    nodes, edges = cgc._build_from_resolver(
+        characters, [], scenes=[], max_nodes=12, max_edges=30
+    )
     assert nodes == []
     assert edges == []
+
+
+def test_build_from_resolver_bridges_top_n_subgraph_orphans() -> None:
+    """v4 subgraph 连通性兜底回归：top-N 截断后仍必须连通。
+
+    根因复现：
+    - entities 总 6 个，max_nodes=4 → C / D 被截掉
+    - relationships 只覆盖了 A-B 一条强边，E / F 之间没有显式 relationship
+    - 但 scenes 共现里：E 和 A 同框、F 和 E 同框 → 子集上仍有连通信号
+    - 修复前：F 完全孤立；修复后：bridge edge 把 F 连到 E（或同等强度邻居）
+    """
+    characters = [
+        {"id": "ent-a", "name": "顾晓月", "aliases": ["晓月"], "appearance_count": 30},
+        {"id": "ent-b", "name": "顾长卿", "aliases": [], "appearance_count": 25},
+        {"id": "ent-c", "name": "C 小角", "aliases": [], "appearance_count": 4},
+        {"id": "ent-d", "name": "D 小角", "aliases": [], "appearance_count": 3},
+        {"id": "ent-e", "name": "宋芸", "aliases": [], "appearance_count": 22},
+        {"id": "ent-f", "name": "顾老爷子", "aliases": ["老爷子"], "appearance_count": 18},
+    ]
+    relationships = [
+        {"a_id": "ent-a", "b_id": "ent-b", "type": "rival", "polarity": "negative"},
+    ]
+    scenes = [
+        _scene(sid="s1", no="1-1", chars=["顾晓月", "宋芸"]),  # A-E 共现
+        _scene(sid="s2", no="1-2", chars=["顾晓月", "宋芸"]),  # A-E 再共现
+        _scene(sid="s3", no="2-1", chars=["宋芸", "顾老爷子"]),  # E-F 共现
+        _scene(sid="s4", no="2-2", chars=["宋芸", "老爷子"]),  # E-F 通过 alias 命中
+        _scene(sid="s5", no="3-1", chars=["顾长卿"]),
+    ]
+
+    nodes, edges = cgc._build_from_resolver(
+        characters, relationships, scenes=scenes, max_nodes=4, max_edges=30
+    )
+    node_ids = {n.id for n in nodes}
+    assert node_ids == {"ent-a", "ent-b", "ent-e", "ent-f"}
+
+    adj: dict = {nid: set() for nid in node_ids}
+    for e in edges:
+        adj[e.source_id].add(e.target_id)
+        adj[e.target_id].add(e.source_id)
+
+    # 子图必须全连通：从 ent-a 出发能 BFS 到所有 4 个节点
+    seen = {"ent-a"}
+    stack = ["ent-a"]
+    while stack:
+        cur = stack.pop()
+        for nxt in adj[cur]:
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    assert seen == node_ids, f"top-N 截断后未重做连通性，bridge 失效：{seen} ≠ {node_ids}"
