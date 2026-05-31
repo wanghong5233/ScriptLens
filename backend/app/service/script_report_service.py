@@ -842,6 +842,19 @@ def _score_one(
     raise ValueError(f"unsupported dimension={dimension!r}")
 
 
+# ============================================================
+# v4 投资决策评分 — 单维复评白名单
+# ============================================================
+# Wave C-2 (2026-05-31)：v3 6 维（story / character / concept / emotion / pacing / dialogue）
+# 已被 v4 5 维（hook / archetype / payoff / monetization / producibility）整体替换。
+# 维度概念**不正交映射**（v3 = 剧本工艺；v4 = 投资决策），不做"自动翻译"，
+# v3 dim_key 显式抛 ValueError 让上游升级，避免静默错误。
+# COMPLIANCE 是独立 gate，不进 5 维，但允许作为 dimension 参数复跑合规审核。
+_V4_DIMENSIONS: frozenset[str] = frozenset(
+    {"hook", "archetype", "payoff", "monetization", "producibility", "compliance"}
+)
+
+
 async def score_one_dimension(
     *,
     script_id: str,
@@ -849,20 +862,36 @@ async def score_one_dimension(
     caller: Optional[LlmCaller] = None,
     engine: Engine = default_engine,
 ) -> dict[str, Any]:
-    """单维度复评（用于 doc-studio rewrite 后的对比评分）。
+    """v4 投资决策单维度复评。
 
-    release/v1-mvp 简化版：按需重新跑该维度依赖的上游 chain + score_<dim>，
-    不依赖 rubric / signal_catalog / tag_pipeline。
+    入口场景：
+      - doc-studio rewrite 后的对比评分（改完一场后看维度分有没有动）
+      - agent 工具 `score_dimension_tool`（用户追问"为什么 HOOK 给 4 分"）
+
+    实现：拉取该维度依赖的上游 chain（reward / coverage / character_graph / motivation），
+    装配 ScoringContext，调用 scoring.score_dimension(dim_key, ctx) 单维重算。
+    COMPLIANCE 走 screen_compliance（独立 gate，与 5 维不同 pipeline）。
+
+    返回：
+      {
+        dimension, score, tier, reason, evidence_scene_ids,
+        is_dealbreaker_triggered,  # v4 新增
+        signals,                    # v4 新增：每个 signal 的 score/source/status/detail
+        baseline,                   # 上次报告同维度的分数（用于改写前后对比）
+      }
     """
     caller = caller or LlmCaller()
-    valid = {"story", "character", "concept", "emotion", "pacing", "dialogue", "compliance"}
-    if dimension not in valid:
-        raise ValueError(f"unknown dimension={dimension!r}; valid={sorted(valid)}")
+    if dimension not in _V4_DIMENSIONS:
+        raise ValueError(
+            f"unknown dimension={dimension!r}; valid={sorted(_V4_DIMENSIONS)}. "
+            "v3 6 维已被 v4 5 维替换，详见 docs/2026-05-31-投资决策评分框架-v4.md"
+        )
     meta = _load_script_meta(script_id, engine=engine)
     if meta is None:
         raise ValueError(f"script_id={script_id} 不存在")
 
     baseline = _load_baseline_dimension(script_id=script_id, dimension=dimension, engine=engine)
+
     if dimension == "compliance":
         compliance = await screen_compliance(script_id=script_id, caller=caller)
         return {
@@ -871,16 +900,32 @@ async def score_one_dimension(
             "tier": compliance.tier,
             "reason": compliance.reason,
             "evidence_scene_ids": _scene_ids_from_evidence(compliance.evidence_ref_ids),
+            "is_dealbreaker_triggered": compliance.tier == "high_risk",
+            "signals": [],
             "baseline": baseline,
         }
 
+    # ============================================================
+    # 装配上游依赖（按维度需要选择性触发，避免全量拉链）
+    # 依赖矩阵（详见 service/scoring/dimensions/*.py）：
+    #   hook         : scenes + llm_caller
+    #   archetype    : scenes + coverage_card + character_graph + llm_caller
+    #   payoff       : scenes + reward_events + beat_sheet
+    #   monetization : scenes + reward_events + total_episodes
+    #   producibility: scenes + total_episodes
+    # ============================================================
+    scenes = get_all_scenes(script_id=script_id, engine=engine)
     reward_events: list[RewardEvent] = []
     coverage_card: Optional[CoverageCard] = None
     beat_sheet: Optional[BeatSheet] = None
     character_graph: Optional[CharacterGraph] = None
-    motivation_result: Optional[MotivationResult] = None
 
-    if dimension in {"story", "emotion", "pacing"}:
+    needs_reward = dimension in {"payoff", "monetization"}
+    needs_beat = dimension == "payoff"
+    needs_graph = dimension == "archetype"
+    needs_coverage = dimension == "archetype"
+
+    if needs_reward:
         reward_events = (
             await _optional_chain(
                 "reward_extractor",
@@ -888,7 +933,7 @@ async def score_one_dimension(
             )
             or []
         )
-    if dimension == "story":
+    if needs_beat:
         beat_sheet = await _optional_chain(
             "beat_chain",
             extract_beat_sheet(
@@ -898,34 +943,22 @@ async def score_one_dimension(
                 engine=engine,
             ),
         )
-    elif dimension == "character":
-        motivation_result = await _optional_chain(
-            "motivation_chain",
-            score_motivation(script_id=script_id, caller=caller),
-        )
+    if needs_graph:
         character_graph = await _optional_chain(
             "character_graph_chain",
             extract_character_graph(
                 script_id=script_id, caller=caller, engine=engine
             ),
         )
-    elif dimension == "concept":
-        # 单维 debug 模式：用最小聚合输入（不强求 beat / graph / compliance 完整）
-        debug_reward = (
-            await _optional_chain(
-                "reward_extractor",
-                extract_reward_events(script_id=script_id, caller=caller),
-            )
-            or []
-        )
+    if needs_coverage:
         coverage_card = await _optional_chain(
             "coverage_chain",
             extract_coverage_card(
                 title=meta.title,
                 total_episodes=meta.total_episodes or 0,
                 total_scenes=meta.total_scenes or 0,
-                reward_events=debug_reward,
-                beat_sheet=None,
+                reward_events=reward_events,
+                beat_sheet=beat_sheet,
                 characters=_load_characters(script_id=script_id, engine=engine),
                 relationships=_load_character_relationships(script_id=script_id, engine=engine),
                 compliance_payload={},
@@ -934,23 +967,40 @@ async def score_one_dimension(
             ),
         )
 
-    output = _score_one(
-        dimension=dimension,
+    # 延迟 import 避免循环依赖（scoring 模块已经 import 了上游 chain 类型）
+    from service.scoring import score_dimension as scoring_score_dimension
+
+    scoring_ctx = ScoringContext(
         script_id=script_id,
-        meta=meta,
-        reward_events=reward_events,
-        coverage_card=coverage_card,
+        scenes=scenes,
+        total_episodes=meta.total_episodes or 0,
         beat_sheet=beat_sheet,
+        reward_events=reward_events,
         character_graph=character_graph,
-        motivation_result=motivation_result,
-        engine=engine,
+        coverage_card=coverage_card,
+        motivation_result=None,  # v4 5 维都不依赖 motivation_result
+        compliance=None,  # 单维复评不需要 compliance（独立 gate 走另一分支）
+        llm_caller=caller,
     )
+    dim_score = await scoring_score_dimension(dimension, scoring_ctx)
     return {
         "dimension": dimension,
-        "score": output.score,
-        "tier": _score_to_tier(output.score),
-        "reason": output.reason,
-        "evidence_scene_ids": list(output.evidence_ref_ids),
+        "score": dim_score.score,
+        "tier": dim_score.tier.value,
+        "reason": dim_score.reason,
+        "evidence_scene_ids": _scene_ids_from_evidence(list(dim_score.evidence_ref_ids)),
+        "is_dealbreaker_triggered": dim_score.is_dealbreaker_triggered,
+        "signals": [
+            {
+                "key": s.key,
+                "score": s.score,
+                "source": s.source.value,
+                "status": s.status.value,
+                "detail": s.detail,
+                "fallback_reason": s.fallback_reason,
+            }
+            for s in dim_score.signals
+        ],
         "baseline": baseline,
     }
 
@@ -1946,6 +1996,15 @@ def _scene_ids_from_evidence(evidence_ref_ids: list[str]) -> list[str]:
 
 
 def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) -> dict[str, Any]:
+    """加载上一次报告里该维度的分数作为复评 baseline（前端对比改写前后用）。
+
+    维度路由：
+      - compliance       → reports.report_json.compliance
+      - v4 5 维（hook/...） → reports.report_json.evaluation_v4.dimensions[]
+      - 其它（含 v3 残留） → 返回 None baseline（Wave C-2 不再回退到 v3 scorecard，
+                          v3 残留报告升级到 v4 前不提供基线，避免维度概念错配）
+    """
+    empty = {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
     with engine.connect() as conn:
         row = conn.execute(
             text(
@@ -1960,7 +2019,7 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
             {"sid": script_id},
         ).mappings().first()
     if row is None:
-        return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
+        return empty
     payload = row.get("report_json")
     if isinstance(payload, (str, bytes)):
         try:
@@ -1968,7 +2027,8 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
         except (TypeError, ValueError):
             payload = {}
     if not isinstance(payload, dict):
-        return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
+        return empty
+
     if dimension == "compliance":
         compliance = payload.get("compliance") if isinstance(payload.get("compliance"), dict) else {}
         return {
@@ -1977,21 +2037,29 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
             "reason": compliance.get("reason"),
             "evidence_scene_ids": list(compliance.get("evidence_ref_ids") or []),
         }
-    scorecard = payload.get("scorecard")
-    if not isinstance(scorecard, list):
-        return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
-    for item in scorecard:
-        if not isinstance(item, dict):
-            continue
-        if str(item.get("dimension") or "").strip() != dimension:
-            continue
-        return {
-            "score": item.get("score"),
-            "tier": item.get("tier") or item.get("level"),
-            "reason": item.get("reason"),
-            "evidence_scene_ids": list(item.get("evidence_ref_ids") or []),
-        }
-    return {"score": None, "tier": None, "reason": None, "evidence_scene_ids": []}
+
+    # v4 5 维 → evaluation_v4.dimensions[]
+    if dimension in _V4_DIMENSIONS:
+        evaluation_v4 = payload.get("evaluation_v4")
+        if not isinstance(evaluation_v4, dict):
+            return empty
+        dims = evaluation_v4.get("dimensions")
+        if not isinstance(dims, list):
+            return empty
+        for item in dims:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("key") or "").strip() != dimension:
+                continue
+            return {
+                "score": item.get("score"),
+                "tier": item.get("tier"),
+                "reason": item.get("reason"),
+                "evidence_scene_ids": list(item.get("evidence_ref_ids") or []),
+            }
+        return empty
+
+    return empty
 
 
 def _normalize_decision_label(raw: str) -> str:

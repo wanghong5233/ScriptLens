@@ -32,7 +32,18 @@ from ..script_vfs import ScriptVFS, ScriptVFSError
 logger = logging.getLogger(__name__)
 
 
-_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing", "dialogue", "compliance")
+# Wave C-2 (2026-05-31)：v3 6 维（story/character/concept/emotion/pacing/dialogue）
+# 已整体替换为 v4 5 维「投资决策」 + COMPLIANCE 独立 gate。维度概念**不正交映射**，
+# v3 dim_key 会被 service.score_one_dimension 显式拒绝（ValueError）。
+# 详见 docs/2026-05-31-投资决策评分框架-v4.md。
+_DIMENSIONS = (
+    "hook",  # 抓人力：开场冲突 / 首集结尾留钩 / 第 1 分钟出诱因
+    "archetype",  # 模板力：题材原型识别 + 角色原型清晰 + 模板内微差异
+    "payoff",  # 爽感力：每集爽点密度 + 反转密度 + 没有塌陷段
+    "monetization",  # 变现力：付费章 cliffhanger + 付费后爽点 + 集尾留钩
+    "producibility",  # 可生成力：场数 / 同框人数 / 特殊场景 / 外景比
+    "compliance",  # 合规：独立 gate，high_risk 一票否决
+)
 
 
 # ============================================================
@@ -78,11 +89,13 @@ class ScoreDimensionTool(BaseTool):
         super().__init__(
             name="score_dimension_tool",
             description=(
-                "复核或重新计算单一维度评分（六维之一：story / character / concept / "
-                "emotion / pacing；或独立合规审核：compliance）。"
-                "返回 score / tier / reason 以及若干证据场景的 ID。"
-                "用户在 chat 里追问「为什么人物力给 4 分」「再核一下合规」时调用本工具。"
-                "注意：完整评分报告由后台流水线一次性生成；本工具只跑单一维度。"
+                "复核或重新计算单一维度评分（v4 投资决策五维之一：HOOK 抓人力 / "
+                "ARCHETYPE 模板力 / PAYOFF 爽感力 / MONETIZATION 变现力 / "
+                "PRODUCIBILITY 可生成力；或独立合规审核：compliance）。"
+                "返回 score / tier / reason / is_dealbreaker_triggered / signals 详情 "
+                "以及若干证据场景的 ID。"
+                "用户在 chat 里追问「为什么 HOOK 给 4 分」「再核一下合规」时调用本工具。"
+                "注意：完整投资决策评分报告由后台流水线一次性生成；本工具只跑单一维度。"
             ),
         )
         self.parameters_schema = {
@@ -91,7 +104,7 @@ class ScoreDimensionTool(BaseTool):
                 "dimension": {
                     "type": "string",
                     "enum": list(_DIMENSIONS),
-                    "description": "六维之一",
+                    "description": "v4 投资决策 5 维之一（hook/archetype/payoff/monetization/producibility）或 compliance",
                 },
                 "script_id": {
                     "type": "string",
@@ -421,18 +434,29 @@ _REWRITE_PROMPT = """你是中文短剧资深编剧。请基于「整剧上下�
 3. 改写后字数与原文 ±30% 以内
 4. 必须与【后续场次】的剧情走向自洽（例如下场如果该角色出现，本场不能让他死）
 
-维度对应的优化方向（取一即可，不要堆砌；六维 docs/08 §3）：
-- story    : 强化主线推进 / 补一个反转或打脸节点，回应前情已埋的伏笔
-- character: 给关键决策补一段可追溯的因果（用前情人物关系 / 已发生事件做铺垫）
-- concept  : 把题材标识 / 核心卖点的钩子提前到本场前 1/3，删冗余铺垫
-- emotion  : 加一个情感钩子或爽点（CP 进展 / 反派败落 / 逆袭）放大情绪密度
-- pacing   : 删冗余对白 / 重复信息，节奏前推；首场 20 段内出冲突
+维度对应的优化方向（取一即可，不要堆砌；v4 5 维 docs/2026-05-31-投资决策评分框架-v4.md）：
+- hook         : 开场 30 字内出冲突 / 强情绪 / 反常事件；首场结尾留强钩子；第 1 分钟必须有让人想继续看的诱因
+- archetype    : 强化题材原型识别（战神 / 重生 / 复仇 / 甜宠 / 系统）；前 3 场就出现题材标识事件；本场加一个模板内的差异化记忆点
+- payoff       : 加一个爽点 / 反转 / 打脸 / 复仇 / CP 推进，放大爽感密度；避免本场出现「无事发生」的塌陷段
+- monetization : 如果是付费节点前后场，提升场尾 cliffhanger 强度（决定用户付费 / 续看 / 切下一集）
+- producibility: 降低同框人数 / 删除特殊场景 / 简化外景 / 调整对白密度，让本场更可生成（用于真人短剧或 AI 漫剧落地）
 
 输出严格 JSON（不要 markdown 代码块包裹）：
 {{
   "rewritten_excerpt": "<改写后的整段场景文本>",
   "rationale": "<≤150 字，解释你具体做了哪几处改动、用了哪些前情铺垫、为什么这样改能在 {target_dimension} 维度提分>"
 }}"""
+
+
+# 改写场景的 target_dimension 仅允许 v4 5 维（不允许 compliance：合规问题必须人工二次审核，
+# 不交给 LLM 自动改写。复评合规走 ScoreDimensionTool(dimension="compliance")。）
+_REWRITE_TARGET_DIMENSIONS = (
+    "hook",
+    "archetype",
+    "payoff",
+    "monetization",
+    "producibility",
+)
 
 
 class ProposeRewriteTool(BaseTool):
@@ -442,12 +466,14 @@ class ProposeRewriteTool(BaseTool):
         super().__init__(
             name="propose_rewrite_tool",
             description=(
-                "对剧本中某一场做定向改写，按指定维度优化（六维之一）。"
+                "对剧本中某一场做定向改写，按 v4 投资决策 5 维之一定向优化（hook / "
+                "archetype / payoff / monetization / producibility）。"
                 "工具内部会自动加载整剧上下文（人物表 + 前后场摘要 + 整剧概要）"
                 "再让 LLM 改写，保证新文本与剧情主线 / 已有人物 / 后续走向自洽。"
                 "返回原文 / 改写版 / unified diff / 改动说明。"
                 "用户问「把第 5 场改紧凑」「这场动机不成立怎么改」时调用本工具。"
                 "改写仅产出单场新文本，不写入文件、不修改前后场，仅返回建议供前端审阅。"
+                "注意：合规问题（compliance）不可作为 target_dimension —— 合规必须人工二次审核。"
             ),
         )
         self.parameters_schema = {
@@ -459,8 +485,8 @@ class ProposeRewriteTool(BaseTool):
                 },
                 "target_dimension": {
                     "type": "string",
-                    "enum": list(_DIMENSIONS),
-                    "description": "目标优化维度",
+                    "enum": list(_REWRITE_TARGET_DIMENSIONS),
+                    "description": "v4 5 维之一（不含 compliance）",
                 },
                 "issue": {
                     "type": "string",
@@ -478,10 +504,13 @@ class ProposeRewriteTool(BaseTool):
 
         if not scene_id:
             return ToolResult(success=False, error="scene_id is required", summary="缺 scene_id")
-        if target_dim not in _DIMENSIONS:
+        if target_dim not in _REWRITE_TARGET_DIMENSIONS:
             return ToolResult(
                 success=False,
-                error=f"target_dimension must be one of {_DIMENSIONS}",
+                error=(
+                    f"target_dimension must be one of {_REWRITE_TARGET_DIMENSIONS}, "
+                    f"got {target_dim!r}. 合规问题（compliance）不可改写，需人工二次审核。"
+                ),
                 summary="非法 target_dimension",
             )
         if not issue:
