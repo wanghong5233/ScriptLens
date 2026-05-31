@@ -100,9 +100,9 @@ services:
       - ./app:/app
       # 剧本原始文件落盘（dev 期）
       - ./storage_root:/app/service/core/storage
-      # 剧本数据集只读挂载：让 cli.run_stability / cli.ingest_dataset 的
-      # 默认 _DEFAULT_SOURCE_DIR (= _SCRIPTLENS_ROOT/eval/...，容器内即 /eval/...)
-      # 能命中宿主机的 ScriptLens/eval 目录，避免 CLI 在容器内默认参数失效。
+      # 剧本数据集只读挂载：让 cli.ingest_dataset 的默认 _DEFAULT_SOURCE_DIR
+      # (= _SCRIPTLENS_ROOT/eval/...，容器内即 /eval/...) 能命中宿主机的
+      # ScriptLens/eval 目录，避免 CLI 在容器内默认参数失效。
       - ../eval:/eval:ro
     command:
       [

@@ -17,11 +17,12 @@
 - `reward_extractor`   高光事件抽取
 - `compliance_scorer`  合规打分汇总
 
-DEPRECATED（已在 PR3a 删除）：evaluation_chain / improvement_action_generator /
-decision_aggregator / dimension_aggregator / genre_weights / percentile_tier /
-v0_business_rule_baseline。
-DEPRECATED（待 PR3b 删除）：tag_pipeline / bundle_extractor / plot_unit_segmenter /
-extractor_common / rule_extractors / character_entity_resolver /
-relationship_candidate_generator / tag_alignment_analyzer / match_config /
-signal_catalog/**。
+已在 PR3a/PR3b 删除的 deprecated 模块（保留记录便于历史检索）：
+- PR3a：evaluation_chain / improvement_action_generator / decision_aggregator /
+  dimension_aggregator / genre_weights / percentile_tier / v0_business_rule_baseline
+- PR3b：tag_pipeline / bundle_extractor / plot_unit_segmenter / extractor_common /
+  v0_extractor_common / v1_extractor_common / rule_extractors /
+  character_entity_resolver / relationship_candidate_generator /
+  tag_alignment_analyzer / match_config / signal_catalog/**
+  + CLI: run_tag_pipeline / run_stability / run_cross_modal_alignment
 """
