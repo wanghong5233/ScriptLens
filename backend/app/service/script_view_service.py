@@ -82,6 +82,12 @@ def build_view(
         task_status=task_status,
         # W1.3 (2026-05-31)：透传报告级 provenance 元数据给前端。
         meta=report.meta,
+        # Wave C-1 / D (2026-05-31)：v4 投资决策评分字段透传给前端。
+        # report 缺这些字段（老报告 / v4 评分失败）时 None / []，前端走 v3 兼容分支。
+        verdict=report.verdict,
+        investment_score=report.investment_score,
+        evaluation_v4=report.evaluation_v4,
+        top_improvements=list(report.top_improvements or []),
     )
 
 

@@ -997,6 +997,26 @@ class ViewResponse(BaseModel):
         default=None,
         description="报告级 provenance 元数据（chain_status + overall_status）",
     )
+    # Wave C-1 / D (2026-05-31)：v4 投资决策评分透传字段，与 v3 6 维并存。
+    # 老报告 / v4 评分失败时全部 None / []，前端按字段缺失走 v3 旧渲染分支。
+    verdict: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="v4 投资决策三档判决（qualified / needs_polish / not_recommended）",
+    )
+    investment_score: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=10,
+        description="v4 投资综合分（= verdict.overall_score 展平别名）",
+    )
+    evaluation_v4: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="v4 评分完整报告（rubric_version + 5 维 + chain_status_records）",
+    )
+    top_improvements: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description="v4 优先改进建议（按 dim × signal × score_gap 排序）",
+    )
 
 
 # ============================================================
