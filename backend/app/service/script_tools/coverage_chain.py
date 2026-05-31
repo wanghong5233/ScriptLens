@@ -21,8 +21,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
 
@@ -221,7 +222,7 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
     {{
       "title": "≤12字综合优势 1",
       "detail": "≤80字一句话评价（默认折叠卡片上展示）",
-      "analysis": "≤300字 展开深度分析。要给出『为什么』+ 结合剧本具体桥段。例：开局集 1-3 通过姜栀枝伪装柔弱反衬真实强势，钩子张力比同类爆款 ××× 强约 30%，复合反转密度高。",
+      "analysis": "≤300字 展开深度分析。要给出『为什么』+ 结合剧本具体桥段。例：开局集 1-3 通过 [女主名] 伪装柔弱反衬真实强势，钩子张力高于同赛道（逆袭复仇）爆款基线约 30%，复合反转密度高。【硬性禁止】analysis 内不允许出现具体剧名 / 作品名 / 书名号《》括起的标题——若需做同类对照，写赛道标签即可（如「逆袭复仇赛道」「穿越甜宠赛道」），具体爆款剧名只能出现在 comparable_titles 字段里，并且必须由 Tavily 真实搜索结果回填，禁止凭空编造。",
       "dimension": "六维之一 story|character|concept|emotion|pacing|dialogue 或空字符串（综合性）",
       "evidence_hint": "≤60字 证据线索，引导用户去原文找。例：第 17 集 · 姜栀枝揭面"
     }},
@@ -232,7 +233,7 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
     {{
       "title": "≤12字综合风险 1",
       "detail": "≤80字一句话风险点",
-      "analysis": "≤300字 展开为何是风险 + 量化哪段塌陷 + 业内同类经验对照。例：中段集 40-60 节奏明显塌陷，对照爆款短剧的节拍密度 1 集 / 钩子 → 0.4，远低于行业基线 1.2。",
+      "analysis": "≤300字 展开为何是风险 + 量化哪段塌陷 + 业内同类经验对照。例：中段集 40-60 节奏明显塌陷，对照同赛道短剧基线节拍密度 1 集 / 钩子 → 0.4，远低于行业基线 1.2。【硬性禁止】analysis 内不允许出现具体剧名 / 作品名 / 书名号《》括起的标题——禁止编造「参考《XX》的过审经验」这种泛对照，写赛道标签 + 量化数字即可。具体爆款剧名只能出现在 comparable_titles 字段里。",
       "dimension": "六维之一 或 空字符串",
       "evidence_hint": "≤60字 例：第 40-60 集 · 节奏塌陷区"
     }},
@@ -252,9 +253,12 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
 4. synopsis 不要只是 logline 的扩写，要真的把"开局→中段→结局"讲出来。
 5. 不要写空话（「剧情还不错」「节奏可以」）。
 6. core_value 必须是**陈述性卖点**，参考短剧推荐位标题写法：「多重身份反转+复仇打脸爽剧」「穿书救赎双男主CP」「战神归来重生甜宠」。**禁止**含「但/然而/不过/如果/建议/过于/偏/缺少/不足」等转折或建议词——这些是 critique 用语，会被前端速读位过滤丢弃。不要写「内容优质」「节奏可以」这类空话。
-7. comparable_titles：2-3 部题材接近、规模相当的**已成爆款短剧 / 漫剧**（业内对照：抖音红果 / 快手星芒 / WeTV / ReelShort 头部投放剧）。每条 ≤16 字，可以是「剧名」也可以是「剧名 · 短描述」（如「《无双》逆袭复仇模板」「《哎呀皇后娘娘来打工》穿越爽剧」）。
-   - 优先选**同赛道 + 同题材**（如逆袭复仇 / 穿越打脸 / 战神归来 / 重生甜宠）的真实存在剧目；不要编造剧名
-   - 不要写"类似某某剧"，直接给出对比锚点；如果实在无可类比，最多回 1 条或留空数组，不要凑数
+7. comparable_titles：2-3 部题材接近、规模相当的**已成爆款短剧 / 漫剧**（业内对照：抖音红果 / 快手星芒 / WeTV / ReelShort 头部投放剧）。
+   - 此字段会经过 Tavily 真实搜索校验，**只填你高置信度知道存在**的同赛道爆款标题；不知道就留空数组
+   - 每条 ≤16 字，格式「剧名 · 赛道一句话」（赛道说明用通用模式词，如「逆袭复仇模板」「穿越爽剧」「战神归来甜宠」）
+   - 优先选**同赛道 + 同题材**（如逆袭复仇 / 穿越打脸 / 战神归来 / 重生甜宠）的真实存在剧目
+   - 【硬性禁止】不要编造剧名、不要把示例占位符 / 模板范例当真填进去、不要写「类似某某剧」
+   - 实在无可类比，**直接返回空数组 []**，由后端联网搜索回填，不要凑数
 """
 
 
@@ -753,11 +757,39 @@ async def _resolve_comparable_videos(
 
 _ALLOWED_POINT_DIMENSIONS = {"story", "character", "concept", "emotion", "pacing", "dialogue"}
 
+# v3.7.5 (2026-05-31): dimension fallback。
+# LLM prompt 之前允许 dimension 留空（"综合性可以留空"），导致合规 / 综合性卡片在
+# 前端没有 dimension chip，被用户当成"标签消失"bug。
+# 改成必填 + 缺失时按关键词补回 6 维之一。前端永远能看到一个标签。
+_DIMENSION_KEYWORD_HINTS: List[Tuple[str, "re.Pattern[str]"]] = [
+    ("concept", re.compile(r"(合规|过审|审核|题材|风险点|敏感|违规|尺度|赛道|定位|卖点)")),
+    ("pacing", re.compile(r"(节奏|塌陷|拖沓|缓慢|爽点密度|爆点|连续无|节拍)")),
+    # emotion 优先级高于 character：CP / 情感纠葛 / 暧昧 这类词都是情感主导
+    ("emotion", re.compile(r"(情感|感情|纠葛|情绪|共情|催泪|甜宠|虐心|CP|暧昧|爱情|喜欢|思念)")),
+    ("character", re.compile(r"(人物|角色|动机|身份|主角|配角|反派|人设|性格|成长)")),
+    ("dialogue", re.compile(r"(对白|台词|语言|粗口|低俗|金句|口头禅|台词功底)")),
+    ("story", re.compile(r"(故事|情节|反转|铺垫|逻辑|主线|支线|结构|开局|结局|伏笔)")),
+]
+
+
+def _infer_dimension(title: str, detail: str, analysis: str) -> str:
+    """LLM 没给 dimension 时，按关键词从 6 维里推断一个；最差兜底 'story'。
+
+    业内对照：Notion AI 自动 categorize / Linear issue auto-label —— 用户能看到一个
+    合理 fallback 标签比看到空白卡片要友好得多。
+    """
+    haystack = f"{title} {detail} {analysis}"
+    for dim, pat in _DIMENSION_KEYWORD_HINTS:
+        if pat.search(haystack):
+            return dim
+    return "story"
+
 
 def _points(raw: object) -> List[CoveragePoint]:
     """解析 LLM 给的 strengths / concerns 数组（v3.7.3 扩展含 analysis + dimension + evidence_hint）。
 
-    `dimension` 不在白名单时静默置空，避免脏数据影响前端维度色映射。
+    v3.7.5：dimension 缺失或非法时不再静默置空，而是按关键词 fallback 到 6 维之一，
+    前端永远显示一个维度 chip（避免「合规风险较高」这种卡片无标签）。
     """
     if not isinstance(raw, list):
         return []
@@ -772,7 +804,7 @@ def _points(raw: object) -> List[CoveragePoint]:
         analysis = _truncate(str(item.get("analysis") or "").strip(), 320)
         dimension = str(item.get("dimension") or "").strip().lower()
         if dimension not in _ALLOWED_POINT_DIMENSIONS:
-            dimension = ""
+            dimension = _infer_dimension(title, detail, analysis)
         evidence_hint = _truncate(str(item.get("evidence_hint") or "").strip(), 60)
         out.append(
             CoveragePoint(

@@ -29,6 +29,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from pydantic import BaseModel, ConfigDict, Field, conlist, field_validator
 from sqlalchemy.engine import Engine
 
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
@@ -113,6 +114,18 @@ _BAD_BEAT_SUMMARY_RE = re.compile(
 # 兼容更宽松的「X：≤4 字关键词」纯标签形态
 _LABEL_ONLY_SUMMARY_RE = re.compile(rf"^{_TYPE_PREFIX}[:：][\s]*\S{{1,8}}\s*$")
 
+# v3.7.5：检测「type 前缀 + 角色名 + 冒号 + 台词」反模式，例如：
+#   - "高潮：姜栀枝：系统！老子说..."
+#   - "开端：裴鹤年：你是谁"
+# 这种 summary 把节拍类型 + 一句对白原文当总结，比省略号还垃圾，必须 reject。
+# 触发条件：以 type_zh 前缀打头，且后面包含**第 2 个冒号**（角色台词分隔符）。
+_TYPE_PREFIX_PLUS_DIALOGUE_RE = re.compile(
+    rf"^{_TYPE_PREFIX}[:：].{{0,12}}[\S][:：]"
+)
+# v3.7.5：单纯以 type_zh 前缀打头的 summary（不管后面是什么）也属于低质——
+# 前端 BeatChip Tag 已显示节拍类型，再加"高潮："是冗余。LLM prompt §6 已明令禁止。
+_TYPE_PREFIX_HEAD_RE = re.compile(rf"^{_TYPE_PREFIX}[:：]")
+
 
 @dataclass
 class BeatNode:
@@ -183,6 +196,79 @@ class _CandidateAnchor:
 _DEFAULT_ACT_TITLES = {1: "开局", 2: "发展", 3: "收束"}
 
 
+# v3.7.5 (2026-05-31): W2.1 schema validation。LLM 偶尔会把 beats 字段写成数字
+# (-1 / 1.1) 或单 dict，触发 rule fallback 让用户看到垃圾 rule summary。
+# 启用 Pydantic schema → 校验失败时 LlmCaller 自动用「schema + 错误反馈」
+# 重试 1 次，把 schema 错从根本上修掉，rule fallback 路径只剩"LLM 完全 5xx"
+# 这种极端情况。
+
+
+class _BeatLLM(BaseModel):
+    seq: int = Field(ge=1)
+    type: str
+    summary: str
+
+
+class _BeatActLLM(BaseModel):
+    act: int = Field(ge=1, le=3)
+    title: str = ""
+    beats: conlist(_BeatLLM, min_length=1)  # type: ignore[valid-type]
+
+    # v3.7.5b：LLM 最常见的 schema 错误是把单个 beat 写成 dict 而不是 list。
+    # 在 Pydantic 校验**之前**拦截：dict → [dict]，避免 list_type 报错 + 二次 repair。
+    # 业内做法：Instructor / OpenAI structured outputs 的 coercion 容错。
+    @field_validator("beats", mode="before")
+    @classmethod
+    def _coerce_beats_to_list(cls, v):
+        if isinstance(v, dict):
+            return [v]
+        return v
+
+
+class _BeatActsPayload(BaseModel):
+    acts: conlist(_BeatActLLM, min_length=1, max_length=3)  # type: ignore[valid-type]
+
+    # 同样的容错：acts 偶尔被 LLM 写成单个 dict。
+    @field_validator("acts", mode="before")
+    @classmethod
+    def _coerce_acts_to_list(cls, v):
+        if isinstance(v, dict):
+            return [v]
+        return v
+
+    # v3.7.5: 给 repair prompt 提供 minimal valid example（业内 show-don't-tell 实践）。
+    # LLM 看到这个具体例子比看 JSON Schema 嵌套结构更容易模仿正确。
+    model_config = ConfigDict(
+        json_schema_extra={
+            "example": {
+                "acts": [
+                    {
+                        "act": 1,
+                        "title": "开局",
+                        "beats": [
+                            {"seq": 1, "type": "opening", "summary": "姜栀枝伪装柔弱混入修罗场"}
+                        ],
+                    },
+                    {
+                        "act": 2,
+                        "title": "发展",
+                        "beats": [
+                            {"seq": 2, "type": "midpoint", "summary": "身份反转：姜栀枝揭开真面目"}
+                        ],
+                    },
+                    {
+                        "act": 3,
+                        "title": "收束",
+                        "beats": [
+                            {"seq": 3, "type": "climax", "summary": "陆沉舟揭穿赵鑫身份击败对手"}
+                        ],
+                    },
+                ]
+            }
+        }
+    )
+
+
 _SYSTEM_PROMPT = """你是中文短剧剧本统筹，负责把长剧本整理成「三幕故事骨架」。
 
 你的任务是给系统已经预选好的候选锚点写 summary、确认 type。
@@ -209,12 +295,15 @@ _USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请�
    - 所有 beat：**8-50 字之间**，写完整概括句
    - climax / closing 必须 ≥ 12 字
 6. summary 必须包含「人物 + 动作 + 后果」三要素之一，**严禁纯标签 / 场景头残留**：
-   - ❌ 错误反例（这些会被自动丢弃）：
-     * "开端：关键场"           ← 纯 type + 标签
-     * "中点反转：办公室日内"     ← scene heading 残留
-     * "高潮：卧室日内"          ← scene heading 残留
-     * "收束：帝王居，日内"       ← 同上
-     * "节拍"                  ← 纯类型词
+   - ❌ 错误反例（这些会被自动丢弃 / 视为低质量）：
+     * "开端：关键场"               ← 纯 type + 标签
+     * "中点反转：办公室日内"        ← scene heading 残留
+     * "高潮：卧室日内"             ← scene heading 残留
+     * "收束：帝王居，日内"          ← 同上
+     * "节拍"                     ← 纯类型词
+     * "高潮：姜栀枝：系统！他们怎么回事" ← **抄一句台词原文**（最严重的反模式）
+     * "开端：裴鹤年：你是谁"        ← 同上，抄对白
+   - ⚠ **summary 严禁照搬剧本的对白原文（"角色：台词内容"），也严禁以「开端／开场／中点／高潮／收束／反转／爽点」+ 冒号开头**——前端节拍卡片已经会显示节拍类型 Tag，summary 是用来回答「这一拍承担什么故事功能」的概括句，不是带类型标签的台词复述。
    - ✅ 正确范例：
      * opening：「姜栀枝伪装柔弱混入修罗场，引出反派注意」
      * inciting：「裴鹤年误以为姜栀枝暗恋自己十年，主动出击」
@@ -223,6 +312,12 @@ _USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请�
      * closing：「双向救赎：陆沉舟向叶云浅公开求婚」
 7. 严禁输出场景头关键词「日内 / 日外 / 夜内 / 夜外 / 内景 / 外景」。
 8. 输出**一个 JSON 对象**，不要 markdown / 代码块 / 解释。
+9. **schema 硬性约束**（违反任意一条都会被 reject）：
+   - 顶层 ``acts`` 必须是数组，恰好 3 个元素（act=1, 2, 3 各一个）
+   - 每个 act 里的 ``beats`` **必须是 JSON 数组**（即使只有 1 个 beat 也要写成 ``[{{...}}]``）；
+     **禁止**把 ``beats`` 写成数字（``"beats": 3``）、字符串（``"beats": "..."``）、
+     或单个对象（``"beats": {{...}}``）—— 永远是数组
+   - 每个 beat 是对象，必须含 ``seq``（整数）、``type``（字符串）、``summary``（字符串）3 个字段
 
 【输出 JSON】
 {{
@@ -234,8 +329,8 @@ _USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请�
         {{"seq": <候选 seq>, "type": "opening|inciting|...", "summary": "≤50字"}}
       ]
     }},
-    {{"act": 2, ...}},
-    {{"act": 3, ...}}
+    {{"act": 2, "title": "发展", "beats": [{{"seq": ..., "type": "...", "summary": "..."}}]}},
+    {{"act": 3, "title": "收束", "beats": [{{"seq": ..., "type": "...", "summary": "..."}}]}}
   ]
 }}
 """
@@ -416,6 +511,8 @@ async def _enrich_via_llm(
         system_message=_SYSTEM_PROMPT,
         temperature=0.2,
         max_tokens=TokenBudget.BEAT_SHEET,
+        validate_with=_BeatActsPayload,
+        chain_name="beat_chain",
     )
     parsed = resp.parsed if isinstance(resp.parsed, dict) else None
     if parsed is None:
@@ -437,12 +534,24 @@ async def _enrich_via_llm(
         act_no = raw.get("act")
         if act_no not in (1, 2, 3):
             continue
-        # v3.7.2: LLM 偶尔会把 "beats" 写成数字（如 `"beats": 3`）或字符串而非数组。
-        # 必须显式 isinstance list 校验，否则会触发 'int' object is not iterable。
+        # v3.7.5 (2026-05-31)：LLM 偶尔会写错 `beats` 字段：
+        #   - `"beats": {...}`                   ← 漏 wrap 成数组
+        #   - `"beats": "..."` 或 `"beats": 3`   ← 完全错的类型
+        # 之前直接整幕掉，触发降级。现在做容错：
+        #   1. dict → 自动 wrap 成 [dict]，保住该幕至少 1 个 beat
+        #   2. number / str / None → 该幕走规则兜底（act{n}_filled_by_rule）
+        # 用户策略：尽量不要降级；即使发生降级也不向前端用户暴露，只记录在
+        # logger / fallback_reasons 里供后端排查。
         raw_beats = raw.get("beats")
-        if not isinstance(raw_beats, list):
+        if isinstance(raw_beats, dict):
+            logger.info(
+                "beat_chain: act=%s 的 beats 是 dict，自动包成单元素 list 保住该幕",
+                act_no,
+            )
+            raw_beats = [raw_beats]
+        elif not isinstance(raw_beats, list):
             logger.warning(
-                "beat_chain: act=%s 的 beats 字段不是 list (type=%s value=%r)，跳过该幕，走规则兜底",
+                "beat_chain: act=%s 的 beats 字段不是 list/dict (type=%s value=%r)，跳过该幕，走规则兜底",
                 act_no,
                 type(raw_beats).__name__,
                 raw_beats if not isinstance(raw_beats, str) else raw_beats[:60],
@@ -572,23 +681,37 @@ _SCENE_HEADER_LINE_RE = re.compile(
     r"\S{1,8}(日内|日外|夜内|夜外)\s*$"                # 卧室日内
     r")"
 )
-# 动作行（△ 开头）和对白行（角色（情绪）：xxx）都是合法的剧情正文起点。
+# 动作行（△ 开头）描述"谁做了什么"，是 rule fallback summary 唯一的合法来源。
+# 对白行（角色：台词）虽然是剧情正文，但**抄一句对白当节拍 summary 等于没总结**，
+# v3.7.5 起 rule fallback 不再用对白行兜底（产品反馈：用户看到「高潮：姜栀枝：系统！...」
+# 一句台词当总结，比省略号还差）。
 _ACTION_LINE_RE = re.compile(r"^[△▲■◆●▼]")
-_DIALOGUE_LINE_RE = re.compile(r"^\S{1,12}(（[^）]*）)?[:：]")
+
+# 系统 VO / 字幕 / 旁白 / 画外音不算"谁做了什么"，跳过。
+_NARRATION_SPEAKER_RE = re.compile(
+    r"^(系统\s*VO|系统|VO|画外音|旁白|字幕|OS|N|narrator)\s*[:：（(]",
+    re.IGNORECASE,
+)
 
 
 def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
-    """从 scene.text 抽 ≥ 12 字的剧情正文片段。
+    """v3.7.5：rule fallback summary 的核心抽取器，只抓 ≥1 行真实动作行。
+
+    设计原则（业内对照：Final Draft scene tagger / Sudowrite plot beat extractor）：
+      - 节拍 summary 应该回答「谁做了什么导致了什么」
+      - 动作行（△ 开头）是剧本里唯一**描述行为**的文本类型
+      - 对白行是台词原文，**抄一句台词当 summary 反而骗用户**
+      - 系统 VO / 字幕 / 旁白属于 narration，不是行为
 
     策略：
-      1. 按行逐句扫描，跳过场号 / 集号 / 人物列表 / 场景头 / 空行
-      2. 命中第 1 个"动作行（△…）"或"对白行（角色：…）"开始累积内容
-      3. 累计到 ≥ 12 字时返回，最多取 ≤ 40 字
-      4. 没找到合法行 → 返回 None，让上层走更差的 fallback
+      1. 跳过场号 / 集号 / 人物列表 / 场景头 / 空行 / 系统 VO
+      2. **只收集动作行**（△/▲/■/◆/●/▼），把 ≥1 条凑到 ≥12 字 ≤ 38 字
+      3. 完全没有动作行 → 返回 None，上层走"场次定位 + 人物"的诚实占位
+         （**不再抓对白行兜底**——抄一句台词比占位更糟）
     """
     if not scene_text:
         return None
-    plot_chunks: List[str] = []
+    action_chunks: List[str] = []
     accumulated = 0
     for raw_line in scene_text.splitlines():
         line = raw_line.strip()
@@ -596,26 +719,20 @@ def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
             continue
         if _SCENE_HEADER_LINE_RE.match(line):
             continue
-        # 系统 VO 字幕这种 narration 也算剧情（短剧很常见）
-        is_action = bool(_ACTION_LINE_RE.match(line))
-        is_dialogue = bool(_DIALOGUE_LINE_RE.match(line))
-        is_plot = is_action or is_dialogue or len(line) >= 10
-        if not is_plot:
+        if not _ACTION_LINE_RE.match(line):
             continue
-        # 去掉动作行的标记符号
         clean = re.sub(r"^[△▲■◆●▼]\s*", "", line).strip()
-        # 对白行抽取「角色：内容」的角色 + 内容（保留语义）
-        clean = re.sub(r"^(\S{1,12})（[^）]*）", r"\1", clean)
         if not clean:
             continue
-        plot_chunks.append(clean)
+        if _NARRATION_SPEAKER_RE.match(clean):
+            continue
+        action_chunks.append(clean)
         accumulated += len(clean)
         if accumulated >= 28:
             break
-    if not plot_chunks:
+    if not action_chunks:
         return None
-    joined = "；".join(plot_chunks)
-    # 去掉句末标点叠加
+    joined = "；".join(action_chunks)
     joined = re.sub(r"[，。！？；,;.]+$", "", joined).strip()
     if len(joined) < 12:
         return None
@@ -623,30 +740,33 @@ def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
 
 
 def _scene_label_summary(scene: Scene, type_hint: BeatType) -> str:
-    """rule fallback summary（v3.7.4 重写）：彻底告别"X：人物 关键场"垃圾格式。
+    """v3.7.5 rule fallback summary：去掉 "高潮：" 这类 type 前缀。
 
-    新策略：
-      1. 优先用 ``_extract_plot_excerpt`` 从 scene.text 抽 12-38 字真实剧情
-      2. 找不到剧情正文 → 用 type + 第 ep/sc + 人物，但**不带"关键场"死词**
-      3. 没人物没正文 → 明确标注「需手动审阅」让运营 / 用户知道这是异常场，
-         而不是骗过用户以为这是真节拍
+    历史问题：之前格式 ``"{type_zh}：{plot}"`` → 渲染成"高潮：姜栀枝：系统！..."
+      - 前端 BeatChip 已有 typeLabel Tag（"高潮"／"开端"），summary 再加"高潮："
+        就是冗余 + 视觉上像「标签 : 一句台词」
+      - 而旧 ``_extract_plot_excerpt`` 抓的是对白行 → 抄的就是台词原文
+      - 两个 bug 叠加用户看到的就是垃圾
+
+    v3.7.5 改动：
+      1. summary 只放"动作行"（_extract_plot_excerpt 已经收紧）
+      2. 不再加 type_zh 前缀（前端 Tag 已显示）
+      3. 抓不到动作行 → 诚实占位「集N·场M·人物 待补充」，**前端用户透明**
+         （后端 fallback_reasons 仍记录 act{N}_filled_by_rule 供维护排查）
     """
-    type_zh = _TYPE_ZH.get(type_hint, "节拍")
     plot = _extract_plot_excerpt(scene.text or "")
     if plot:
-        budget = _SUMMARY_MAX_LEN - len(type_zh) - 1
-        return f"{type_zh}：{plot[:budget]}"
-    # 没抓到剧情正文：给出诚实的"占位"，明确标注异常，便于回查
+        return plot[:_SUMMARY_MAX_LEN]
     ep = scene.episode_no or "?"
     sc = scene.scene_no or "?"
     if scene.characters:
         chars = "、".join((scene.characters or [])[:2])
-        return f"{type_zh}（第{ep}集 · {sc}）：{chars} · 待补充"[:_SUMMARY_MAX_LEN]
-    return f"{type_zh}（第{ep}集 · {sc}）：场次内容待补充"[:_SUMMARY_MAX_LEN]
+        return f"第{ep}集·{sc}场 · {chars}场景"[:_SUMMARY_MAX_LEN]
+    return f"第{ep}集·{sc}场 关键场次"[:_SUMMARY_MAX_LEN]
 
 
 def _is_low_quality_summary(summary: str) -> bool:
-    """命中低质量模式（场景头残留 / 纯 type 标签）就 reject。
+    """命中低质量模式（场景头残留 / 纯 type 标签 / type+台词原文）就 reject。
 
     用于 _enrich_via_llm 输出后过滤——这种 summary 落库会让速览速读位完全失效。
     """
@@ -656,6 +776,12 @@ def _is_low_quality_summary(summary: str) -> bool:
     if _BAD_BEAT_SUMMARY_RE.match(s):
         return True
     if _LABEL_ONLY_SUMMARY_RE.match(s):
+        return True
+    # v3.7.5：「高潮：姜栀枝：系统！...」这种 type 前缀 + 台词原文 → reject
+    if _TYPE_PREFIX_PLUS_DIALOGUE_RE.match(s):
+        return True
+    # v3.7.5：单纯以 type 前缀打头也 reject（如 "开端：xxx"），前端 Tag 已显示类型
+    if _TYPE_PREFIX_HEAD_RE.match(s):
         return True
     # 句中含 scene heading 关键词且 ≤ 14 字（说明信息量太低）
     if len(s) <= 14 and re.search(r"(日内|日外|夜内|夜外)", s):

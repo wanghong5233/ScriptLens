@@ -232,6 +232,10 @@ class CharacterBio:
     id: str
     script_id: str
     character_id: str
+    # v3.7.5c (2026-05-31)：性别字段。值域 "male" / "female" / "unknown"。
+    # 不区分非二元 / 老幼 / 中性等细粒度——短剧场景仅需基础男 / 女区分供前端 Tag。
+    # 持久化方案：随 report.character_bios 进 reports.report_json，不动 character_bios 表。
+    gender: str = "unknown"
     identity_present: str = ""
     identity_hidden: str = ""
     identity_origin: str = ""
@@ -617,30 +621,60 @@ _BIO_SYSTEM_PROMPT = """你是中文短剧人物小传写作助手。给定一�
 - 字段以**自然段**形式撰写：persona_surface / persona_core / weakness / arc_light /
   dialogue_style 推荐 60~150 字一段，不要短到三五个字凑一行。
 
-== 身份字段提取纪律（重要，最容易出错的环节）==
-identity_present 是必填项；identity_hidden / identity_origin 默认应该是空字符串，
-只有剧本里有明确文本支撑才允许填。
+== 性别字段（gender）==
+取值**严格限定** "male" / "female" / "unknown" 三选一，**不要写中文 / 不要写其他词**。
+判断顺序（按可靠度排）：
+  1. 中文姓名性别取向（"姜栀枝/乔颜/沈知意"→ female；"裴鹤年/陆斯言/顾聿之"→ male）
+  2. 称谓 / 第二人称代词（"他/她"、"先生/小姐"、"少爷/小姐"、"夫人/老爷"、"哥/姐"）
+  3. 服装 / 角色定位（"女配/男主/万人迷小姐姐"）
+  4. 仅在以上线索全部缺失（如纯代号 "A1" 或称呼模糊）才填 "unknown"
+**几乎所有有正式中文姓名的主要角色都能判出 male 或 female**——unknown 应该是少数。
 
-  identity_present （当前社会身份）
-  - 从剧本的人物介绍 / 场景上下文 / 称谓中提炼当前角色身份。
-  - 例：「应聘女佣」「医院护士长」「公司新晋助理」「家族继承人」。
+== 身份字段提取纪律（重要，最容易出错的环节）==
+三个 identity 字段在「穿越/重生/借尸还魂」题材的短剧里是**必须区分**的核心信息——
+**绝不要**把所有信息一股脑塞进 identity_present 把另两个留空。
+
+【穿越/重生/系统觉醒题材的强识别信号】（命中任一即说明该角色是穿越者/重生者）：
+  - "系统觉醒" / "系统VO" / "已锁定载体" / "宿主灵魂投放" / "宿主"
+  - "穿成XX" / "穿越成XX" / "穿到XX" / "穿来" / "穿到这个世界"
+  - "重生回到" / "上辈子" / "前世" / "再睁眼时" / "灵魂回到"
+  - "我不是 X，我是 Y" 类身份揭示 / "我从 21 世纪来" / "本应是另一个时空"
+  - 同一角色在剧本中切换两种说话风格 / 知识体系（如现代女主穿成古代恶毒女配，
+    一边骂"卧槽"一边演古风）
+
+  ⭐ 命中强信号时的填法（**这是最常见的错误，请务必照做**）：
+    - identity_origin   填「**穿越者的原生身份**」——如「现代社畜女白领」「21 世纪某高校学生」
+                        即使剧本只用一句"宿主灵魂投放"暗示，也要写「现代世界穿越而来的灵魂宿主」
+    - identity_present  填「**角色在剧本世界里被设定的当前社会身份**」——也就是
+                        穿越成了谁、扮演什么角色、当前别人怎么称呼她
+    - identity_hidden   填「**穿越/重生这个事实本身被剧中其他角色发现/质疑的伪装情况**」
+                        如「灵魂置换的事实只有自己和系统知道，对他人保持原角色人设」
+
+  identity_present （当前社会身份/剧中身份）
+  - 从剧本的人物介绍 / 场景上下文 / 称谓中提炼**该角色当前在剧本世界里是谁**。
+  - 普通现代剧例：「应聘女佣」「医院护士长」「公司新晋助理」「家族继承人」。
+  - 穿越剧例（注意身份后要补**是被穿越的设定**）：「恶毒女配，嫉妒万人迷乔颜的反派角色
+    （主角灵魂穿来的载体）」「冷宫弃妃（穿越者新身份）」。
   - 至少 30 字以上的简短自然段，把身份+处境一起写。
 
-  identity_hidden （隐藏身份 / 伪装身份）—— 默认空
-  仅在剧本明确出现以下线索之一时才填，否则严格保留 ""：
-    - "假装是某某" / "其实是另一个身份" / "化名 XX"
+  identity_hidden （隐藏身份 / 伪装身份）—— 默认空，但有强信号时**必须填**
+  以下任一线索出现时必须填：
     - 角色明确为"卧底""特工""复仇者潜伏""易容""扮成女佣"等
+    - "假装是某某" / "其实是另一个身份" / "化名 XX"
     - 文中其他角色对该角色的身份发出质疑、错认或揭穿
-  ❌ 反例：把"暗恋裴鹤年的深情者"当成 identity_hidden（这是性格不是身份）；
-  把"恶毒女配"当成 identity_hidden（这是 identity_present 的本职定位）。
-  绝大多数现代剧 / 都市剧 / 职场剧 identity_hidden 都应该是 ""。
+    - **穿越/重生强信号命中 → 默认填「穿越/重生的真实灵魂身份对其他角色保密」**
+  ❌ 反例：把"暗恋裴鹤年的深情者"当成 identity_hidden（这是性格不是身份）。
 
-  identity_origin （出身 / 前世 / 真实身份）—— 默认空
-  仅在剧本是穿越 / 重生 / 失忆 / 失散 / 大家族失散身世题材，且有明确文本支撑时才填：
+  identity_origin （出身 / 前世 / 真实身份 / 灵魂来源）—— 默认空，但穿越/重生题材**必须填**
+  以下任一文本支撑出现时必须填：
+    - 穿越剧强信号：写「现代世界穿越而来的灵魂宿主」+ 推断的具体职业/世界设定
+    - 重生剧强信号：写「上一世的身份 + 重生原因 / 触发死亡事件」
     - "上一世我..." / "穿越前是 21 世纪..." / "其实你才是 X 家的真千金"
     - "母亲临终告诉我，我们家族原本..."
+    - 系统觉醒/锁定载体类台词出现 → **必须**在 identity_origin 写「穿越者灵魂宿主」
   ❌ 反例：把"小镇出生的普通女孩"当 origin（这是普通现代剧背景，不算 origin）。
-  绝大多数现代剧 identity_origin 都应该是 ""。
+  **关键提示**：如果你在剧本里看到「系统VO」「宿主」「穿成」「载体」任一关键词，
+  identity_origin **绝对不能为空字符串**。
 
 == 外貌字段边界（避免性格 / 行为混入，但要尽力提取）==
 外貌只描述"长什么样"，不描述"做什么"或"内心如何"。
@@ -728,6 +762,7 @@ behavior 一两句话写**该角色在该场做了什么**（不是场景梗概�
 
 
 _BIO_FEW_SHOT_JSON_EXAMPLE = """{
+  "gender": "female",
   "identity_present": "应聘进入豪门的女佣",
   "identity_hidden": "为父翻案的复仇者，伪造背景接近仇家。",
   "identity_origin": "原是受害家族独女，八岁那年家破人亡后改名换姓潜伏多年。",
@@ -782,10 +817,15 @@ canonical_name: {canonical_name}
 
 【关于上述示例的重要提示】
 该示例是"潜伏复仇"双重身份剧，所以 identity_hidden 和 identity_origin 都填了。
-**如果你正在写的目标角色不是这种剧（普通都市剧 / 现代职场 / 校园 / 古装本色），
-identity_hidden 和 identity_origin 必须留空字符串 ""，不要模仿示例硬填。**
-判断方法：剧本里**没有**明确出现"伪装/假身份/化名/上一世/穿越前/真千金"等字眼时，
-两个字段一律留空。
+判断方法：
+  - 普通都市剧 / 现代职场 / 校园 / 古装本色：剧本没出现"伪装/假身份/化名"等字眼 →
+    identity_hidden 留空；没出现"上一世/穿越前/真千金/系统觉醒/宿主"等字眼 → identity_origin 留空。
+  - **穿越/重生/系统觉醒题材**：剧本里出现"系统VO/宿主灵魂/已锁定载体/穿成/穿越/重生/上一世"
+    任一关键词 → identity_origin **必须填**「穿越/重生的灵魂原生身份」，
+    identity_hidden **建议填**「灵魂置换事实对其他角色保密」，
+    identity_present 则写**穿越成了谁**（剧本世界里的当前身份）。
+  - **致命错误模式**：把穿越后的角色身份（如"恶毒女配"）写进 identity_present 后，
+    把 identity_origin/hidden 都留空——这等同于完全忽略了主角是穿越者这个核心设定。
 
 输出契约（再次强调）：
 - 只输出**一个 JSON 对象**。
@@ -796,6 +836,7 @@ identity_hidden 和 identity_origin 必须留空字符串 ""，不要模仿示�
 
 输出 JSON 的字段结构：
 {{
+  "gender": "<严格三选一: male / female / unknown，禁止其他写法>",
   "identity_present": "<当前社会身份段落，60~120 字。例：「应聘女佣，作为新晋员工初入豪宅，
                        表面恭顺听话、实则与雇主家族保持距离。」>",
   "identity_hidden": "<隐藏身份/伪装身份；**剧本无明确伪装/卧底/假身份线索时严格留空字符串 ''**。
@@ -894,6 +935,68 @@ def _build_bio_prompt(
         scenes_block=scenes_block,
         few_shot_json=_BIO_FEW_SHOT_JSON_EXAMPLE,
     )
+
+
+_GENDER_ALIASES = {
+    "male": "male", "m": "male", "男": "male", "男性": "male", "男生": "male",
+    "男的": "male", "boy": "male", "man": "male", "男主": "male", "男配": "male",
+    "female": "female", "f": "female", "女": "female", "女性": "female", "女生": "female",
+    "女的": "female", "girl": "female", "woman": "female", "女主": "female", "女配": "female",
+    "unknown": "unknown", "u": "unknown", "未知": "unknown", "不详": "unknown",
+    "其他": "unknown", "其它": "unknown", "n/a": "unknown", "": "unknown",
+}
+
+
+def _normalize_gender(raw: Any) -> str:
+    """LLM 输出归一到 male / female / unknown。
+
+    LLM 自由发挥可能给 "男"/"女"/"M"/"F"/"男主" 等多种写法。
+    无法判断 / 中性 / 非二元 / 文本未提供 → "unknown"，前端不渲染 chip。
+    """
+    if raw is None:
+        return "unknown"
+    key = str(raw).strip().lower()
+    return _GENDER_ALIASES.get(key, "unknown")
+
+
+# 性别强信号关键词（中文短剧高频，比代词更可靠）
+_GENDER_KW_MALE = re.compile(
+    r"(他[^们]|先生|少爷|爷爷|老爷|哥哥|弟弟|大哥|小哥|父亲|爸爸|男(?:主|配|友|人|生)|总裁|王爷|皇帝|公子)"
+)
+_GENDER_KW_FEMALE = re.compile(
+    r"(她|小姐|姑娘|奶奶|夫人|妹妹|姐姐|大姐|母亲|妈妈|女(?:主|配|友|人|生|儿)|皇后|公主|嫂子|婆婆)"
+)
+
+
+def _infer_gender_from_scenes(
+    entity_name: str,
+    scenes_for_entity: List[Tuple[Scene, str]],
+) -> str:
+    """LLM 没给出 gender 时的本地规则兜底。
+
+    扫场景文本里**与该角色名同行**的强信号关键词（他 / 她 / 小姐 / 少爷 等），
+    频次胜出方为 gender。无法判断时返回 "unknown"。
+
+    比让 LLM 二次 refine 更快更稳：纯中文模式匹配 < 1ms，零 token 成本。
+    """
+    if not scenes_for_entity:
+        return "unknown"
+    male_count = 0
+    female_count = 0
+    for _scene, body in scenes_for_entity:
+        for line in body.splitlines():
+            if entity_name not in line:
+                continue
+            male_count += len(_GENDER_KW_MALE.findall(line))
+            female_count += len(_GENDER_KW_FEMALE.findall(line))
+    if male_count == 0 and female_count == 0:
+        return "unknown"
+    # 强势胜出（>= 2 倍）才下结论；势均力敌时保守留 unknown。
+    if male_count >= max(2, female_count * 2):
+        return "male"
+    if female_count >= max(2, male_count * 2):
+        return "female"
+    return "unknown"
 
 
 def _normalize_appearance(raw: Any) -> Dict[str, Any]:
@@ -1024,6 +1127,256 @@ def _empty_bio(entity: CharacterEntity, *, reason: str) -> CharacterBio:
     )
 
 
+# ============================================================
+# v3.7.5 (2026-05-31): Field-level Refine
+# ============================================================
+#
+# 业内实践对照（见 docs/2026-05-31-llm-schema-harness.md）：
+#   - DSPy Refine / Predict / ChainOfThought 字段重写
+#   - Anthropic Constitutional AI Self-Critique
+#   - Microsoft Guidance "select" + "regex" + "second-pass"
+#   - Instructor max_retries=2 with validators
+#
+# 我们的最小可行版本：
+#   - bio 整体抽完后，跑 _critique_bio() 找出"应填但空 / 明显敷衍"的字段
+#   - 字段级 refine 只把"目标字段 + 触发线索 + scene 片段"塞回 LLM，
+#     不重写整个 bio（cost 控在原调用 1.2~1.5 倍以内）
+#   - refine 命中时 bio.source = "llm+refine"，evidence 记录哪些字段被重写
+#
+# 适用范围：
+#   - identity_origin / identity_hidden 在穿越/重生强信号命中却留空 → refine
+#   - appearance 5 个子字段（age/height/build/facial/outfit）全空 + 该角色 ≥ 3 场 → refine
+#   - persona_surface / persona_core / weakness 极短（< 30 字） → refine
+
+_TIME_TRAVEL_SIGNALS_RE = re.compile(
+    r"(系统\s*VO|系统觉醒|已锁定载体|宿主灵魂|宿主|穿成|穿越|穿来|穿到|"
+    r"重生|上一世|上辈子|前世|再睁眼时|灵魂回到|灵魂投放|这个世界|"
+    r"我不是.{0,4}我是|另一个时空|从.{0,8}世纪)"
+)
+
+
+def _critique_bio(
+    bio: CharacterBio,
+    scenes_for_entity: List[Tuple[Scene, str]],
+) -> List[str]:
+    """返回需要 refine 的字段列表，空列表 = 质量达标无需 refine。
+
+    返回的字段名是 _refine_bio_fields 能识别的语义 group，不是 raw schema key。
+    """
+    weak_fields: List[str] = []
+
+    # 1. 穿越/重生强信号 → identity_origin 必填
+    scene_text = "\n".join(body for _scene, body in scenes_for_entity)
+    has_time_travel = bool(_TIME_TRAVEL_SIGNALS_RE.search(scene_text))
+    if has_time_travel and not bio.identity_origin.strip():
+        weak_fields.append("identity_origin_time_travel")
+
+    # 2. appearance 全空 + 场景充足 → 至少有一两个字段应有信号
+    app = bio.appearance or {}
+    appearance_empty = (
+        not (app.get("age") or "").strip()
+        and not (app.get("height") or "").strip()
+        and not (app.get("build") or "").strip()
+        and not (app.get("facial") or "").strip()
+        and not (
+            (app.get("outfit") or {}).get("material")
+            or (app.get("outfit") or {}).get("palette")
+            or (app.get("outfit") or {}).get("form")
+        )
+    )
+    if appearance_empty and len(scenes_for_entity) >= 3:
+        weak_fields.append("appearance_all_empty")
+
+    # 3. persona / weakness 极短（< 30 字）也是敷衍信号
+    if len((bio.persona_surface or "").strip()) < 30 and len(scenes_for_entity) >= 2:
+        weak_fields.append("persona_surface_too_short")
+    if len((bio.persona_core or "").strip()) < 30 and len(scenes_for_entity) >= 2:
+        weak_fields.append("persona_core_too_short")
+
+    return weak_fields
+
+
+_REFINE_TIME_TRAVEL_PROMPT = """该角色的场景片段里出现了穿越/重生/系统觉醒的强信号
+（如「系统VO」「宿主灵魂」「已锁定载体」「穿成」「重生」），但你刚才**没有填**
+identity_origin。请重新提取这两个字段——不要再返回完整小传，**只输出下面这个最小 JSON**：
+
+{{
+  "identity_origin": "<穿越者/重生者的原生身份段落，60~120 字。
+                       例：「现代社畜女白领，因系统介入意识穿越到本剧世界。」>",
+  "identity_hidden": "<可填可空。建议：「灵魂置换的事实对剧中其他角色保密」>"
+}}
+
+【该角色登场的场景片段】
+{scenes_block}
+"""
+
+
+_REFINE_APPEARANCE_PROMPT = """该角色登场了 {scene_count} 场，但你刚才**完全没有抽到外貌信息**
+（appearance 五个子字段都是空）。短剧主要角色通常**至少**能给出一些信号。
+
+【v3.7.5 重要：允许从间接信号谨慎推断】
+直接描写优先，但短剧剧本**经常缺少正式的人物外貌段**，所以请同时把**间接信号**也作为
+抽取依据。**间接信号举例**：
+  - 他人对该角色的外貌评价（"你好漂亮"、"长得真俊"→ facial 可写「长相清秀，给人惊艳感」）
+  - 角色被称呼/介绍方式（"枝枝年纪这么小还是个学生"→ age 可写「学生年龄段，约 20 岁出头」）
+  - 反复出现的动作 / 表情（"瞪大眼睛"反复出现 → facial 可补「眼睛灵动有神」）
+  - 服装相关动作（"解开扣子" → 可推断穿着上衣有扣子，至少给 outfit.form 一句话）
+  - 系统/旁白对该角色的设定描述（"穿成恶毒女配" → 可推断 outfit 走"精致华美"路线）
+
+【推断纪律】
+- 间接信号要**贴近剧本原文**，不要凭空发明（如剧本只说"漂亮"，不要补出"168cm"具体身高）
+- 推断的字段**写得保守**：可以加修饰词"应该 / 大约 / 推测"，不强行写得像 100% 事实
+- 完全没任何信号的字段（如剧本完全没提及身高）才允许留空
+- **绝大多数主要角色应该至少能抽到 1-3 个字段**——全 0 是异常
+
+请**重新扫一遍**下面的场景片段，找直接 + 间接信号，给出 **JSON 对象**：
+
+{{
+  "appearance": {{
+    "age": "<若剧本提到年龄段 OR 暗示（学生/中年/老人）则填；完全没提才空>",
+    "height": "<剧本明示身高才填，否则空——身高没人推得准>",
+    "build": "<体型；剧本提到身材 / 体格 / 偏瘦/健硕 才填，否则空>",
+    "facial": "<脸/眼/五官/肤色描写 OR 他人对外貌的具体评价 OR 反复动作里隐含的脸部信息>",
+    "signature_props": ["<反复出现≥3次的物件，无则空数组>"],
+    "outfit": {{
+      "material": "<服装材质，明示或推断>",
+      "palette": "<服装色系，明示或推断（系统设定也算线索）>",
+      "form": "<服装形制；可从设定/称谓/动作推断（如「精致华美的女配造型」）>"
+    }}
+  }}
+}}
+
+【该角色登场的场景片段】
+{scenes_block}
+"""
+
+
+_REFINE_PERSONA_PROMPT = """该角色登场了 {scene_count} 场，但你刚才给的 {field_zh} **太短**
+（不到 30 字，几乎没信息量）。请**重读**下面的场景片段，从该角色的台词、动作、
+他人对她的反应中归纳出一段 60~150 字的{field_zh}。**只输出下面这个最小 JSON**：
+
+{{
+  "{field_key}": "<60~150 字自然段>"
+}}
+
+【该角色登场的场景片段】
+{scenes_block}
+"""
+
+
+async def _refine_bio_fields(
+    bio: CharacterBio,
+    *,
+    weak_fields: List[str],
+    scenes_for_entity: List[Tuple[Scene, str]],
+    caller: LlmCaller,
+    entity_name: str,
+) -> Tuple[CharacterBio, List[str]]:
+    """对 _critique_bio 报告的弱字段做单次字段级 LLM refine。
+
+    每个 weak group 最多触发 1 次 LLM call；失败时该 group 保留原值，
+    其他 group 不受影响（独立容错）。
+    """
+    refined_fields: List[str] = []
+    if not weak_fields:
+        return bio, refined_fields
+
+    scenes_block = "\n\n---\n\n".join(
+        f"[scene_id={s.id}] [{s.scene_no}] [{s.scene_label}]\n{body}"
+        for s, body in scenes_for_entity
+    )
+
+    # 把多个 weak fields 合并成最多 3 次 LLM 调用（避免 N+1）
+    grouped: Dict[str, List[str]] = {}
+    for wf in weak_fields:
+        if wf in ("persona_surface_too_short", "persona_core_too_short"):
+            grouped.setdefault("persona", []).append(wf)
+        elif wf == "identity_origin_time_travel":
+            grouped.setdefault("identity", []).append(wf)
+        elif wf == "appearance_all_empty":
+            grouped.setdefault("appearance", []).append(wf)
+
+    for group, items in grouped.items():
+        try:
+            if group == "identity":
+                prompt = _REFINE_TIME_TRAVEL_PROMPT.format(scenes_block=scenes_block)
+            elif group == "appearance":
+                prompt = _REFINE_APPEARANCE_PROMPT.format(
+                    scene_count=len(scenes_for_entity), scenes_block=scenes_block
+                )
+            elif group == "persona":
+                target = items[0]
+                field_key = "persona_surface" if "surface" in target else "persona_core"
+                field_zh = "表面人设" if "surface" in target else "真实内核"
+                prompt = _REFINE_PERSONA_PROMPT.format(
+                    scene_count=len(scenes_for_entity),
+                    scenes_block=scenes_block,
+                    field_key=field_key,
+                    field_zh=field_zh,
+                )
+            else:
+                continue
+
+            resp = await caller.call_json(
+                prompt=prompt,
+                tier=ModelTier.PRIMARY,
+                system_message="你是中文短剧人物小传的精修助手。只输出用户要求的最小 JSON 对象，不要 markdown。",
+                temperature=0.2,
+                max_tokens=600,
+                chain_name=f"bios.refine.{group}",
+            )
+            parsed = resp.parsed if isinstance(resp.parsed, dict) else None
+            if parsed is None:
+                logger.info(
+                    "bios.refine.%s: skipped (non-dict response) entity=%s",
+                    group, entity_name,
+                )
+                continue
+
+            if group == "identity":
+                origin_new = _clamp_text(parsed.get("identity_origin"), BioFieldLimits.IDENTITY)
+                hidden_new = _clamp_text(parsed.get("identity_hidden"), BioFieldLimits.IDENTITY)
+                if origin_new.strip():
+                    bio.identity_origin = origin_new
+                    refined_fields.append("identity_origin")
+                if hidden_new.strip() and not bio.identity_hidden.strip():
+                    bio.identity_hidden = hidden_new
+                    refined_fields.append("identity_hidden")
+            elif group == "appearance":
+                app_new = _normalize_appearance(parsed.get("appearance"))
+                # 只接受 refine 后 ≥1 字段有内容；全空说明二次也没抽到 → 保留原空
+                has_signal = bool(
+                    app_new.get("age") or app_new.get("height") or app_new.get("build")
+                    or app_new.get("facial") or app_new.get("signature_props")
+                    or (app_new.get("outfit") or {}).get("material")
+                    or (app_new.get("outfit") or {}).get("palette")
+                    or (app_new.get("outfit") or {}).get("form")
+                )
+                if has_signal:
+                    bio.appearance = app_new
+                    refined_fields.append("appearance")
+            elif group == "persona":
+                target = items[0]
+                field_key = "persona_surface" if "surface" in target else "persona_core"
+                new_val = _clamp_text(
+                    parsed.get(field_key),
+                    BioFieldLimits.PERSONA_SURFACE
+                    if field_key == "persona_surface"
+                    else BioFieldLimits.PERSONA_CORE,
+                )
+                if len(new_val.strip()) >= 30:
+                    setattr(bio, field_key, new_val)
+                    refined_fields.append(field_key)
+        except ScoreLLMError as exc:
+            logger.warning(
+                "bios.refine.%s: LLM failed entity=%s err=%s",
+                group, entity_name, exc,
+            )
+            continue
+
+    return bio, refined_fields
+
+
 async def _write_one_bio(
     entity: CharacterEntity,
     *,
@@ -1063,10 +1416,20 @@ async def _write_one_bio(
 
     catchphrases = _normalize_catchphrases(parsed.get("catchphrases"), valid_scene_ids)
     notable_scenes = _normalize_notable_scenes(parsed.get("notable_scenes"), valid_scene_ids)
-    return CharacterBio(
+    # v3.7.5c：gender 先取 LLM 输出；unknown 时本地规则兜底（代词 / 称谓频次）。
+    gender_llm = _normalize_gender(parsed.get("gender"))
+    if gender_llm == "unknown":
+        gender_final = _infer_gender_from_scenes(entity.canonical_name, scenes_for_entity)
+        gender_source = "rule_fallback" if gender_final != "unknown" else "llm"
+    else:
+        gender_final = gender_llm
+        gender_source = "llm"
+
+    bio = CharacterBio(
         id=str(uuid.uuid4()),
         script_id=entity.script_id,
         character_id=entity.id,
+        gender=gender_final,
         identity_present=_clamp_text(parsed.get("identity_present"), BioFieldLimits.IDENTITY),
         identity_hidden=_clamp_text(parsed.get("identity_hidden"), BioFieldLimits.IDENTITY),
         identity_origin=_clamp_text(parsed.get("identity_origin"), BioFieldLimits.IDENTITY),
@@ -1088,8 +1451,31 @@ async def _write_one_bio(
             "scenes_used": len(scenes_for_entity),
             "catchphrases_with_scene_id": sum(1 for c in catchphrases if c.get("scene_id")),
             "notable_scenes_count": len(notable_scenes),
+            "gender_source": gender_source,
         },
     )
+
+    # v3.7.5 (2026-05-31)：字段级 refine。
+    # 业内对照：DSPy Refine / Anthropic Self-Critique / Instructor max_retries
+    # —— LLM 整体输出 schema 通过不代表语义达标，关键字段空 / 敷衍时单独二次抽。
+    weak_fields = _critique_bio(bio, scenes_for_entity)
+    if weak_fields:
+        logger.info(
+            "bios: refine triggered entity=%s weak=%s",
+            entity.canonical_name, weak_fields,
+        )
+        bio, refined = await _refine_bio_fields(
+            bio,
+            weak_fields=weak_fields,
+            scenes_for_entity=scenes_for_entity,
+            caller=caller,
+            entity_name=entity.canonical_name,
+        )
+        if refined:
+            bio.source = "llm+refine"
+            bio.evidence["refined_fields"] = refined
+            bio.evidence["weak_fields_detected"] = weak_fields
+    return bio
 
 
 async def write_bios_concurrent(

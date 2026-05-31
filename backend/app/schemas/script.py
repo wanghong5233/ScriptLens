@@ -549,6 +549,9 @@ class ReportCharacterBio(BaseModel):
 
     id: str
     character_id: str
+    # v3.7.5c (2026-05-31)：性别字段。"male" / "female" / "unknown"。
+    # 抽取来源：LLM 主路径 + 本地代词频次规则兜底。"unknown" 时前端不渲染 chip。
+    gender: Literal["male", "female", "unknown"] = "unknown"
     identity_present: str = ""
     identity_hidden: str = ""
     identity_origin: str = ""
