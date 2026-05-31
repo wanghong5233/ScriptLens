@@ -65,11 +65,6 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
         "基于全剧聚合的 beat / reward / 人物 / 合规结论，生成 logline + synopsis + 3 优 / 3 劣 —— 不再读单场原文",
     ),
     (
-        "scoring_6d",
-        "六维规则评分",
-        "self-contained 规则评分：story / character / concept / emotion / pacing / dialogue 各自从 chain 输出 + scenes 表推导分数，不依赖标签流水线",
-    ),
-    (
         "scoring_v4",
         "v4 投资决策评分",
         "HOOK / ARCHETYPE / PAYOFF / MONETIZATION / PRODUCIBILITY 五维 + COMPLIANCE 独立 gate，从 chain 输出推导 verdict（qualified / needs_polish / not_recommended）。失败不阻塞报告，仅记录到 chain_status",
@@ -77,7 +72,7 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
     (
         "building_payload",
         "组装报告 payload",
-        "把 6 维评分、v4 verdict、合规结果、叙事层数据、看点 / 证据锚点拼装成前端需要的 report payload 结构",
+        "把 v4 verdict / 5 维评分、合规结果、叙事层数据、看点 / 证据锚点拼装成前端需要的 report payload 结构",
     ),
     (
         "persisting",

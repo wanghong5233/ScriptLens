@@ -1,18 +1,20 @@
-"""Script scoring report pipeline (6 dimensions, self-contained, release/v1-mvp).
+"""Script scoring report pipeline — Wave C-3a (v4 投资决策评分主链路).
 
-release/v1-mvp 评分流水线说明：
+报告生成流程（self-contained，零 tag_pipeline 依赖）：
+  1. 叙事层 5 chain（reward / coverage / beat / character_graph / motivation）
+  2. 合规扫描（compliance_scorer.screen_compliance，独立 gate）
+  3. v4 投资决策评分（service.scoring.score_script —
+     hook / archetype / payoff / monetization / producibility 五维 + compliance 一票否决）
+  4. 报告 payload 组装（v3 兼容字段 decision/overall_score 从 v4 verdict 派生）
+  5. 落库 reports + scoring_runs
 
-- 评分**完全独立于 tag_pipeline**（整剧抽情节打标签方向已废弃）。报告生成只跑：
-    1. 叙事层 5 chain（reward / coverage / beat / character_graph / motivation）
-    2. 6 维规则评分（dimension_scorer.score_<dim>，story/character/concept/
-       emotion/pacing/dialogue）
-    3. 合规扫描（compliance_scorer.screen_compliance，独立维度）
-- Batch3 的 rubric / signal_catalog / score_registry / tag_pipeline /
-  decision_aggregator / dimension_aggregator / improvement_action_generator /
-  pacing_aggregator / evaluation_chain / bundle_extractor / plot_unit_segmenter /
-  character_entity_resolver / relationship_candidate_generator /
-  tag_alignment_analyzer 等模块进入 dead-code 隔离区（顶部 docstring 已标注），
-  下次 cleanup PR 统一清理。
+v3 6 维规则评分（service/script_tools/dimension_scorer.py）已于 Wave C-3a 删除，
+service.scoring/ 模块成为唯一评分入口。详见 docs/2026-05-31-投资决策评分框架-v4.md。
+
+历史 cleanup 残留（这些模块已废弃但 grep 仍可见）：
+- score_registry / tag_pipeline / decision_aggregator / dimension_aggregator /
+  improvement_action_generator / bundle_extractor / plot_unit_segmenter / 等模块
+  进入 dead-code 隔离区，下次 cleanup PR 统一清理。
 - payload 契约：drama_tags / plot_units / characters / character_relationships
   字段保留 key，但因 tag_pipeline 不再运行、对应表无数据，查询自然返回 []，
   前端 4 个 tab 走空态。
@@ -52,15 +54,6 @@ from service.script_tools.compliance_scorer import ComplianceResult, screen_comp
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
 from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.scene_repo import get_all_scenes
-from service.script_tools.dimension_scorer import (
-    ScoreOutput,
-    score_character,
-    score_concept,
-    score_dialogue,
-    score_emotion,
-    score_pacing,
-    score_story,
-)
 from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
 from service.script_tools.motivation_chain import MotivationResult, score_motivation
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
@@ -69,50 +62,10 @@ from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
 
-# release/v1-mvp 6 维评分版本号（不再走 rubric registry）
-_SCORE_VER = "v1-mvp-6d"
+# Wave C-3a (2026-05-31)：v3 6 维评分常量已删除，正式切到 v4 投资决策 5 维。
+# 详见 docs/2026-05-31-投资决策评分框架-v4.md 与 service/scoring/ 模块。
+_SCORE_VER = "v4-cn-2026-05-31"
 _TAG_SET_VER_NONE = "none"
-
-# 6 维默认权重（与 rubric_sets/v3.yaml.base_weight 保持一致；不引 yaml 避免拉回 rubric 依赖）
-_DIM_BASE_WEIGHT: dict[str, float] = {
-    "story": 0.20,
-    "character": 0.20,
-    "concept": 0.15,
-    "emotion": 0.20,
-    "pacing": 0.15,
-    "dialogue": 0.10,
-}
-_DIM_ORDER: tuple[str, ...] = ("story", "character", "concept", "emotion", "pacing", "dialogue")
-_DEFAULT_TIER_CUTS: dict[str, float] = {"p25": 4.0, "p50": 6.0, "p75": 8.0}
-
-# schemas.script.TierName = Literal["excellent","good","weak","poor","insufficient"]
-# 4 档分位与 service.script_tools.percentile_tier.resolve_tier 一致：
-#   score >= p75=8 → excellent；>= p50=6 → good；>= p25=4 → weak；其它 → poor；None → insufficient。
-# 历史的 "above / average / below" 字面量是错的，会让 ReportPayload.model_validate 直接 500。
-def _score_to_tier(score: Optional[int | float]) -> str:
-    if score is None:
-        return "insufficient"
-    s = float(score)
-    p25 = _DEFAULT_TIER_CUTS["p25"]
-    p50 = _DEFAULT_TIER_CUTS["p50"]
-    p75 = _DEFAULT_TIER_CUTS["p75"]
-    if s >= p75:
-        return "excellent"
-    if s >= p50:
-        return "good"
-    if s >= p25:
-        return "weak"
-    return "poor"
-
-
-# ScoreOutput.level → 前端 confidence 文案（schemas.script.ConfidenceName: high/medium/low）
-_LEVEL_TO_CONFIDENCE: dict[Optional[str], str] = {
-    "high": "high",
-    "medium": "medium",
-    "low": "medium",
-    None: "low",
-}
-_DIM_CONFIDENCE_FLOAT = {"high": 0.85, "medium": 0.6, "low": 0.35}
 
 
 def _is_skippable_ingest_error(exc: Exception) -> bool:
@@ -213,41 +166,6 @@ class _ScriptMeta:
     title: str
     total_episodes: int
     total_scenes: int
-
-
-def _safe_tier_cuts(cuts: dict[str, Any] | None) -> dict[str, float]:
-    payload = cuts if isinstance(cuts, dict) else {}
-    try:
-        p25 = float(payload.get("p25", 4.0))
-    except (TypeError, ValueError):
-        p25 = 4.0
-    try:
-        p50 = float(payload.get("p50", 6.0))
-    except (TypeError, ValueError):
-        p50 = 6.0
-    try:
-        p75 = float(payload.get("p75", 8.0))
-    except (TypeError, ValueError):
-        p75 = 8.0
-    return {"p25": p25, "p50": p50, "p75": p75}
-
-
-def _compute_overall_cuts(scorecard: list[dict[str, Any]]) -> dict[str, float]:
-    if not scorecard:
-        return {"p25": 4.0, "p50": 6.0, "p75": 8.0}
-    p25_values: list[float] = []
-    p50_values: list[float] = []
-    p75_values: list[float] = []
-    for item in scorecard:
-        cuts = _safe_tier_cuts(item.get("tier_cuts"))
-        p25_values.append(cuts["p25"])
-        p50_values.append(cuts["p50"])
-        p75_values.append(cuts["p75"])
-    return {
-        "p25": round(sum(p25_values) / len(p25_values), 4),
-        "p50": round(sum(p50_values) / len(p50_values), 4),
-        "p75": round(sum(p75_values) / len(p75_values), 4),
-    }
 
 
 # W1.3 (2026-05-31)：全链路 provenance 透传到 report.meta.chain_status。
@@ -796,52 +714,6 @@ def _load_character_relationships(*, script_id: str, engine: Engine) -> list[dic
     ]
 
 
-def _score_one(
-    *,
-    dimension: str,
-    script_id: str,
-    meta: "_ScriptMeta",
-    reward_events: list[RewardEvent],
-    coverage_card: Optional[CoverageCard],
-    beat_sheet: Optional[BeatSheet],
-    character_graph: Optional[CharacterGraph],
-    motivation_result: Optional[MotivationResult],
-    engine: Engine,
-) -> ScoreOutput:
-    """6 维 dispatcher：把 chain 输出按维度分发给 dimension_scorer 函数。"""
-    if dimension == "story":
-        return score_story(
-            beat_sheet=beat_sheet,
-            reward_events=reward_events,
-            total_episodes=meta.total_episodes,
-        )
-    if dimension == "character":
-        return score_character(
-            motivation_result=motivation_result,
-            character_graph=character_graph,
-        )
-    if dimension == "concept":
-        return score_concept(
-            coverage_card=coverage_card,
-            script_id=script_id,
-            engine=engine,
-        )
-    if dimension == "emotion":
-        return score_emotion(
-            reward_events=reward_events,
-            total_episodes=meta.total_episodes,
-        )
-    if dimension == "pacing":
-        return score_pacing(
-            script_id=script_id,
-            reward_events=reward_events,
-            engine=engine,
-        )
-    if dimension == "dialogue":
-        return score_dialogue(script_id=script_id, engine=engine)
-    raise ValueError(f"unsupported dimension={dimension!r}")
-
-
 # ============================================================
 # v4 投资决策评分 — 单维复评白名单
 # ============================================================
@@ -1011,15 +883,15 @@ async def generate_report(
     caller: Optional[LlmCaller] = None,
     engine: Engine = default_engine,
 ) -> dict[str, Any]:
-    """release/v1-mvp 报告生成流水线（self-contained，零 tag_pipeline 依赖）。
+    """Wave C-3a 报告生成流水线（self-contained，零 tag_pipeline 依赖，v4 投资决策主链路）。
 
     阶段：
       1. loading_meta              —— 读取剧本元数据
       2. extracting_narrative      —— 并行跑 reward → coverage/beat/graph/motivation 5 chain
-      3. scoring_6d                —— 6 维规则评分（dimension_scorer）
-      4. compliance                —— 独立合规扫描
-      5. building_payload          —— 组装 report payload
-      6. persisting                —— 落库 reports / scoring_runs / script_scores
+      3. compliance                —— 独立合规扫描（独立 gate，high_risk 一票否决）
+      4. scoring_v4                —— v4 投资决策评分（5 维 + compliance gate）
+      5. building_payload          —— 组装 report payload（v3 字段从 v4 verdict 兼容映射）
+      6. persisting                —— 落库 reports / scoring_runs
 
     W1.7 (2026-05-31)：per-script DB advisory lock。
     阻止同一 script_id 被并发分析（reanalyze 重入、双开 worker、用户连点重新诊断）。
@@ -1330,34 +1202,10 @@ async def generate_report(
             detail=f"速览{'已生成' if coverage_card else '降级'}",
         )
 
-        progress_tracker.update_stage(
-            script_id, "scoring_6d", "running", detail="6 维规则评分（self-contained）"
-        )
-        dim_outputs: dict[str, ScoreOutput] = {
-            dim: _score_one(
-                dimension=dim,
-            script_id=script_id,
-                meta=meta,
-            reward_events=reward_events,
-                coverage_card=coverage_card,
-                beat_sheet=beat_sheet,
-            character_graph=character_graph,
-                motivation_result=motivation_result,
-            engine=engine,
-        )
-            for dim in _DIM_ORDER
-        }
-        scored_count = sum(1 for o in dim_outputs.values() if o.score is not None)
-        progress_tracker.update_stage(
-            script_id,
-            "scoring_6d",
-            "done",
-            detail=f"dimensions={len(dim_outputs)} scored={scored_count}",
-        )
-
-        # Wave C-1：v4 投资决策评分与 v3 6 维**并行**写入 payload。失败不阻塞 v3 报告，
-        # 失败原因落 chain_status['scoring_v4']。Wave D 前端切到 v4 字段渲染，Wave C-3
-        # 删除旧 scorecard / decision。
+        # Wave C-3a (2026-05-31)：v3 6 维评分（_score_one + dimension_scorer）已删除；
+        # v4 投资决策评分成为主链路，失败回退到 chain_status['scoring_v4']。
+        # v3 字段 ReportPayload.{scorecard, decision, overall_score} 暂时由 v4 verdict
+        # 兼容映射填充，C-3b 才正式删字段。
         progress_tracker.update_stage(
             script_id,
             "scoring_v4",
@@ -1398,7 +1246,6 @@ async def generate_report(
         # W1.6: run_id 已在流水线入口 INSERT (status='running')，此处复用。
         report_payload = _build_report_payload(
             meta=meta,
-            dim_outputs=dim_outputs,
             compliance_payload=compliance.to_dict(),
             coverage_card=coverage_card,
             beat_sheet=beat_sheet,
@@ -1416,12 +1263,11 @@ async def generate_report(
             script_id,
             "persisting",
             "running",
-            detail="写入 reports / scoring_runs / script_scores",
+            detail="写入 reports / scoring_runs",
         )
         _persist_report(
             script_id=script_id,
             run_id=run_id,
-            dim_outputs=dim_outputs,
             report_payload=report_payload,
             engine=engine,
         )
@@ -1460,103 +1306,50 @@ async def generate_report(
             _release_script_lock(script_id, engine=engine)
 
 
-def _scorecard_from_outputs(dim_outputs: dict[str, ScoreOutput]) -> list[dict[str, Any]]:
-    """6 维 ScoreOutput → scorecard payload。
+# ============================================================
+# v4 → v3 decision/overall_score 兼容映射（Wave C-3a 中间态）
+# ============================================================
+# v3 字段 ReportPayload.{decision, overall_score, scorecard} 还保留在 schema 里，
+# 前端 overview tab + 老版 evaluation tab 仍在消费。Wave C-3c 前端切到 verdict /
+# investment_score 后，Wave C-3b 才正式从 schema 移除这三个字段。
+#
+# 这段映射的存在期 = Wave C-3a → C-3c 之间，**不要扩展**它，不要为它加新逻辑。
 
-    与 Batch3 时代 scorecard 字段保持兼容（前端 zero-change）；信号/聚合相关字段
-    （signal_refs / top_signals）置空，因为 release/v1-mvp 走规则评分不分信号。
-    """
-    scorecard: list[dict[str, Any]] = []
-    for dim in _DIM_ORDER:
-        out = dim_outputs.get(dim)
-        if out is None:
-            scorecard.append(
-                {
-                    "dimension": dim,
-                    "score": None,
-                    "tier": "insufficient",
-                    "confidence": "low",
-                    "coverage_ratio": 0.0,
-                    "signal_refs": [],
-                    "top_signals": [],
-                    "tier_cuts": dict(_DEFAULT_TIER_CUTS),
-                    "reason": "未参与评分",
-                    "evidence_ref_ids": [],
-                }
-            )
-            continue
-        scorecard.append(
-            {
-                "dimension": dim,
-                "score": out.score,
-                "tier": _score_to_tier(out.score),
-                "confidence": _LEVEL_TO_CONFIDENCE.get(out.level, "low"),
-                "coverage_ratio": 1.0 if out.score is not None else 0.0,
-                "signal_refs": [],
-                "top_signals": [],
-                "tier_cuts": dict(_DEFAULT_TIER_CUTS),
-                "reason": out.reason,
-                "evidence_ref_ids": list(out.evidence_ref_ids),
-            }
-        )
-    return scorecard
+_V4_VERDICT_TO_V3_DECISION_LABEL: dict[str, str] = {
+    "qualified": "recommend_continue",
+    "needs_polish": "cautious_continue",
+    "not_recommended": "not_recommended",
+}
 
 
-def _compute_overall_score(dim_outputs: dict[str, ScoreOutput]) -> Optional[float]:
-    """对有分维度按 _DIM_BASE_WEIGHT 加权（仅有分项参与归一化）。"""
-    total_weight = 0.0
-    weighted_sum = 0.0
-    for dim in _DIM_ORDER:
-        out = dim_outputs.get(dim)
-        if out is None or out.score is None:
-            continue
-        weight = _DIM_BASE_WEIGHT.get(dim, 0.0)
-        total_weight += weight
-        weighted_sum += float(out.score) * weight
-    if total_weight <= 0:
-        return None
-    return round(weighted_sum / total_weight, 2)
-
-
-def _derive_decision(
-    overall_score: Optional[float],
+def _derive_v3_decision_from_v4_verdict(
+    v4_verdict: Optional[dict[str, Any]],
     compliance_payload: dict[str, Any],
 ) -> tuple[str, str, str]:
-    """简单规则决策（release/v1-mvp）：基于 overall_score + 合规级别。
+    """v4 verdict → v3 (label, confidence, one_sentence_reason)。
 
-    返回 (label, confidence, one_sentence_reason)。
-    label ∈ {recommend_continue, cautious_continue, not_recommended}。
+    合规一票否决优先：compliance.tier == 'high_risk' → not_recommended。
+    v4 评分缺失（v4 失败 / 老报告无 verdict） → cautious_continue + 提示。
     """
-    compliance_tier = str(compliance_payload.get("tier") or "").strip()
-    if compliance_tier == "high_risk":
+    if str(compliance_payload.get("tier") or "").strip() == "high_risk":
         return (
             "not_recommended",
             "high",
             "合规扫描发现高风险红线命中，建议先做内容整改。",
         )
-    if overall_score is None:
+    if not v4_verdict:
         return (
             "cautious_continue",
             "low",
-            "评分维度证据不足，建议人工复核后再定。",
+            "v4 投资决策评分未完成，建议人工复核后再定。",
         )
-    if overall_score >= 6.5:
-        return (
-            "recommend_continue",
-            "high",
-            f"6 维加权 {overall_score:.1f}/10，整体表现良好，建议推进。",
-        )
-    if overall_score >= 4.5:
-        return (
-            "cautious_continue",
-            "medium",
-            f"6 维加权 {overall_score:.1f}/10，存在明显短板，建议针对弱项改写后复评。",
-        )
-    return (
-        "not_recommended",
-        "medium",
-        f"6 维加权 {overall_score:.1f}/10，多维度低分，整体故事质量需要重写。",
-    )
+    raw_label = str(v4_verdict.get("label") or "not_recommended").strip()
+    label = _V4_VERDICT_TO_V3_DECISION_LABEL.get(raw_label, "not_recommended")
+    reason = str(v4_verdict.get("reason") or "").strip() or "v4 投资决策评分已生成。"
+    confidence = str(v4_verdict.get("confidence") or "medium").strip()
+    if confidence not in ("high", "medium", "low"):
+        confidence = "medium"
+    return (label, confidence, reason)
 
 
 async def _run_scoring_v4(
@@ -1630,7 +1423,6 @@ async def _run_scoring_v4(
 def _build_report_payload(
     *,
     meta: _ScriptMeta,
-    dim_outputs: dict[str, ScoreOutput],
     compliance_payload: dict[str, Any],
     engine: Engine,
     coverage_card: Optional[CoverageCard] = None,
@@ -1642,32 +1434,27 @@ def _build_report_payload(
     chain_status: Optional[_ChainStatusCollector] = None,
     v4_report: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """release/v1-mvp 报告 payload 组装。
+    """Wave C-3a 报告 payload 组装。
 
-    payload 字段契约（与前端 4 个 tab + scorecard + decision 保持兼容）：
-      - scorecard / evaluation.dimensions  : 6 维 from dim_outputs
-      - decision                            : 规则决策（基于 overall_score + compliance）
-      - overall_score                       : 6 维加权和（仅有分项参与归一）
+    主链路：v4 投资决策评分（verdict / investment_score / evaluation_v4 / top_improvements）。
+
+    v3 兼容字段（中间态，C-3b 才删 schema 字段）：
+      - decision         : 从 v4 verdict 派生（_derive_v3_decision_from_v4_verdict）
+      - overall_score    : = investment_score
+      - scorecard        : 空列表（前端 evaluation tab Wave D 已切到 v4 渲染）
+      - evaluation.dimensions: 空列表
+
+    其它字段不变：
       - compliance / risk_flags             : 独立合规扫描
-      - drama_tags / plot_units /
-        characters / character_relationships: tag_pipeline 已废弃 → 表为空 → 自然为 []
+      - drama_tags / plot_units / characters
+        / character_relationships           : 透传 ingest 期写入的标签
       - coverage_card / beat_sheet /
-        character_graph                     : 5 chain 输出
-      - reward / evidence_refs / highlights /
-        must_read_scene_ids                 : 看点 + 证据锚点
-      - pacing_curve                        : v4 emotion-arc（reward + beat_sheet + scenes，
-                                              零 plot_unit 依赖）。详见
-                                              docs/2026-05-30-pacing-curve-v4.md
-      - evaluation.rewrite_seeds            : v1-mvp 暂留空 []（Batch3 actions 体系
-                                              已废弃，rewrite 由 doc-studio agent 接管）
+        character_graph                     : chain 输出
+      - reward_events / evidence_refs /
+        highlights / must_read_scene_ids    : 看点 + 证据锚点
+      - pacing_curve                        : v4 emotion-arc
+      - meta.chain_status                   : 报告级 provenance（W1.3）
     """
-    scorecard = _scorecard_from_outputs(dim_outputs)
-    overall_score = _compute_overall_score(dim_outputs)
-    decision_label, decision_confidence, decision_reason = _derive_decision(
-        overall_score, compliance_payload
-    )
-    tier_cuts_used = {item["dimension"]: dict(item.get("tier_cuts") or {}) for item in scorecard}
-
     reward_events = reward_events or []
     compliance_hits = compliance_payload.get("hits") or []
     must_read_scene_ids = _select_beat_anchor_scenes(beat_sheet, top_k=3)
@@ -1677,80 +1464,63 @@ def _build_report_payload(
         reward_events, beat_sheet, evidence_refs_payload, scenes_by_id=scenes_by_id
     )
 
+    v4_verdict = (v4_report or {}).get("verdict")
+    v4_overall_score = (v4_verdict or {}).get("overall_score") if v4_verdict else None
+    decision_label, decision_confidence, decision_reason = _derive_v3_decision_from_v4_verdict(
+        v4_verdict, compliance_payload
+    )
+
     return {
         "script_id": meta.script_id,
         "title": meta.title,
+        # v3 兼容（C-3b 删字段）：decision / overall_score / scorecard / evaluation
         "decision": {
             "label": decision_label,
             "confidence": decision_confidence,
             "one_sentence_reason": decision_reason,
             "summary": decision_reason,
             "decision_inputs": {
-                "tier_cuts_used": tier_cuts_used,
-                "overall_cuts": _compute_overall_cuts(scorecard),
                 "raw_decision": decision_label,
                 "score_ver": _SCORE_VER,
+                "v4_verdict_label": (v4_verdict or {}).get("label") if v4_verdict else None,
             },
         },
         "decision_reason": decision_reason,
-        "overall_score": overall_score,
+        "overall_score": v4_overall_score,
         "summary": decision_reason,
-        "scorecard": scorecard,
+        "scorecard": [],
+        "evaluation": {"dimensions": [], "rewrite_seeds": []},
+        # 主链路 v4 字段（Wave D 前端从这里渲染 verdict / 5 维 / improvements）
+        "verdict": v4_verdict,
+        "investment_score": v4_overall_score,
+        "evaluation_v4": v4_report,
+        "top_improvements": (v4_report or {}).get("top_improvements") or [],
+        # 合规独立 gate
         "compliance": compliance_payload,
-        # drama_tags / plot_units 仍走 tag_pipeline（已废弃，表为空 → []）
+        "risk_flags": risk_flags,
+        # 标签层 / 人物层（与 v4 评分无关，透传）
         "drama_tags": _load_drama_tags(script_id=meta.script_id, engine=engine),
         "plot_units": _load_plot_units(script_id=meta.script_id, engine=engine),
-        # characters / character_relationships v1-mvp 由 character_pipeline 写入；
-        # 直接从表读出，与 character_graph nodes 共享 UUID id-space。
         "characters": _load_characters(script_id=meta.script_id, engine=engine),
         "character_relationships": _load_character_relationships(
             script_id=meta.script_id, engine=engine
         ),
         "character_bios": _bios_to_payload(character_bios),
+        # 看点 / 证据锚点
         "must_read_scene_ids": must_read_scene_ids,
         "evidence_refs": evidence_refs_payload,
         "highlights": highlights_payload,
+        # chain 输出（用于前端故事 / 人物 / 节奏 tab）
         "coverage_card": asdict(coverage_card) if coverage_card is not None else None,
         "beat_sheet": beat_sheet.to_dict() if beat_sheet is not None else None,
         "character_graph": character_graph.to_dict() if character_graph is not None else None,
-        "risk_flags": risk_flags,
         "pacing_curve": aggregate_pacing_curve(
             script_id=meta.script_id,
             reward_events=list(reward_events or []),
             beat_sheet=beat_sheet,
             engine=engine,
         ),
-        "evaluation": {
-            "dimensions": [
-                {
-                    "key": item["dimension"],
-                    "label": item["dimension"],
-                    "score": item["score"],
-                    "tier": item["tier"],
-                    "confidence": item["confidence"],
-                    "coverage_ratio": item["coverage_ratio"],
-                    "reason": item["reason"],
-                    "signal_refs": item["signal_refs"],
-                    "evidence_ref_ids": item["evidence_ref_ids"],
-                    "top_signals": item["top_signals"],
-                    "tier_cuts": item["tier_cuts"],
-                }
-                for item in scorecard
-            ],
-            "rewrite_seeds": [],
-        },
-        # Wave C-1 (2026-05-31)：v4 投资决策评分新字段，与上面 v3 6 维并行写入。
-        # v4 失败时四个字段全为 None / []，前端只渲染 v3 旧字段保持向后兼容。
-        "verdict": (v4_report or {}).get("verdict"),
-        "investment_score": (
-            ((v4_report or {}).get("verdict") or {}).get("overall_score")
-        ),
-        "evaluation_v4": v4_report,
-        "top_improvements": (v4_report or {}).get("top_improvements") or [],
-        # W1.3 (2026-05-31)：报告级 provenance。每个 chain 的 status/source/reasons
-        # 都在这里，前端用来渲染降级提示条；BI 用来计算 fallback rate。
-        # overall_status = aggregate(各 chain status)，前端只需看这一个字段决定是否
-        # 显示「报告含降级内容」横幅。
+        # 报告级 provenance（W1.3）
         "meta": {
             "chain_status": dict(chain_status or {}),
             "overall_status": _aggregate_chain_status(chain_status or {}),
@@ -1781,20 +1551,19 @@ def _persist_report(
     *,
     script_id: str,
     run_id: str,
-    dim_outputs: dict[str, ScoreOutput],
     report_payload: dict[str, Any],
     engine: Engine,
 ) -> None:
-    """release/v1-mvp 持久化：reports + scoring_runs + script_scores（6 维）。
+    """Wave C-3a 持久化：reports + scoring_runs（**不再写 script_scores 6 维行**）。
 
-    rubric/signal/genre/actions 等 Batch3 体系字段填占位值，保持表结构兼容。
-    scoring_improvement_actions 表 release/v1-mvp 不写入（actions 体系已废弃）。
+    script_scores 表 release/v1-mvp 已不被前端 / agent 消费，Wave C-3b 会随
+    alembic 一起清理；Wave C-3a 先停止写入避免持续累积 v3 残留数据。
+
+    scoring_runs.{verdict, investment_score} 由 Wave C-1 引入；C-3a 起 score_ver
+    切到 v4-cn 版本号（_SCORE_VER），quality_flags 中 v3 残留字段清理。
     """
     now = datetime.utcnow()
     report_id = str(uuid.uuid4())
-    overall_score = report_payload.get("overall_score")
-    # Wave C-1 (2026-05-31)：v4 verdict / investment_score 写入 scoring_runs 三新列。
-    # v4 评分失败时 verdict 字段为 None，column 写 NULL，前端按字段缺失走 v3 渲染。
     v4_verdict = report_payload.get("verdict") or {}
     v4_verdict_label: Optional[str] = v4_verdict.get("label") if v4_verdict else None
     v4_investment_score = report_payload.get("investment_score")
@@ -1809,11 +1578,9 @@ def _persist_report(
             sort_keys=True,
         ).encode("utf-8")
     ).hexdigest()
+    # Wave C-3a：6 维 insufficient_dimensions 字段已无意义（5 维 dealbreaker 走 v4 verdict）。
+    # 仍保留 quality_flags 字段以便 BI 跟踪 v4 verdict 历史。
     quality_flags = {
-        "insufficient_dimensions": [
-            dim for dim, out in dim_outputs.items() if out.score is None
-        ],
-        "overall_score": overall_score,
         "v4_verdict": v4_verdict_label,
         "v4_investment_score": v4_investment_score,
     }
@@ -1871,62 +1638,8 @@ def _persist_report(
             },
         )
 
-        score_rows = []
-        for dim, out in dim_outputs.items():
-            score_rows.append(
-                {
-            "id": str(uuid.uuid4()),
-                    "script_id": script_id,
-                    "run_id": run_id,
-                    "dimension": dim,
-                    "primary_dimension": dim,
-                    "score": float(out.score if out.score is not None else 0.0),
-                    "percentile": None,
-                    "tier": _score_to_tier(out.score),
-                    "confidence": _DIM_CONFIDENCE_FLOAT.get(
-                        _LEVEL_TO_CONFIDENCE.get(out.level, "low"), 0.35
-                    ),
-                    "coverage_ratio": 1.0 if out.score is not None else 0.0,
-                    "signals": json.dumps({"reason": out.reason}, ensure_ascii=False),
-                    "weights": json.dumps(
-                        {"base_weight": _DIM_BASE_WEIGHT.get(dim, 0.0)}, ensure_ascii=False
-                    ),
-                    "tag_set_ver": _TAG_SET_VER_NONE,
-                    "score_ver": _SCORE_VER,
-                    "model_ver": "rule-only",
-                }
-            )
-        if score_rows:
-            conn.execute(
-                text(
-                    """
-                    INSERT INTO scriptlens.script_scores (
-                        id, script_id, run_id, dimension, primary_dimension, score, percentile,
-                        tier, confidence, coverage_ratio, signals, weights,
-                        tag_set_ver, score_ver, model_ver, created_at
-                    )
-                    VALUES (
-                        :id, :script_id, :run_id, :dimension, :primary_dimension, :score, :percentile,
-                        :tier, :confidence, :coverage_ratio, CAST(:signals AS jsonb), CAST(:weights AS jsonb),
-                        :tag_set_ver, :score_ver, :model_ver, NOW()
-                    )
-                    ON CONFLICT (script_id, dimension, tag_set_ver, score_ver)
-                    DO UPDATE SET
-                        run_id = EXCLUDED.run_id,
-                        primary_dimension = EXCLUDED.primary_dimension,
-                        score = EXCLUDED.score,
-                        percentile = EXCLUDED.percentile,
-                        tier = EXCLUDED.tier,
-                        confidence = EXCLUDED.confidence,
-                        coverage_ratio = EXCLUDED.coverage_ratio,
-                        signals = EXCLUDED.signals,
-                        weights = EXCLUDED.weights,
-                        model_ver = EXCLUDED.model_ver,
-                        created_at = NOW()
-                    """
-                ),
-                score_rows,
-            )
+        # Wave C-3a：script_scores 6 维行已停止写入（v4 5 维存在 reports.evaluation_v4 + scoring_runs）。
+        # Wave C-3b 会删表，此处不再 INSERT 残留 6 维记录。
 
         decision_payload = (
             report_payload.get("decision", {}).get("decision_inputs") or {}
