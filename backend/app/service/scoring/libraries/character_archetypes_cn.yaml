@@ -1,0 +1,195 @@
+# ============================================================
+# 中文短剧角色原型库 v4
+# ============================================================
+# 用于 character_archetype_match signal：把前 N 角色 vs 这个库匹配。
+# 业内对照：抖音红果选品 SOP §4，ReelShort cast archetype 模板。
+# ============================================================
+
+version: "v4-cn-2026-05-31"
+
+archetypes:
+  - id: bazong
+    name: "霸总"
+    aliases: ["霸道总裁", "腹黑总裁", "京圈太子爷"]
+    signature_keywords:
+      - "总裁"
+      - "霸道"
+      - "腹黑"
+      - "矜贵"
+      - "冷酷"
+      - "京圈"
+      - "太子"
+      - "公子"
+      - "董事长"
+      - "霸气"
+    typical_role: "male_lead"
+
+  - id: edu_nupei
+    name: "恶毒女配"
+    aliases: ["反派女配", "蛇蝎心肠"]
+    signature_keywords:
+      - "恶毒"
+      - "心机"
+      - "嫉妒"
+      - "白莲花"
+      - "蛇蝎"
+      - "陷害"
+      - "阴险"
+      - "毒辣"
+      - "踩"
+    typical_role: "antagonist"
+
+  - id: huidu_niangzi
+    name: "灰姑娘"
+    aliases: ["小白花", "白月光", "傻白甜"]
+    signature_keywords:
+      - "善良"
+      - "天真"
+      - "单纯"
+      - "可怜"
+      - "纯洁"
+      - "无辜"
+      - "委屈"
+      - "柔弱"
+      - "倔强"
+    typical_role: "female_lead"
+
+  - id: lvcha
+    name: "绿茶"
+    aliases: ["绿茶婊", "假白莲", "表面纯良"]
+    signature_keywords:
+      - "绿茶"
+      - "假装"
+      - "装可怜"
+      - "心机"
+      - "暗地"
+      - "表面"
+      - "白莲花"
+      - "勾引"
+    typical_role: "antagonist"
+
+  - id: zhubo_xueba
+    name: "学霸校草"
+    aliases: ["学神", "清冷学长", "阴郁学霸"]
+    signature_keywords:
+      - "学霸"
+      - "学神"
+      - "校草"
+      - "学长"
+      - "清冷"
+      - "阴郁"
+      - "高冷"
+      - "禁欲"
+    typical_role: "male_lead_alt"
+
+  - id: zhumagain_zhuma
+    name: "傲娇竹马"
+    aliases: ["青梅竹马", "傲娇美男", "贱兮兮竹马"]
+    signature_keywords:
+      - "竹马"
+      - "傲娇"
+      - "青梅"
+      - "从小"
+      - "一起长大"
+      - "孔雀"
+      - "幼稚"
+      - "占有欲"
+    typical_role: "male_lead_alt"
+
+  - id: dalian_fanpai
+    name: "打脸反派"
+    aliases: ["逆袭反派", "扫地僧反派"]
+    signature_keywords:
+      - "瞧不起"
+      - "低估"
+      - "打脸"
+      - "嘲笑"
+      - "看不起"
+      - "笑话"
+      - "啪啪"
+      - "实力"
+      - "反差"
+    typical_role: "supporting"
+
+  - id: meeng_xiao
+    name: "团宠萌娃"
+    aliases: ["可爱萌宝", "小天使"]
+    signature_keywords:
+      - "萌"
+      - "宝宝"
+      - "小天使"
+      - "孩子"
+      - "可爱"
+      - "团宠"
+      - "贴心"
+      - "护娃"
+      - "宠"
+    typical_role: "child"
+
+  - id: gufengtaiZi
+    name: "古风太子 / 王爷"
+    aliases: ["王爷", "皇子", "公主", "贵妃"]
+    signature_keywords:
+      - "王爷"
+      - "皇子"
+      - "皇上"
+      - "公主"
+      - "贵妃"
+      - "嫔妃"
+      - "驸马"
+      - "皇兄"
+    typical_role: "male_lead_alt"
+
+  - id: jiyou_baojie
+    name: "闺蜜挚友"
+    aliases: ["塑料姐妹", "真闺蜜", "假姐妹"]
+    signature_keywords:
+      - "闺蜜"
+      - "姐妹"
+      - "知心"
+      - "陪伴"
+      - "支持"
+      - "出卖"
+      - "背刺"
+    typical_role: "supporting"
+
+  - id: poshao_jiaren
+    name: "婆婆 / 长辈"
+    aliases: ["恶毒婆婆", "刁蛮母亲"]
+    signature_keywords:
+      - "婆婆"
+      - "母亲"
+      - "婆家"
+      - "长辈"
+      - "管教"
+      - "嘲讽"
+      - "刁蛮"
+      - "刻薄"
+    typical_role: "supporting"
+
+  - id: shentong_xitongVO
+    name: "系统 VO / 旁白"
+    aliases: ["系统", "金手指", "穿越系统"]
+    signature_keywords:
+      - "系统"
+      - "VO"
+      - "字幕"
+      - "宿主"
+      - "任务"
+      - "锁定"
+      - "投放"
+      - "提示"
+    typical_role: "narrator"
+
+  - id: ad_shenyi
+    name: "神医 / 医生"
+    aliases: ["古代神医", "悬壶济世"]
+    signature_keywords:
+      - "神医"
+      - "医生"
+      - "大夫"
+      - "诊脉"
+      - "药材"
+      - "针灸"
+      - "解毒"
+    typical_role: "supporting"

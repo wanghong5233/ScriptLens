@@ -1,0 +1,243 @@
+# ============================================================
+# 中文短剧题材原型库 v4
+# ============================================================
+# 业内对照：抖音红果选品 SOP / ReelShort comparable archetype / 阅文短剧合作方分类。
+# 任何新增 / 修改原型 **改这一处**。
+# ============================================================
+
+version: "v4-cn-2026-05-31"
+
+archetypes:
+  - id: zhanshen_guilai
+    name: "战神归来"
+    aliases: ["战神回归", "都市战神", "兵王回归", "都市兵王", "扫地僧"]
+    signature_keywords:
+      - "退役"
+      - "归来"
+      - "兵王"
+      - "战神"
+      - "扫地"
+      - "隐藏身份"
+      - "都市最强"
+      - "归隐"
+      - "重出江湖"
+      - "身份揭露"
+    negative_keywords:
+      - "无身份反转"
+    reference: "抖音 2024 短剧 TOP 100 中战神题材占比 ~22%"
+
+  - id: chongsheng_fuchou
+    name: "重生复仇"
+    aliases: ["重生归来", "重活一世", "重生之", "重生改命"]
+    signature_keywords:
+      - "重生"
+      - "重活"
+      - "前世"
+      - "今生"
+      - "回到"
+      - "再来一次"
+      - "复仇"
+      - "报仇"
+      - "改命"
+      - "记忆"
+    reference: "ReelShort 2025 H1 reborn revenge 占 18% 流水"
+
+  - id: chuanyue_xitong
+    name: "穿越系统流"
+    aliases: ["系统觉醒", "穿越系统", "签到系统", "任务系统"]
+    signature_keywords:
+      - "穿越"
+      - "系统"
+      - "宿主"
+      - "签到"
+      - "任务"
+      - "VO"
+      - "字幕"
+      - "锁定"
+      - "载体"
+      - "投放中"
+    reference: "抖音穿越系统流 2024 H2 爆款占比上升至 ~15%"
+
+  - id: jiaren_xiehui
+    name: "豪门弃妇"
+    aliases: ["豪门假死", "豪门虐恋", "豪门追妻", "假死弃妇"]
+    signature_keywords:
+      - "豪门"
+      - "弃妇"
+      - "假死"
+      - "复婚"
+      - "追妻"
+      - "回归"
+      - "原配"
+      - "替身"
+      - "下堂"
+      - "扫地出门"
+    reference: "快手 StreamLake 2024 豪门题材占比 ~18%"
+
+  - id: tianbao_xianggou
+    name: "甜宠现偶"
+    aliases: ["甜宠", "霸总甜宠", "校园甜宠", "古风甜宠"]
+    signature_keywords:
+      - "甜"
+      - "宠"
+      - "总裁"
+      - "霸道"
+      - "结婚"
+      - "亲吻"
+      - "暧昧"
+      - "心动"
+      - "宠妻"
+      - "撒娇"
+    reference: "ReelShort fated mate / billionaire CEO 占比 ~25%"
+
+  - id: nizhi_dalian
+    name: "逆袭打脸"
+    aliases: ["扮猪吃虎", "马甲掉落", "实力打脸", "扫地僧逆袭"]
+    signature_keywords:
+      - "逆袭"
+      - "打脸"
+      - "扮猪"
+      - "马甲"
+      - "实力"
+      - "真实身份"
+      - "被低估"
+      - "瞧不起"
+      - "翻身"
+      - "霸气"
+    reference: "抖音逆袭打脸题材完播率 TOP 10 头部 ~3 倍均值"
+
+  - id: hougong_xiuluo
+    name: "修罗场"
+    aliases: ["多男主修罗场", "万人迷修罗场", "后宫修罗场"]
+    signature_keywords:
+      - "修罗场"
+      - "万人迷"
+      - "后宫"
+      - "未婚夫"
+      - "竹马"
+      - "学长"
+      - "霸总"
+      - "学霸"
+      - "京圈"
+      - "太子爷"
+    reference: "穿越系统类常配修罗场对象集"
+
+  - id: shengyi_zhuangui
+    name: "医妃 / 神医归来"
+    aliases: ["神医", "医妃", "医术", "古代医女"]
+    signature_keywords:
+      - "神医"
+      - "医妃"
+      - "医术"
+      - "药材"
+      - "诊脉"
+      - "针灸"
+      - "毒"
+      - "解毒"
+      - "悬壶"
+      - "济世"
+
+  - id: xuanhuan_xiuzhen
+    name: "玄幻修真"
+    aliases: ["修仙", "修真", "玄幻", "境界突破"]
+    signature_keywords:
+      - "修仙"
+      - "修真"
+      - "境界"
+      - "突破"
+      - "灵气"
+      - "丹药"
+      - "宗门"
+      - "御剑"
+      - "渡劫"
+      - "天劫"
+
+  - id: ertao_chuanglu
+    name: "二胎闯娘家"
+    aliases: ["二胎逆袭", "团宠萌宝", "萌宝助攻"]
+    signature_keywords:
+      - "二胎"
+      - "萌宝"
+      - "团宠"
+      - "孩子"
+      - "宝宝"
+      - "认爹"
+      - "认亲"
+      - "贴心"
+      - "可爱"
+      - "护娃"
+
+  - id: chuanyue_gufeng
+    name: "穿越古风"
+    aliases: ["古言穿越", "穿越王妃", "穿越宫斗"]
+    signature_keywords:
+      - "穿越"
+      - "古代"
+      - "王妃"
+      - "王爷"
+      - "宫斗"
+      - "皇上"
+      - "嫔妃"
+      - "贵妃"
+      - "公主"
+      - "驸马"
+
+  - id: zhaoxu_nilang
+    name: "赘婿逆袭"
+    aliases: ["赘婿", "上门女婿", "倒插门"]
+    signature_keywords:
+      - "赘婿"
+      - "上门"
+      - "倒插门"
+      - "瞧不起"
+      - "岳父"
+      - "妻子"
+      - "保护"
+      - "身份"
+      - "隐藏"
+      - "顶级"
+
+  - id: shenpi_xianggou
+    name: "神豢 / 兽人甜宠"
+    aliases: ["兽人", "异种甜宠", "魔王宠妻"]
+    signature_keywords:
+      - "魔王"
+      - "兽人"
+      - "妖"
+      - "神"
+      - "异世"
+      - "诅咒"
+      - "宿命"
+      - "结契"
+      - "封印"
+      - "宠妻"
+
+  - id: zhibao_jingmou
+    name: "职场霸总"
+    aliases: ["商战", "豪门商战", "职场逆袭"]
+    signature_keywords:
+      - "商战"
+      - "公司"
+      - "董事长"
+      - "上市"
+      - "并购"
+      - "对手"
+      - "股权"
+      - "职场"
+      - "晋升"
+      - "助理"
+
+  - id: yingxian_xiangqing
+    name: "虐恋情深"
+    aliases: ["虐恋", "白月光", "替身文学"]
+    signature_keywords:
+      - "虐恋"
+      - "白月光"
+      - "替身"
+      - "心碎"
+      - "误会"
+      - "分别"
+      - "重逢"
+      - "原谅"
+      - "爱过"
+      - "放手"
