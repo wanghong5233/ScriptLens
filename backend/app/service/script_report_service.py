@@ -541,7 +541,7 @@ def _load_plot_units(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
     for row in rows:
         plot_unit_id = str(row.get("plot_unit_id") or "").strip()
         if not plot_unit_id:
-            continue
+                        continue
         payload = by_unit.setdefault(
             plot_unit_id,
             {
@@ -563,7 +563,7 @@ def _load_plot_units(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
         dim = str(row.get("dim") or "").strip()
         value = str(row.get("value") or "").strip()
         if not dim or not value:
-            continue
+                        continue
         if dim in {"plot_hook", "conflict_type", "payoff_type", "emotional_driver", "story_stage"}:
             payload[dim] = value
 
@@ -772,7 +772,7 @@ async def score_one_dimension(
 
     if dimension == "compliance":
         compliance = await screen_compliance(script_id=script_id, caller=caller)
-        return {
+    return {
             "dimension": "compliance",
             "score": compliance.score,
             "tier": compliance.tier,
@@ -783,7 +783,7 @@ async def score_one_dimension(
             "baseline": baseline,
         }
 
-    # ============================================================
+# ============================================================
     # 装配上游依赖（按维度需要选择性触发，避免全量拉链）
     # 依赖矩阵（详见 service/scoring/dimensions/*.py）：
     #   hook         : scenes + llm_caller + cliffhangers
@@ -791,7 +791,7 @@ async def score_one_dimension(
     #   payoff       : scenes + reward_events + beat_sheet
     #   monetization : scenes + reward_events + cliffhangers + total_episodes
     #   producibility: scenes + total_episodes
-    # ============================================================
+# ============================================================
     scenes = get_all_scenes(script_id=script_id, engine=engine)
     reward_events: list[RewardEvent] = []
     cliffhangers: list[CliffhangerEvent] = []
@@ -1266,12 +1266,12 @@ async def generate_report(
             verdict_label = (v4_report_dict.get("verdict") or {}).get("label", "?")
             inv_score = (v4_report_dict.get("verdict") or {}).get("overall_score")
             inv_score_text = f"{inv_score:.2f}" if isinstance(inv_score, (int, float)) else "—"
-            progress_tracker.update_stage(
-                script_id,
+        progress_tracker.update_stage(
+            script_id,
                 "scoring_v4",
-                "done",
+            "done",
                 detail=f"verdict={verdict_label} investment_score={inv_score_text}",
-            )
+        )
 
         progress_tracker.update_stage(
             script_id, "building_payload", "running", detail="组装报告 payload"
@@ -1687,7 +1687,7 @@ def _load_script_meta(script_id: str, *, engine: Engine) -> Optional[_ScriptMeta
             {"sid": script_id},
         ).mappings().first()
     if row is None:
-        return None
+            return None
     return _ScriptMeta(
         script_id=str(row["script_id"]),
         title=str(row["title"]),
@@ -1830,7 +1830,7 @@ def _mark_analysis_status(
             )
     except Exception:  # noqa: BLE001
         # DB 未跑 migration 09 时此处会报 undefined column；不要让流水线挂掉。
-        logger.warning(
+                logger.warning(
             "failed to mark analysis status (migration 09 未运行?) script_id=%s status=%s",
             script_id, status,
         )

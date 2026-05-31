@@ -102,6 +102,38 @@ def all_low_risk_terms() -> List[str]:
     return _flatten(LOW_RISK_TERMS)
 
 
+# ============================================================
+# 风险类别中文 label（11 类 enum 全覆盖）
+# ============================================================
+#
+# 给前端 chip / reason 文案展示用。所有 enum 必须有 ZH 映射，
+# 用户面 UI 严禁裸 enum 字符串泄漏。前端 RavenWeb 同款字典维护在
+# scriptlens-report-rail.tsx `humanizeReportText`，改这里时必须前后端同步。
+
+RISK_CATEGORY_CN_LABELS: Dict[str, str] = {
+    # high_risk
+    "underage_sexual": "未成年涉性",
+    "drugs_method": "毒品制贩细节",
+    "suicide_method": "自杀方式描写",
+    "ethnic_political": "民族/政治敏感",
+    # medium_risk
+    "wealth_worship": "拜金/炫富表达",
+    "violence_chain": "连贯暴力描写",
+    "ethics_dispute": "伦理争议（出轨/小三等）",
+    "medical_misconduct": "医疗误导",
+    "violent_revenge": "极端复仇（灭门/株连）",
+    # low_risk
+    "vulgar_language": "粗口/低俗表达",
+    "innuendo": "性暗示/床戏描写",
+    "minor_violence": "轻度暴力表达",
+}
+
+
+def risk_category_label_cn(category: str) -> str:
+    """把 risk category enum 翻成中文 label；未知 enum 返回原值（safe fallback）。"""
+    return RISK_CATEGORY_CN_LABELS.get(category, category)
+
+
 def categorize_term(term: str) -> tuple[str, str] | None:
     """反查关键词所属 (level, category)。命中多个时 high > medium > low。"""
     for cat, terms in HIGH_RISK_TERMS.items():

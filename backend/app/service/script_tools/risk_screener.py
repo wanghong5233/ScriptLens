@@ -28,6 +28,7 @@ from service.script_tools.risk_terms import (
     all_high_risk_terms,
     all_low_risk_terms,
     all_medium_risk_terms,
+    risk_category_label_cn,
     categorize_term,
 )
 from service.script_tools.scene_repo import (
@@ -349,25 +350,25 @@ def _aggregate(high: List[RiskHit], medium: List[RiskHit], low: List[RiskHit]) -
     low_n = len(low)
 
     if high_n >= 1:
-        cats = sorted({h.category for h in high})
+        cats_cn = sorted({risk_category_label_cn(h.category) for h in high})
         return (
             "high_risk",
             1,
-            f"命中 {high_n} 处广电红线（{', '.join(cats)}），不建议发布",
+            f"命中 {high_n} 处广电红线（{'、'.join(cats_cn)}），不建议发布",
         )
     if medium_n >= 3:
-        cats = sorted({h.category for h in medium})
+        cats_cn = sorted({risk_category_label_cn(h.category) for h in medium})
         return (
             "medium_risk",
             4,
-            f"命中 {medium_n} 处主流题材风险（{', '.join(cats)}），需要修改后过审",
+            f"命中 {medium_n} 处主流题材风险（{'、'.join(cats_cn)}），需要修改后过审",
         )
     if medium_n >= 1 or low_n >= 6:
-        cats = sorted({h.category for h in medium + low})
+        cats_cn = sorted({risk_category_label_cn(h.category) for h in medium + low})
         return (
             "low_risk",
             7,
-            f"命中 {medium_n + low_n} 处局部风险（{', '.join(cats) or '低俗台词'}），可过但建议优化",
+            f"命中 {medium_n + low_n} 处局部风险（{'、'.join(cats_cn) or '低俗台词'}），可过但建议优化",
         )
     return ("clean", 9, "全文未命中已知风险关键词，导向正向")
 

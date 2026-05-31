@@ -179,8 +179,13 @@ CharacterRelationType = Literal[
     "authority",
     "deception",
     "mentor",
+    # W1.10 (2026-05-31)：character_graph_chain 在 top-N 子图无跨分量共现时，
+    # 会写 hard-bridge 边作为图连通性兜底（无真实证据，is_inferred=True）。
+    # type/polarity 故意写 "unknown" 作为 sentinel，前端据此渲染虚线 + tooltip，
+    # 避免假装真关系欺骗用户。schema 必须容纳，否则 view endpoint 会 409 拒报告。
+    "unknown",
 ]
-RelationPolarity = Literal["positive", "negative", "mixed"]
+RelationPolarity = Literal["positive", "negative", "mixed", "unknown"]
 
 
 # Wave C-3c (2026-05-31)：v3 6 维评分模型（ReportDecision / ReportScorecardItem）
@@ -419,6 +424,9 @@ class CharacterGraphEdge(BaseModel):
     type: CharacterRelationType = "ally"
     weight: float = Field(0.0, ge=0.0, le=1.0)
     polarity: RelationPolarity = "mixed"
+    # W1.10：True 表示该边是规则层为保证图连通性强制添加的 hard-bridge，无共现证据。
+    # 前端依据此 sentinel 渲染虚线 + tooltip（type/polarity 通常也为 "unknown"）。
+    is_inferred: bool = False
 
 
 class CharacterGraph(BaseModel):
