@@ -50,8 +50,9 @@ _ACT2_END_RATIO = 0.85
 # 节拍类型白名单。LLM 出 type 不在这里 → 用规则给的 type_hint 兜底。
 _ALLOWED_BEATS = {"opening", "inciting", "midpoint", "climax", "closing", "twist", "reward"}
 
-# Summary 上限。50 字与 Field 的 logline 习惯一致；超出截断。
-_SUMMARY_MAX_LEN = 50
+# Summary 上限。前端 v3.7.5 已允许多行完整展示；120 字足够覆盖 2~3 条动作行，
+# 只在极端超长时才在分句边界截断（见 _smart_truncate_summary），不再 mid-char 硬切。
+_SUMMARY_MAX_LEN = 120
 
 # Summary 下限：太短的 LLM 输出（< 8 字）几乎一定是 type 标签残留，需要 reject。
 _SUMMARY_MIN_LEN = 8
@@ -292,7 +293,7 @@ _USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请�
 4. **每幕 beat 数量上限（数据驱动）**：act1={max_act1}，act2={max_act2}，act3={max_act3}。
    **每一幕至少 1 个 beat**，不允许超过上限；不需要凑数。
 5. summary 字数与格式（**硬性规则，违反会被后端 reject 丢弃**）：
-   - 所有 beat：**8-50 字之间**，写完整概括句
+   - 所有 beat：**8-120 字之间**，写完整概括句（含人物 + 动作 + 后果，不要半句截断）
    - climax / closing 必须 ≥ 12 字
 6. summary 必须包含「人物 + 动作 + 后果」三要素之一，**严禁纯标签 / 场景头残留**：
    - ❌ 错误反例（这些会被自动丢弃 / 视为低质量）：
@@ -326,7 +327,7 @@ _USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请�
       "act": 1,
       "title": "开局",
       "beats": [
-        {{"seq": <候选 seq>, "type": "opening|inciting|...", "summary": "≤50字"}}
+        {{"seq": <候选 seq>, "type": "opening|inciting|...", "summary": "≤120字完整概括句"}}
       ]
     }},
     {{"act": 2, "title": "发展", "beats": [{{"seq": ..., "type": "...", "summary": "..."}}]}},
@@ -694,6 +695,26 @@ _NARRATION_SPEAKER_RE = re.compile(
 )
 
 
+def _smart_truncate_summary(text: str, max_len: int = _SUMMARY_MAX_LEN) -> str:
+    """在 max_len 内尽量于分句标点处截断，避免 mid-char 硬切（v3.7.5c 根因修复）。
+
+    历史 bug：_extract_plot_excerpt 曾硬切 joined[:38]，主要看点 oneliner
+    「开场抓人 · …」正好 45 字在半句「姜栀枝强势」处断掉。
+    """
+    s = (text or "").strip()
+    if len(s) <= max_len:
+        return s
+    chunk = s[:max_len]
+    for sep in ("；", "，", "。", ";", ",", "、"):
+        pos = chunk.rfind(sep)
+        # 分句点不能太极端靠前，否则 summary 信息量不足
+        if pos >= max(12, max_len // 3):
+            trimmed = chunk[:pos].strip()
+            if len(trimmed) >= _SUMMARY_MIN_LEN:
+                return trimmed
+    return chunk[: max_len - 1] + "…"
+
+
 def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
     """v3.7.5：rule fallback summary 的核心抽取器，只抓 ≥1 行真实动作行。
 
@@ -705,14 +726,14 @@ def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
 
     策略：
       1. 跳过场号 / 集号 / 人物列表 / 场景头 / 空行 / 系统 VO
-      2. **只收集动作行**（△/▲/■/◆/●/▼），把 ≥1 条凑到 ≥12 字 ≤ 38 字
-      3. 完全没有动作行 → 返回 None，上层走"场次定位 + 人物"的诚实占位
+      2. **只收集动作行**（△/▲/■/◆/●/▼），用「；」拼接成完整动作链
+      3. 总长超过 _SUMMARY_MAX_LEN 时，在分句标点处截断（_smart_truncate_summary）
+      4. 完全没有动作行 → 返回 None，上层走"场次定位 + 人物"的诚实占位
          （**不再抓对白行兜底**——抄一句台词比占位更糟）
     """
     if not scene_text:
         return None
     action_chunks: List[str] = []
-    accumulated = 0
     for raw_line in scene_text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -727,16 +748,13 @@ def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
         if _NARRATION_SPEAKER_RE.match(clean):
             continue
         action_chunks.append(clean)
-        accumulated += len(clean)
-        if accumulated >= 28:
-            break
     if not action_chunks:
         return None
     joined = "；".join(action_chunks)
     joined = re.sub(r"[，。！？；,;.]+$", "", joined).strip()
     if len(joined) < 12:
         return None
-    return joined[:38]
+    return _smart_truncate_summary(joined)
 
 
 def _scene_label_summary(scene: Scene, type_hint: BeatType) -> str:
@@ -756,7 +774,7 @@ def _scene_label_summary(scene: Scene, type_hint: BeatType) -> str:
     """
     plot = _extract_plot_excerpt(scene.text or "")
     if plot:
-        return plot[:_SUMMARY_MAX_LEN]
+        return plot
     ep = scene.episode_no or "?"
     sc = scene.scene_no or "?"
     if scene.characters:

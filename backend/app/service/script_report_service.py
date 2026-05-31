@@ -380,18 +380,14 @@ _REWARD_TYPE_HEADLINE = {
 }
 
 
-def _trim_oneliner(s: str, max_len: int = 90) -> str:
-    """主要看点 oneliner 防御性截断。
+def _trim_oneliner(s: str) -> str:
+    """主要看点 oneliner：只做空白规范化，不再截断。
 
-    上限 90 字 = headline (≤6 字) + " · " + reward claim/beat summary (≤80 字)
-    的设计上限再留 4 字 buffer，正常 LLM 输出不会触发截断。
-
-    历史：之前 max_len=40，把后端给完整的看点描述硬切成「…」，前端 UI 上有空间
-    还显示省略号，被用户当成"系统又骗我"的 bug。现在前端 highlightOneliner
-    CSS 已经允许多行展示，oneliner 文本传完整字段。
+    v3.7.5c 根因：此前 max_len=40/90 与 beat_chain _extract_plot_excerpt 的 [:38]
+    叠加，导致「开场抓人 · …」在半句处断掉。前端 highlightOneliner 已支持多行
+    完整展示，后端应传完整语义，不做 UI 层截断。
     """
-    s = (s or "").strip().replace("\n", " ")
-    return s if len(s) <= max_len else s[: max_len - 1] + "…"
+    return (s or "").strip().replace("\n", " ")
 
 
 def _build_evidence_refs_minimal(

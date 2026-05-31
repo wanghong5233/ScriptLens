@@ -122,3 +122,19 @@ def test_build_acts_titles_use_chinese_defaults() -> None:
     acts = bc._build_acts(candidates, beats_by_act={1: [], 2: [], 3: []})
     titles = [a.title for a in acts]
     assert titles == ["开局", "发展", "收束"]
+
+
+def test_extract_plot_excerpt_does_not_hard_cut_at_38_chars() -> None:
+    """v3.7.5c：动作行拼接不应在 38 字 mid-char 硬切（主要看点 oneliner 根因）。"""
+    text = (
+        "第一集1-1酒店夜内\n"
+        "人物：姜栀枝裴鹤年\n"
+        "△裴鹤年被蒙着双眼，姜栀枝解开裴鹤年衣服扣子\n"
+        "△裴鹤年按住姜栀枝的手，姜栀枝强势反压，抚摸裴鹤年胸口\n"
+        "△姜栀枝靠近裴鹤年嘴唇，亲吻脖子\n"
+    )
+    excerpt = bc._extract_plot_excerpt(text)
+    assert excerpt is not None
+    assert len(excerpt) > 38
+    assert "姜栀枝强势反压" in excerpt
+    assert not excerpt.endswith("姜栀枝强势")

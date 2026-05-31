@@ -316,7 +316,7 @@ class ReportHighlight(BaseModel):
     scene_label: Optional[str] = None
     start_line: Optional[int] = None
     end_line: Optional[int] = None
-    oneliner: str = Field(..., description="≤ 40 字一句话点题")
+    oneliner: str = Field(..., description="一句话点题（完整展示，不截断）")
     evidence: Optional[str] = Field(
         None,
         description="≤ 80 字原文片段，仅用于 tooltip / 折叠态展示。前端跳转**不**用此字段定位",
