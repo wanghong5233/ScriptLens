@@ -64,6 +64,7 @@ from service.script_tools.dimension_scorer import (
 from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
 from service.script_tools.motivation_chain import MotivationResult, score_motivation
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
+from service.scoring import ScoringContext, score_script
 from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
@@ -1304,6 +1305,43 @@ async def generate_report(
             detail=f"dimensions={len(dim_outputs)} scored={scored_count}",
         )
 
+        # Wave C-1：v4 投资决策评分与 v3 6 维**并行**写入 payload。失败不阻塞 v3 报告，
+        # 失败原因落 chain_status['scoring_v4']。Wave D 前端切到 v4 字段渲染，Wave C-3
+        # 删除旧 scorecard / decision。
+        progress_tracker.update_stage(
+            script_id,
+            "scoring_v4",
+            "running",
+            detail="HOOK / ARCHETYPE / PAYOFF / MONETIZATION / PRODUCIBILITY 五维 + 合规 gate",
+        )
+        v4_report_dict = await _run_scoring_v4(
+            script_id=script_id,
+            scenes=scenes,
+            total_episodes=meta.total_episodes or 0,
+            beat_sheet=beat_sheet,
+            reward_events=reward_events or [],
+            character_graph=character_graph,
+            coverage_card=coverage_card,
+            motivation_result=motivation_result,
+            compliance=compliance,
+            caller=caller,
+            chain_status=chain_status,
+        )
+        if v4_report_dict is None:
+            progress_tracker.update_stage(
+                script_id, "scoring_v4", "done", detail="v4 评分降级（详见 chain_status）"
+            )
+        else:
+            verdict_label = (v4_report_dict.get("verdict") or {}).get("label", "?")
+            inv_score = (v4_report_dict.get("verdict") or {}).get("overall_score")
+            inv_score_text = f"{inv_score:.2f}" if isinstance(inv_score, (int, float)) else "—"
+            progress_tracker.update_stage(
+                script_id,
+                "scoring_v4",
+                "done",
+                detail=f"verdict={verdict_label} investment_score={inv_score_text}",
+            )
+
         progress_tracker.update_stage(
             script_id, "building_payload", "running", detail="组装报告 payload"
         )
@@ -1320,6 +1358,7 @@ async def generate_report(
             engine=engine,
             scenes_by_id={s.id: s for s in scenes},
             chain_status=chain_status,
+            v4_report=v4_report_dict,
         )
         progress_tracker.update_stage(script_id, "building_payload", "done")
 
@@ -1470,6 +1509,74 @@ def _derive_decision(
     )
 
 
+async def _run_scoring_v4(
+    *,
+    script_id: str,
+    scenes: list[Any],
+    total_episodes: int,
+    beat_sheet: Optional[BeatSheet],
+    reward_events: list[RewardEvent],
+    character_graph: Optional[CharacterGraph],
+    coverage_card: Optional[CoverageCard],
+    motivation_result: Optional[MotivationResult],
+    compliance: ComplianceResult,
+    caller: LlmCaller,
+    chain_status: _ChainStatusCollector,
+) -> Optional[dict[str, Any]]:
+    """跑 scoring v4 评分链。
+
+    失败时返回 None 并把失败原因写到 chain_status['scoring_v4']，绝不重抛——
+    v4 是与 v3 并行的"投资决策评分"分支，单点失败不能拖垮整份报告。
+
+    成功时返回 ScoringReport.to_dict()，调用方塞进 ReportPayload.evaluation_v4 等字段。
+    """
+    try:
+        scoring_ctx = ScoringContext(
+            script_id=script_id,
+            scenes=scenes,
+            total_episodes=total_episodes,
+            beat_sheet=beat_sheet,
+            reward_events=reward_events,
+            character_graph=character_graph,
+            coverage_card=coverage_card,
+            motivation_result=motivation_result,
+            compliance=compliance,
+            llm_caller=caller,
+        )
+        report = await score_script(scoring_ctx)
+        report_dict = report.to_dict()
+        # 成功也写一条 chain_status，便于 BI 跟踪每次运行的来源 / fallback 链
+        fallback_reasons: list[str] = []
+        for rec in report.chain_status_records:
+            failed = rec.get("failed_signals") or []
+            if failed:
+                fallback_reasons.append(
+                    f"{rec.get('dim_key')}:failed_signals={','.join(failed)}"
+                )
+        _record_chain_status(
+            chain_status,
+            "scoring_v4",
+            status="degraded" if fallback_reasons else "ok",
+            source="hybrid",
+            fallback_reasons=fallback_reasons,
+        )
+        return report_dict
+    except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "scoring v4 failed (non-fatal, v3 报告继续) script_id=%s err=%s",
+            script_id,
+            exc,
+        )
+        _record_chain_status(
+            chain_status,
+            "scoring_v4",
+            status="failed",
+            source="rule_fallback",
+            fallback_reasons=[f"{type(exc).__name__}: {str(exc)[:200]}"],
+        )
+        return None
+
+
 def _build_report_payload(
     *,
     meta: _ScriptMeta,
@@ -1483,6 +1590,7 @@ def _build_report_payload(
     reward_events: Optional[list[RewardEvent]] = None,
     scenes_by_id: Optional[dict[str, Any]] = None,
     chain_status: Optional[_ChainStatusCollector] = None,
+    v4_report: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
     """release/v1-mvp 报告 payload 组装。
 
@@ -1581,6 +1689,14 @@ def _build_report_payload(
             ],
             "rewrite_seeds": [],
         },
+        # Wave C-1 (2026-05-31)：v4 投资决策评分新字段，与上面 v3 6 维并行写入。
+        # v4 失败时四个字段全为 None / []，前端只渲染 v3 旧字段保持向后兼容。
+        "verdict": (v4_report or {}).get("verdict"),
+        "investment_score": (
+            ((v4_report or {}).get("verdict") or {}).get("overall_score")
+        ),
+        "evaluation_v4": v4_report,
+        "top_improvements": (v4_report or {}).get("top_improvements") or [],
         # W1.3 (2026-05-31)：报告级 provenance。每个 chain 的 status/source/reasons
         # 都在这里，前端用来渲染降级提示条；BI 用来计算 fallback rate。
         # overall_status = aggregate(各 chain status)，前端只需看这一个字段决定是否
@@ -1627,6 +1743,11 @@ def _persist_report(
     now = datetime.utcnow()
     report_id = str(uuid.uuid4())
     overall_score = report_payload.get("overall_score")
+    # Wave C-1 (2026-05-31)：v4 verdict / investment_score 写入 scoring_runs 三新列。
+    # v4 评分失败时 verdict 字段为 None，column 写 NULL，前端按字段缺失走 v3 渲染。
+    v4_verdict = report_payload.get("verdict") or {}
+    v4_verdict_label: Optional[str] = v4_verdict.get("label") if v4_verdict else None
+    v4_investment_score = report_payload.get("investment_score")
     input_hash = hashlib.sha256(
         json.dumps(
             {
@@ -1643,6 +1764,8 @@ def _persist_report(
             dim for dim, out in dim_outputs.items() if out.score is None
         ],
         "overall_score": overall_score,
+        "v4_verdict": v4_verdict_label,
+        "v4_investment_score": v4_investment_score,
     }
 
     with engine.begin() as conn:
@@ -1650,19 +1773,22 @@ def _persist_report(
         # 这里改成 UPSERT（ON CONFLICT 由 input_hash / id PK 决定）：
         #   - 入口同 run_id 存在 → 走 UPDATE 分支，把 status 改为 'done'、补齐数据字段
         #   - 入口 INSERT 失败（DB 故障）→ 这里 INSERT 兜底，仍能写入完整记录
+        # Wave C-1: 新增 verdict / investment_score 列写入，alembic/10 已建好 CHECK 约束。
         conn.execute(
             text(
                 """
                 INSERT INTO scriptlens.scoring_runs (
                     id, script_id, rubric_version, tag_set_ver, input_hash, genre_scope,
                     episode_count, plot_unit_count, quality_flags, model_versions,
-                    prompt_versions, status, error, created_at
+                    prompt_versions, status, error, created_at,
+                    verdict, investment_score
                 )
                 VALUES (
                     :id, :script_id, :rubric_version, :tag_set_ver, :input_hash, :genre_scope,
                     :episode_count, :plot_unit_count, CAST(:quality_flags AS jsonb),
                     CAST(:model_versions AS jsonb), CAST(:prompt_versions AS jsonb),
-                    :status, :error, :created_at
+                    :status, :error, :created_at,
+                    :verdict, :investment_score
                 )
                 ON CONFLICT (id) DO UPDATE SET
                     input_hash = EXCLUDED.input_hash,
@@ -1670,6 +1796,8 @@ def _persist_report(
                     model_versions = EXCLUDED.model_versions,
                     prompt_versions = EXCLUDED.prompt_versions,
                     status = EXCLUDED.status,
+                    verdict = EXCLUDED.verdict,
+                    investment_score = EXCLUDED.investment_score,
                     error = NULL
                 """
             ),
@@ -1688,6 +1816,8 @@ def _persist_report(
                 "status": "done",
                 "error": None,
                 "created_at": now,
+                "verdict": v4_verdict_label,
+                "investment_score": v4_investment_score,
             },
         )
 

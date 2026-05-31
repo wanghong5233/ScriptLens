@@ -694,6 +694,44 @@ class ReportPayload(BaseModel):
     pacing_curve: Optional[PacingCurve] = None
     evaluation: Optional[EvaluationPayload] = None
     risk_flags: List[str] = Field(default_factory=list)
+    # ============================================================
+    # v4 投资决策评分新字段（scoring/ 模块，docs/2026-05-31-投资决策评分框架-v4.md）
+    # Wave C-1 增量添加；与 v3 6 维 scorecard / decision 字段**并存**。
+    # Wave D 前端切换到 v4 字段渲染；Wave C-3 删除旧 scorecard / decision。
+    # 全部 Optional / default_factory，旧客户端不受影响。
+    # ============================================================
+    verdict: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "v4 投资决策三档判决：label (qualified|needs_polish|not_recommended)"
+            " / overall_score / confidence / reason / compliance_veto_triggered。"
+            " 由 scoring.score_script 产出；compliance 一票否决时 overall_score=None。"
+        ),
+    )
+    investment_score: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=10,
+        description=(
+            "v4 0-10 综合分（= verdict.overall_score 的展平别名，方便前端列表卡片直接读）。"
+            " compliance 一票否决或 v4 评分失败时为 None。"
+        ),
+    )
+    evaluation_v4: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "v4 评分完整报告：rubric_version / dimensions (5 维详情) /"
+            " coverage_ratio / chain_status_records。"
+            " 由 scoring.ScoringReport.to_dict() 产出，scoring v4 评分失败时为 None。"
+        ),
+    )
+    top_improvements: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "v4 投资决策评分给出的优先改进建议（按 dim_weight × signal_weight × score_gap 排序）。"
+            " 评分失败时为空列表。"
+        ),
+    )
     report_id: Optional[str] = None
     generated_at: Optional[str] = None
     # W1.3 (2026-05-31)：报告级 provenance 元数据（chain_status + overall_status）。
