@@ -30,6 +30,24 @@ class ComplianceResult:
             "hits": list(self.hits),
         }
 
+    @classmethod
+    def empty(cls) -> "ComplianceResult":
+        """W1.8 (2026-05-31)：合规扫描失败时的占位结果。
+
+        前端 / scorer 拿到的对象保持同样 shape，但 status="insufficient" + tier
+        让 dimension_scorer 知道这是降级数据、不应计入合规分。
+        """
+        return cls(
+            status="insufficient",
+            level="insufficient",
+            score=0,
+            tier="insufficient",
+            confidence="low",
+            reason="合规扫描 LLM 失败，已降级为空报告",
+            evidence_ref_ids=[],
+            hits=[],
+        )
+
 
 def _status_from_level(level: str) -> str:
     if level == "high_risk":

@@ -52,6 +52,9 @@ class CharacterEdge:
     type: str = "ally"
     weight: float = 0.0
     polarity: str = "mixed"
+    # W1.10 (2026-05-31)：is_inferred=True 表示该边是规则层为保证图连通性
+    # 强制添加的，无共现证据。前端应虚线 + tooltip 提示。
+    is_inferred: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -60,6 +63,7 @@ class CharacterEdge:
             "type": self.type,
             "weight": self.weight,
             "polarity": self.polarity,
+            "is_inferred": self.is_inferred,
         }
 
 
@@ -67,16 +71,25 @@ class CharacterEdge:
 class CharacterGraph:
     nodes: List[CharacterNode] = field(default_factory=list)
     edges: List[CharacterEdge] = field(default_factory=list)
+    # W1.10 (2026-05-31): enrichment 失败时仍返回基线图，但用 enrichment_status
+    # 透传降级状态，让上层 ChainResult 能标 degraded/failed。
+    enrichment_status: str = "ok"  # ok | degraded | failed
+    enrichment_failed_reasons: List[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "nodes": [n.to_dict() for n in self.nodes],
             "edges": [e.to_dict() for e in self.edges],
+            "enrichment_status": self.enrichment_status,
         }
 
 
 _RELATION_TYPES = {"family", "romance", "rival", "ally", "authority", "deception", "mentor"}
+# W1.10：扩展 type 白名单容纳"unknown"（hard bridge 无证据时使用）。
+_RELATION_TYPES_WITH_UNKNOWN = _RELATION_TYPES | {"unknown"}
 _POLARITIES = {"positive", "negative", "mixed"}
+# W1.10：扩展 polarity 容纳"unknown"。
+_POLARITIES_WITH_UNKNOWN = _POLARITIES | {"unknown"}
 _ROLES = {"protagonist", "antagonist", "support", "minor"}
 _HARD_BRIDGE_WEIGHT = 0.1
 
@@ -243,14 +256,23 @@ async def extract_character_graph(
     # LLM enrichment 是「锦上添花」：motivation / goal / obstacle 完全依赖 LLM；
     # role / type / polarity 在 resolver 路径下已有默认，LLM 只在给出合法值时覆盖。
     # enrichment 失败时不该让整张图消失——退化成「只有基线的图」远比「图整个没了」对用户更友好。
+    #
+    # W1.10 (2026-05-31)：旧实现失败 silent return 基线图，用户无法知道关系类型未被
+    # LLM 标注（全是默认 type="ally"）。新策略：返回基线图但写入 enrichment_status
+    # = "failed" + reasons，上层 ChainResult 据此标 degraded 并透给前端。
     try:
         return await _enrich_graph(nodes, raw_edges, scenes, caller, node_aliases)
     except ScoreLLMError as exc:
-        logger.exception(
+        logger.warning(
             "character_graph_chain: LLM enrichment 失败，降级返回基线图（保留 %d 节点 / %d 边）: %s",
             len(nodes), len(raw_edges), exc,
         )
-        return CharacterGraph(nodes=nodes, edges=raw_edges)
+        return CharacterGraph(
+            nodes=nodes,
+            edges=raw_edges,
+            enrichment_status="failed",
+            enrichment_failed_reasons=[f"llm_error:{type(exc).__name__}: {exc}"],
+        )
 
 
 def _build_from_resolver(
@@ -478,6 +500,11 @@ def _bridge_subgraph_orphans(
         if best_orphan is None or best_neighbor is None:
             # 硬兜底：剩余 orphan 与 largest 全无跨分量共现时，仍强制补桥，保证
             # 最终图强连通。锚点取 largest 内最高出现节点，避免连到噪声节点。
+            #
+            # W1.10 (2026-05-31)：旧实现使用 type="ally" / polarity="mixed" 假装
+            # 是真关系，欺骗用户。新策略：
+            #   - type="unknown" + polarity="unknown" + is_inferred=True
+            #   - 前端虚线 + tooltip 显示「无共现证据，仅图连通性保证」
             anchor = max(largest, key=lambda nid: (node_priority.get(nid, 0), nid))
             fallback_orphan = max(
                 orphans, key=lambda nid: (node_priority.get(nid, 0), nid)
@@ -487,12 +514,13 @@ def _bridge_subgraph_orphans(
                 edge_by_pair[key] = CharacterEdge(
                     source_id=fallback_orphan,
                     target_id=anchor,
-                    type="ally",
-                    polarity="mixed",
+                    type="unknown",
+                    polarity="unknown",
                     weight=_HARD_BRIDGE_WEIGHT,
+                    is_inferred=True,
                 )
             logger.warning(
-                "character_graph_chain: top-N 子图无跨分量共现，启用硬兜底 bridge %s -> %s",
+                "character_graph_chain: top-N 子图无跨分量共现，启用硬兜底 bridge %s -> %s (inferred)",
                 fallback_orphan,
                 anchor,
             )

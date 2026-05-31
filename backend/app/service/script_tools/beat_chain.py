@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -51,11 +52,66 @@ _ALLOWED_BEATS = {"opening", "inciting", "midpoint", "climax", "closing", "twist
 # Summary 上限。50 字与 Field 的 logline 习惯一致；超出截断。
 _SUMMARY_MAX_LEN = 50
 
+# Summary 下限：太短的 LLM 输出（< 8 字）几乎一定是 type 标签残留，需要 reject。
+_SUMMARY_MIN_LEN = 8
+
 # 单场上下文截断。LLM prompt 控 token，不影响 anchor 选取。
 _SCENE_TEXT_LIMIT = 600
 
-# 给 LLM 看的候选锚点最多 12 个。再多 prompt 太胖，且 act3 不需要太多。
-_MAX_CANDIDATES = 12
+# v3.7.4: 候选锚点上限改为数据驱动。
+#
+# 业内对照：
+#   - Save the Cat 15-beat sheet（电影 120 分钟基准）—— 15 个核心节拍
+#   - Truby 22 Building Blocks —— 22 步法
+#   - Linda Aronson 短剧节拍密度调研：每 6-10 分钟 1 个核心 beat（短剧 1 集 ~ 6 分钟）
+#
+# 我们按场数计算，避免 100 集长剧硬塞 12 个候选导致 act 后半段全空：
+#   - n_scenes ≤ 30   : 6 个候选（act1:1, act2:3, act3:2）
+#   - n_scenes 30-80  : 9 个候选（act1:2, act2:5, act3:2）
+#   - n_scenes 80-200 : 12 个候选（act1:2, act2:7, act3:3）
+#   - n_scenes ≥ 200  : 15 个候选（act1:3, act2:9, act3:3）
+_CANDIDATES_BY_SCALE: List[Tuple[int, int]] = [
+    (30, 6),
+    (80, 9),
+    (200, 12),
+]
+_MAX_CANDIDATES_UPPER = 15  # 极长剧上限
+
+# 每幕 beat 数量上限（LLM prompt 看到的，**数据驱动**）。
+# 短剧不强套 Save the Cat 15 节拍，但 act2（发展）总是节拍最密集的段，
+# 应该给更多空间；act1（开局）和 act3（收束）相对紧凑。
+def _max_beats_per_act(n_scenes: int) -> Dict[int, int]:
+    """根据剧本场数算每幕 beat 数上限（数据驱动，非硬编码）。
+
+    短剧场景密度典型：30 场 = 5 集，100 场 = 20 集，300 场 = 60 集。
+    经验配比：act1 ≈ 1/4 容量，act2 ≈ 1/2，act3 ≈ 1/4。
+    """
+    if n_scenes <= 30:
+        return {1: 2, 2: 3, 3: 2}
+    if n_scenes <= 80:
+        return {1: 2, 2: 4, 3: 2}
+    if n_scenes <= 200:
+        return {1: 3, 2: 5, 3: 3}
+    return {1: 3, 2: 6, 3: 3}
+
+
+def _candidate_cap(n_scenes: int) -> int:
+    """根据剧本场数算候选锚点总上限。"""
+    for ceil, cap in _CANDIDATES_BY_SCALE:
+        if n_scenes <= ceil:
+            return cap
+    return _MAX_CANDIDATES_UPPER
+
+# v3.7.2 低质量 summary 检测：LLM 经常输出「X：场景头」类的标签残留（如「开端：关键场」
+# 「中点反转：办公室日内」「高潮：卧室日内」），这些不是真正的节拍概括，
+# 应该被 reject + fallback 到带剧情信息的 rule summary。
+_TYPE_PREFIX = "(开端|开场|钩子|中点|中点反转|二次反转|高潮|收束|结局|爽点|反转|节拍)"
+_SCENE_HEAD = "(关键场|过场|普通场|日内|日外|夜内|夜外)"
+_BAD_BEAT_SUMMARY_RE = re.compile(
+    rf"^{_TYPE_PREFIX}[:：][\s]*[^，。；,;\.]{{0,12}}{_SCENE_HEAD}\s*$"
+)
+# 兼容更宽松的「X：≤4 字关键词」纯标签形态
+_LABEL_ONLY_SUMMARY_RE = re.compile(rf"^{_TYPE_PREFIX}[:：][\s]*\S{{1,8}}\s*$")
 
 
 @dataclass
@@ -91,12 +147,24 @@ class BeatAct:
 @dataclass
 class BeatSheet:
     acts: List[BeatAct] = field(default_factory=list)
-    # observability：调用方可记录 source 用于 BI / 单测
+    # observability：调用方可记录 source 用于 BI / 单测 / 前端降级提示
+    # source: "llm" | "hybrid" | "rule_fallback"
     source: str = "llm"
     fallback_reasons: List[str] = field(default_factory=list)
+    # W1.9 (2026-05-31)：被规则替换的 beat 数（LLM 输出垃圾 summary 被 reject 后改用
+    # rule fallback）。如果 > 0，整体 source 必须降级为 hybrid。
+    rule_replaced_beat_count: int = 0
 
     def to_dict(self) -> dict:
-        return {"acts": [a.to_dict() for a in self.acts]}
+        # W1.9 (2026-05-31)：to_dict 必须含 provenance 字段，否则上游 ChainResult
+        # 无法判断是「全 LLM」还是「部分规则补」。旧实现只输出 acts，前端永远显示绿
+        # 灯，用户被欺骗。
+        return {
+            "acts": [a.to_dict() for a in self.acts],
+            "source": self.source,
+            "fallback_reasons": list(self.fallback_reasons),
+            "rule_replaced_beat_count": self.rule_replaced_beat_count,
+        }
 
 
 @dataclass
@@ -135,16 +203,26 @@ _USER_PROMPT = """下面是从剧本中**规则层预选**的候选锚点。请�
 2. 你只能从上面候选 ``seq`` 里挑锚点，**不允许新增 seq、不允许重复 seq、不允许引用没出现的 seq**。
 3. ``type`` 必须是 opening/inciting/midpoint/climax/closing/twist/reward 之一；
    候选行已给出 ``type_hint``，没把握就用 ``type_hint``。
-4. 每幕 1-3 个 beat。**每一幕至少 1 个 beat**。
-5. summary 字数与格式：
-   - 普通 beat：≤ 50 字
-   - **climax / closing 必须 ≥ 12 字**——这两类是前端速览速读位（钩子/高潮/结局）的内容来源，
-     写「关键场」「中点」这种标签型残留 或 「收束：帝王居，日内」这种 scene heading 残留
-     会被前端过滤丢弃。写**完整概括句**，例如：
-     - climax 好范例：「陆沉舟腾龙宴揭穿质疑，公开青帮龙首身份击败赵鑫」
-     - closing 好范例：「陆沉舟向叶云浅公开求婚，全剧以双向救赎收尾」
-6. summary 写"这一拍承担的故事功能 + 关键人物动作"，不要直接摘台词，不要写场景头（日内/日外/夜内等）。
-7. 输出**一个 JSON 对象**，不要 markdown / 代码块 / 解释。
+4. **每幕 beat 数量上限（数据驱动）**：act1={max_act1}，act2={max_act2}，act3={max_act3}。
+   **每一幕至少 1 个 beat**，不允许超过上限；不需要凑数。
+5. summary 字数与格式（**硬性规则，违反会被后端 reject 丢弃**）：
+   - 所有 beat：**8-50 字之间**，写完整概括句
+   - climax / closing 必须 ≥ 12 字
+6. summary 必须包含「人物 + 动作 + 后果」三要素之一，**严禁纯标签 / 场景头残留**：
+   - ❌ 错误反例（这些会被自动丢弃）：
+     * "开端：关键场"           ← 纯 type + 标签
+     * "中点反转：办公室日内"     ← scene heading 残留
+     * "高潮：卧室日内"          ← scene heading 残留
+     * "收束：帝王居，日内"       ← 同上
+     * "节拍"                  ← 纯类型词
+   - ✅ 正确范例：
+     * opening：「姜栀枝伪装柔弱混入修罗场，引出反派注意」
+     * inciting：「裴鹤年误以为姜栀枝暗恋自己十年，主动出击」
+     * midpoint：「身份反转：姜栀枝揭开真面目，全员震惊」
+     * climax：「陆沉舟揭穿赵鑫身份，腾龙宴公开击败对手」
+     * closing：「双向救赎：陆沉舟向叶云浅公开求婚」
+7. 严禁输出场景头关键词「日内 / 日外 / 夜内 / 夜外 / 内景 / 外景」。
+8. 输出**一个 JSON 对象**，不要 markdown / 代码块 / 解释。
 
 【输出 JSON】
 {{
@@ -188,8 +266,17 @@ async def extract_beat_sheet(
         # 极端情况：scenes 不足 2 场。直接 rule fallback 给 1 幕 1 beat。
         return _rule_fallback(scenes, reward_events or [], reason="too_few_scenes")
 
+    # v3.7.4: 每幕 beat 上限按场数算（数据驱动），传给 LLM prompt
+    max_beats = _max_beats_per_act(len(scenes))
+    logger.info(
+        "beat_chain: n_scenes=%d candidate_cap=%d max_beats_per_act=%s",
+        len(scenes),
+        _candidate_cap(len(scenes)),
+        max_beats,
+    )
+
     try:
-        sheet = await _enrich_via_llm(candidates, caller)
+        sheet = await _enrich_via_llm(candidates, caller, max_beats_per_act=max_beats)
         return sheet
     except ScoreLLMError as exc:
         logger.warning("beat_chain: LLM enrichment failed, fall back to rule. err=%s", exc)
@@ -282,7 +369,8 @@ def _derive_candidate_anchors(
     if 3 not in have_acts and act3_scenes:
         _push("closing", 3, act3_scenes[-1])
 
-    chosen = chosen[:_MAX_CANDIDATES]
+    # v3.7.4: 候选锚点上限根据剧本场数算（数据驱动）。
+    chosen = chosen[: _candidate_cap(n)]
     return [
         _CandidateAnchor(seq=idx + 1, act=act, type_hint=type_hint, scene=scene)
         for idx, (type_hint, act, scene) in enumerate(chosen)
@@ -312,8 +400,16 @@ def _pick_reward_peak(
 async def _enrich_via_llm(
     candidates: List[_CandidateAnchor],
     caller: LlmCaller,
+    *,
+    max_beats_per_act: Optional[Dict[int, int]] = None,
 ) -> BeatSheet:
-    prompt = _USER_PROMPT.format(candidates_block=_render_candidates(candidates))
+    caps = max_beats_per_act or {1: 3, 2: 5, 3: 3}
+    prompt = _USER_PROMPT.format(
+        candidates_block=_render_candidates(candidates),
+        max_act1=caps.get(1, 3),
+        max_act2=caps.get(2, 5),
+        max_act3=caps.get(3, 3),
+    )
     resp = await caller.call_json(
         prompt=prompt,
         tier=ModelTier.PRIMARY,
@@ -332,6 +428,8 @@ async def _enrich_via_llm(
     by_seq = {c.seq: c for c in candidates}
     beats_by_act: Dict[int, List[BeatNode]] = {1: [], 2: [], 3: []}
     used_seq: set = set()
+    # W1.9：统计 LLM 给了 summary 但被 reject 改用 rule summary 的 beat 数
+    rule_replaced_summary_count = 0
 
     for raw in raw_acts:
         if not isinstance(raw, dict):
@@ -339,7 +437,18 @@ async def _enrich_via_llm(
         act_no = raw.get("act")
         if act_no not in (1, 2, 3):
             continue
-        for raw_beat in raw.get("beats") or []:
+        # v3.7.2: LLM 偶尔会把 "beats" 写成数字（如 `"beats": 3`）或字符串而非数组。
+        # 必须显式 isinstance list 校验，否则会触发 'int' object is not iterable。
+        raw_beats = raw.get("beats")
+        if not isinstance(raw_beats, list):
+            logger.warning(
+                "beat_chain: act=%s 的 beats 字段不是 list (type=%s value=%r)，跳过该幕，走规则兜底",
+                act_no,
+                type(raw_beats).__name__,
+                raw_beats if not isinstance(raw_beats, str) else raw_beats[:60],
+            )
+            continue
+        for raw_beat in raw_beats:
             if not isinstance(raw_beat, dict):
                 continue
             seq = raw_beat.get("seq")
@@ -356,8 +465,20 @@ async def _enrich_via_llm(
             if beat_type not in _ALLOWED_BEATS:
                 beat_type = anchor.type_hint
             summary = str(raw_beat.get("summary") or "").strip()
-            if not summary:
+            # v3.7.2：LLM 给的 summary 命中低质量模式（场景头残留 / 纯 type 标签 / 过短）
+            # 直接 reject，回退到带剧情正文的规则 summary，避免速览速读位塞垃圾。
+            beat_replaced = False
+            if not summary or _is_low_quality_summary(summary):
+                if summary:
+                    logger.info(
+                        "beat_chain: rejected low-quality LLM summary %r (seq=%s type=%s) → rule fallback",
+                        summary[:40],
+                        seq_int,
+                        beat_type,
+                    )
                 summary = _scene_label_summary(anchor.scene, anchor.type_hint)
+                beat_replaced = True
+                rule_replaced_summary_count += 1
             beats_by_act[act_no].append(
                 BeatNode(
                     type=beat_type,
@@ -385,8 +506,22 @@ async def _enrich_via_llm(
         fallback_reasons.append(f"act{act_no}_filled_by_rule")
 
     acts = _build_acts(candidates, beats_by_act)
+    # W1.9：rule_replaced_beat_count = 「LLM 给了 summary 但被 reject 重写」 +
+    # 「整幕缺失 act 补位」。任一 > 0 即整体降级为 hybrid。
+    rule_replaced_total = rule_replaced_summary_count + len(
+        [r for r in fallback_reasons if r.startswith("act") and r.endswith("_filled_by_rule")]
+    )
+    if rule_replaced_summary_count > 0:
+        fallback_reasons.append(
+            f"beats_rule_replaced_summary_count={rule_replaced_summary_count}"
+        )
     source = "hybrid" if fallback_reasons else "llm"
-    return BeatSheet(acts=acts, source=source, fallback_reasons=fallback_reasons)
+    return BeatSheet(
+        acts=acts,
+        source=source,
+        fallback_reasons=fallback_reasons,
+        rule_replaced_beat_count=rule_replaced_total,
+    )
 
 
 def _render_candidates(candidates: List[_CandidateAnchor]) -> str:
@@ -405,20 +540,127 @@ def _render_candidates(candidates: List[_CandidateAnchor]) -> str:
     return "\n\n---\n\n".join(blocks)
 
 
+_TYPE_ZH = {
+    "opening": "开端",
+    "inciting": "钩子",
+    "midpoint": "中点反转",
+    "twist": "二次反转",
+    "climax": "高潮",
+    "closing": "收束",
+    "reward": "爽点",
+}
+
+
+# v3.7.4: 跳过这些"非剧情"行（场号 / 集号 / 人物列表 / 纯场景头）。
+# 实际剧本头部典型：
+#   第一集
+#   1-1
+#   酒店夜内
+#   人物：姜栀枝裴鹤年
+#   △裴鹤年被蒙着双眼，姜栀枝解开裴鹤年衣服扣子
+#   系统VO（字幕）：已锁定载体，宿主灵魂投放中
+# 前 4 行都是 metadata，第 5 行（△ 动作行）才是真正的剧情。
+_SCENE_HEADER_LINE_RE = re.compile(
+    r"^("
+    r"第[一二三四五六七八九十百千零0-9]+[集场]\s*$|"  # 第八十四集
+    r"\d+-\d+\s*$|"                                  # 84-1
+    r"\d+-\d+\s+\S{1,12}\s*$|"                       # 84-1 卧室日内
+    r"人物[:：].*$|"                                  # 人物：姜栀枝裴鹤年
+    r"场景[:：].*$|"                                  # 场景：办公室
+    r"(INT|EXT|S)\.\s*.*$|"                          # INT. 卧室
+    r"内景[\s:：].*$|外景[\s:：].*$|"
+    r"\S{1,8}(日内|日外|夜内|夜外)\s*$"                # 卧室日内
+    r")"
+)
+# 动作行（△ 开头）和对白行（角色（情绪）：xxx）都是合法的剧情正文起点。
+_ACTION_LINE_RE = re.compile(r"^[△▲■◆●▼]")
+_DIALOGUE_LINE_RE = re.compile(r"^\S{1,12}(（[^）]*）)?[:：]")
+
+
+def _extract_plot_excerpt(scene_text: str) -> Optional[str]:
+    """从 scene.text 抽 ≥ 12 字的剧情正文片段。
+
+    策略：
+      1. 按行逐句扫描，跳过场号 / 集号 / 人物列表 / 场景头 / 空行
+      2. 命中第 1 个"动作行（△…）"或"对白行（角色：…）"开始累积内容
+      3. 累计到 ≥ 12 字时返回，最多取 ≤ 40 字
+      4. 没找到合法行 → 返回 None，让上层走更差的 fallback
+    """
+    if not scene_text:
+        return None
+    plot_chunks: List[str] = []
+    accumulated = 0
+    for raw_line in scene_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if _SCENE_HEADER_LINE_RE.match(line):
+            continue
+        # 系统 VO 字幕这种 narration 也算剧情（短剧很常见）
+        is_action = bool(_ACTION_LINE_RE.match(line))
+        is_dialogue = bool(_DIALOGUE_LINE_RE.match(line))
+        is_plot = is_action or is_dialogue or len(line) >= 10
+        if not is_plot:
+            continue
+        # 去掉动作行的标记符号
+        clean = re.sub(r"^[△▲■◆●▼]\s*", "", line).strip()
+        # 对白行抽取「角色：内容」的角色 + 内容（保留语义）
+        clean = re.sub(r"^(\S{1,12})（[^）]*）", r"\1", clean)
+        if not clean:
+            continue
+        plot_chunks.append(clean)
+        accumulated += len(clean)
+        if accumulated >= 28:
+            break
+    if not plot_chunks:
+        return None
+    joined = "；".join(plot_chunks)
+    # 去掉句末标点叠加
+    joined = re.sub(r"[，。！？；,;.]+$", "", joined).strip()
+    if len(joined) < 12:
+        return None
+    return joined[:38]
+
+
 def _scene_label_summary(scene: Scene, type_hint: BeatType) -> str:
-    """rule fallback summary：场标签 + 节拍类型，控制在 50 字内。"""
-    label = (scene.scene_label or "").strip() or "关键场"
-    type_zh = {
-        "opening": "开端",
-        "inciting": "钩子",
-        "midpoint": "中点反转",
-        "twist": "二次反转",
-        "climax": "高潮",
-        "closing": "收束",
-        "reward": "爽点",
-    }.get(type_hint, "节拍")
-    summary = f"{type_zh}：{label}"
-    return summary[:_SUMMARY_MAX_LEN]
+    """rule fallback summary（v3.7.4 重写）：彻底告别"X：人物 关键场"垃圾格式。
+
+    新策略：
+      1. 优先用 ``_extract_plot_excerpt`` 从 scene.text 抽 12-38 字真实剧情
+      2. 找不到剧情正文 → 用 type + 第 ep/sc + 人物，但**不带"关键场"死词**
+      3. 没人物没正文 → 明确标注「需手动审阅」让运营 / 用户知道这是异常场，
+         而不是骗过用户以为这是真节拍
+    """
+    type_zh = _TYPE_ZH.get(type_hint, "节拍")
+    plot = _extract_plot_excerpt(scene.text or "")
+    if plot:
+        budget = _SUMMARY_MAX_LEN - len(type_zh) - 1
+        return f"{type_zh}：{plot[:budget]}"
+    # 没抓到剧情正文：给出诚实的"占位"，明确标注异常，便于回查
+    ep = scene.episode_no or "?"
+    sc = scene.scene_no or "?"
+    if scene.characters:
+        chars = "、".join((scene.characters or [])[:2])
+        return f"{type_zh}（第{ep}集 · {sc}）：{chars} · 待补充"[:_SUMMARY_MAX_LEN]
+    return f"{type_zh}（第{ep}集 · {sc}）：场次内容待补充"[:_SUMMARY_MAX_LEN]
+
+
+def _is_low_quality_summary(summary: str) -> bool:
+    """命中低质量模式（场景头残留 / 纯 type 标签）就 reject。
+
+    用于 _enrich_via_llm 输出后过滤——这种 summary 落库会让速览速读位完全失效。
+    """
+    s = (summary or "").strip()
+    if len(s) < _SUMMARY_MIN_LEN:
+        return True
+    if _BAD_BEAT_SUMMARY_RE.match(s):
+        return True
+    if _LABEL_ONLY_SUMMARY_RE.match(s):
+        return True
+    # 句中含 scene heading 关键词且 ≤ 14 字（说明信息量太低）
+    if len(s) <= 14 and re.search(r"(日内|日外|夜内|夜外)", s):
+        return True
+    return False
 
 
 def _build_acts(

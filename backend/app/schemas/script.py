@@ -324,14 +324,37 @@ class ReportHighlight(BaseModel):
 
 
 class CoveragePoint(BaseModel):
-    """Coverage Card 的优劣点（v3.5）：**全剧综合判断纯文本**，不再附 scene anchor / quote。
+    """Coverage Card 的优劣点（v3.7.3 升级）：业内 Hollywood Coverage Report 的
+    Strengths / Weaknesses 段标准做法 —— 每条 point 是 title + 一句话评价 +
+    可展开的深度分析 + 维度归属 + 证据锚点提示。
 
-    与故事 / 看点 / 风险 tab 的 evidence_ref 严格分层——速览只回答全剧综合判断，
-    单场单引用证据在其他 tab 提供。
+    业内对照：
+      - Hollywood Coverage Report: 每条加粗 title + 100-300 字展开分析 + 引用页码/场号
+      - ReelShort / 抖音红果选品端: title + 维度归属（钩子/爽点/反转）+ 例子场号
+      - Industrial Scripts Coverage Standard: 1 句话评价 + 段落分析 + 证据引用
+
+    `analysis` 可选——LLM 给得出就有，给不出前端只显示 title + detail（向后兼容）。
+    `dimension` 对齐 6 维评分（story/character/concept/emotion/pacing/dialogue），
+    前端用对应维度色和评分卡颜色保持一致。
     """
 
-    title: str = Field(..., description="≤ 12 字")
-    detail: str = Field(..., description="≤ 80 字，面向选品/编剧/审核的人话说明")
+    title: str = Field(..., description="≤ 12 字 标题")
+    detail: str = Field(..., description="≤ 80 字，一句话评价")
+    analysis: str = Field(
+        "",
+        description="≤ 300 字 展开深度分析（结合剧本具体桥段说明 why）—— 前端默认折叠，点击展开",
+    )
+    dimension: str = Field(
+        "",
+        description=(
+            "维度归属（story/character/concept/emotion/pacing/dialogue），"
+            "对齐 6 维评分。空字符串表示综合性 point。"
+        ),
+    )
+    evidence_hint: str = Field(
+        "",
+        description="≤ 60 字 证据线索（如「第 17 集 · 姜栀枝揭面」），引导用户去原文找例子",
+    )
 
 
 class ComparableTitleEntry(BaseModel):
@@ -670,6 +693,15 @@ class ReportPayload(BaseModel):
     risk_flags: List[str] = Field(default_factory=list)
     report_id: Optional[str] = None
     generated_at: Optional[str] = None
+    # W1.3 (2026-05-31)：报告级 provenance 元数据（chain_status + overall_status）。
+    # 由 generate_report 写入；前端用来渲染降级提示条。详见 chain_result.py。
+    meta: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description=(
+            "报告级元数据，含 chain_status (每个 chain 的 status/source/fallback_reasons)"
+            " 和 overall_status (ok | degraded)。"
+        ),
+    )
 
 
 class ReportResponse(BaseModel):
@@ -918,6 +950,11 @@ class ViewResponse(BaseModel):
             "派生：key=`{scene_id}:{dimension}`，value=该维度该场上的改写任务状态。"
             "前端按此 key lookup 渲染卡片右上角徽章。"
         ),
+    )
+    # W1.3 (2026-05-31)：透传 ReportPayload.meta。
+    meta: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="报告级 provenance 元数据（chain_status + overall_status）",
     )
 
 

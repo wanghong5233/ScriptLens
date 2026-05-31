@@ -243,18 +243,31 @@ def _coerce_to_parsed_scenes(
         )
         return None
     if len(out) > LLM_SEGMENT_MAX_SCENES:
+        # 旧实现 bug（v3.7.5 修复）：先用累积的 seen_paras 通过零丢失检查，
+        # 再 `out = out[:30]` 截断；被截掉的场对应段落 silently 丢失，
+        # 但 seen_paras 仍包含它们 → 零丢失检查被骗过 → 下游 LLM 拿到不完整剧本。
+        # 现在 trim 之前明确 reject，保留契约：要么零丢失成功，要么走 single_scene。
         logger.warning(
-            "llm_resegment: produced %d scenes (over max %d), trimming to top %d",
-            len(out), LLM_SEGMENT_MAX_SCENES, LLM_SEGMENT_MAX_SCENES,
+            "llm_resegment: produced %d scenes (over max %d), reject (would silently drop trailing scenes)",
+            len(out),
+            LLM_SEGMENT_MAX_SCENES,
         )
-        out = out[:LLM_SEGMENT_MAX_SCENES]
+        return None
 
-    # 检查零丢失：所有 body 段落（非空段）都进入了某场
+    # 检查零丢失：所有 body 段落（非空段）都被 *实际保留的场* 覆盖。
+    # v3.7.5: 用 out 重算 final_covered，不再信任累积的 seen_paras（防御未来再
+    # 引入 trim 逻辑时复发此 bug）。
+    final_covered: set[int] = set()
+    for scene in out:
+        start = scene.start_idx - body_start_in_full
+        end = scene.end_idx - body_start_in_full
+        if 0 <= start <= end:
+            final_covered.update(range(start, end + 1))
     body_non_empty = {i for i, p in enumerate(body_paragraphs) if p.strip()}
-    missing = body_non_empty - seen_paras
+    missing = body_non_empty - final_covered
     if missing:
         logger.warning(
-            "llm_resegment: %d paragraphs not covered (would lose data); reject",
+            "llm_resegment: %d paragraphs not covered by final scenes (would lose data); reject",
             len(missing),
         )
         return None

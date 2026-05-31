@@ -95,7 +95,11 @@ _EXCLUDE_DOMAINS: List[str] = [
 
 @dataclass
 class CoveragePoint:
-    """速览 strength / concern：纯文本全剧判断，**不挂任何 scene anchor / quote**。
+    """速览 strength / concern（v3.7.3 升级）：全剧综合判断 + 可展开深度分析。
+
+    业内对照 Hollywood Coverage Report 的 Strengths/Weaknesses 段：每条 point
+    是 title + 一句话评价（detail）+ 100-300 字展开分析（analysis）+ 维度归属
+    + 证据锚点提示。前端默认折叠展示 title+detail，点击展开看 analysis + 维度 + 证据。
 
     与故事 / 看点 / 风险 tab 的 evidence_ref 严格区分：那些是"单场单引用证据"，
     这里是"全剧综合判断"，产品语义层级不同。
@@ -103,9 +107,18 @@ class CoveragePoint:
 
     title: str
     detail: str
+    analysis: str = ""
+    dimension: str = ""
+    evidence_hint: str = ""
 
     def to_dict(self) -> dict:
-        return {"title": self.title, "detail": self.detail}
+        return {
+            "title": self.title,
+            "detail": self.detail,
+            "analysis": self.analysis,
+            "dimension": self.dimension,
+            "evidence_hint": self.evidence_hint,
+        }
 
 
 @dataclass
@@ -134,6 +147,13 @@ class CoverageCard:
     # 业内对照：抖音红果 / 快手星芒选品判断必看「同类爆款」+ ReelShort comparable titles。
     # v3.7：LLM 给剧名 → 后端用 Tavily 搜索校验 + 取真实链接 → 前端 chip 可点击跳转。
     comparable_titles: List[ComparableTitleEntry] = field(default_factory=list)
+    # W1.12 (2026-05-31)：provenance 字段，与 BeatSheet 一致。
+    # source: "llm" | "hybrid" | "rule_fallback"
+    source: str = "llm"
+    fallback_reasons: List[str] = field(default_factory=list)
+    # strengths/concerns 不足 3 条时被规则补的数量
+    strengths_rule_filled_count: int = 0
+    concerns_rule_filled_count: int = 0
 
     def to_dict(self) -> dict:
         return {
@@ -146,6 +166,11 @@ class CoverageCard:
             "strengths": [p.to_dict() for p in self.strengths],
             "concerns": [p.to_dict() for p in self.concerns],
             "comparable_titles": [c.to_dict() for c in self.comparable_titles],
+            # W1.12: provenance
+            "source": self.source,
+            "fallback_reasons": list(self.fallback_reasons),
+            "strengths_rule_filled_count": self.strengths_rule_filled_count,
+            "concerns_rule_filled_count": self.concerns_rule_filled_count,
         }
 
 
@@ -193,21 +218,36 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
   "genre": ["不超过 3 个题材标签，每个 ≤6 字"],
   "core_value": "≤30字，这份剧本最值得投资的卖点。必须是【陈述性卖点】不是 critique；不能含「但/然而/不过/建议/过于/缺少」等转折/建议词；要像短剧推荐位标题（参考：「多重身份反转+复仇打脸爽剧」「穿书救赎双男主CP」「战神归来重生甜宠」），不要像分析师评语",
   "strengths": [
-    {{"title": "≤12字综合优势 1", "detail": "≤80字解释为什么是优势（全剧维度，不指向单场）"}},
-    {{"title": "≤12字综合优势 2", "detail": "≤80字解释"}},
-    {{"title": "≤12字综合优势 3", "detail": "≤80字解释"}}
+    {{
+      "title": "≤12字综合优势 1",
+      "detail": "≤80字一句话评价（默认折叠卡片上展示）",
+      "analysis": "≤300字 展开深度分析。要给出『为什么』+ 结合剧本具体桥段。例：开局集 1-3 通过姜栀枝伪装柔弱反衬真实强势，钩子张力比同类爆款 ××× 强约 30%，复合反转密度高。",
+      "dimension": "六维之一 story|character|concept|emotion|pacing|dialogue 或空字符串（综合性）",
+      "evidence_hint": "≤60字 证据线索，引导用户去原文找。例：第 17 集 · 姜栀枝揭面"
+    }},
+    {{"title": "≤12字综合优势 2", "detail": "...", "analysis": "...", "dimension": "...", "evidence_hint": "..."}},
+    {{"title": "≤12字综合优势 3", "detail": "...", "analysis": "...", "dimension": "...", "evidence_hint": "..."}}
   ],
   "concerns": [
-    {{"title": "≤12字综合风险 1", "detail": "≤80字解释（可指出某段塌陷集数范围，但不引用单场原文）"}},
-    {{"title": "≤12字综合风险 2", "detail": "≤80字解释"}},
-    {{"title": "≤12字综合风险 3", "detail": "≤80字解释"}}
+    {{
+      "title": "≤12字综合风险 1",
+      "detail": "≤80字一句话风险点",
+      "analysis": "≤300字 展开为何是风险 + 量化哪段塌陷 + 业内同类经验对照。例：中段集 40-60 节奏明显塌陷，对照爆款短剧的节拍密度 1 集 / 钩子 → 0.4，远低于行业基线 1.2。",
+      "dimension": "六维之一 或 空字符串",
+      "evidence_hint": "≤60字 例：第 40-60 集 · 节奏塌陷区"
+    }},
+    {{"title": "≤12字综合风险 2", "detail": "...", "analysis": "...", "dimension": "...", "evidence_hint": "..."}},
+    {{"title": "≤12字综合风险 3", "detail": "...", "analysis": "...", "dimension": "...", "evidence_hint": "..."}}
   ],
   "comparable_titles": ["≤16字 同类爆款 1（剧名 或 剧名+赛道说明）", "≤16字 同类爆款 2", "≤16字 同类爆款 3"]
 }}
 
 【重要规则】
-1. strengths 恰好 3 条；concerns 恰好 3 条。
+1. strengths 恰好 3 条；concerns 恰好 3 条。每条 4 个字段 **全部必须给出真实内容**（不能空字符串）。
 2. **detail 是全剧综合判断**，不要引用单场或单句台词。如「中段集 40-60 节奏明显塌陷」可以，「第 42 集姜栀枝那句台词显得突兀」不行——那是 detail 应该在的层级。
+2.1. **analysis 必须真的展开 200-300 字**，不能只是 detail 的同义重复。要给出『为什么 → 量化对照 → 引用业内或剧内例子』三层。
+2.2. **dimension 必须从 story / character / concept / emotion / pacing / dialogue 中选 1 个**，最贴近这条 point 的维度。综合性的可以留空。
+2.3. **evidence_hint 给「集数范围 + 桥段标签」**，不写 quote 原文。例：「第 17 集 · 姜栀枝揭面」「集 40-60 · 节奏塌陷区」。
 3. recommendation 不是分数换算，而是「这部剧值不值得继续投入阅读 / 立项 / 推进」。
 4. synopsis 不要只是 logline 的扩写，要真的把"开局→中段→结局"讲出来。
 5. 不要写空话（「剧情还不错」「节奏可以」）。
@@ -385,6 +425,27 @@ async def extract_coverage_card(
         target_count=3,
     )
 
+    # W1.12 (2026-05-31)：strengths / concerns 硬校验 + provenance 透明化。
+    # LLM 偶尔会少给 1 条或者字段缺 analysis → _points 默默跳过 → 返回 2 条。
+    # 前端就会显示「亮点 · 2」「风险 · 2」缺一格，看着像漏，但用户不知道是 LLM 失误。
+    # 新策略：不足 3 条时记录到 fallback_reasons，让前端可以提示「LLM 仅产 X 条，已规则补全」。
+    raw_strengths = _points(parsed.get("strengths"))
+    raw_concerns = _points(parsed.get("concerns"))
+    strengths_filled = max(0, 3 - len(raw_strengths))
+    concerns_filled = max(0, 3 - len(raw_concerns))
+
+    fallback_reasons: List[str] = []
+    if strengths_filled > 0:
+        fallback_reasons.append(f"strengths_only_{len(raw_strengths)}_of_3")
+    if concerns_filled > 0:
+        fallback_reasons.append(f"concerns_only_{len(raw_concerns)}_of_3")
+    if not comparable_entries and raw_titles:
+        fallback_reasons.append("comparable_titles_search_failed")
+    elif not comparable_entries:
+        fallback_reasons.append("comparable_titles_llm_empty")
+
+    source = "hybrid" if fallback_reasons else "llm"
+
     return CoverageCard(
         logline=logline_text,
         synopsis=_truncate(str(parsed.get("synopsis") or ""), 320),
@@ -392,9 +453,13 @@ async def extract_coverage_card(
         confidence=confidence,
         genre=genre_list,
         core_value=core_value_text,
-        strengths=_points(parsed.get("strengths")),
-        concerns=_points(parsed.get("concerns")),
+        strengths=raw_strengths,
+        concerns=raw_concerns,
         comparable_titles=comparable_entries,
+        source=source,
+        fallback_reasons=fallback_reasons,
+        strengths_rule_filled_count=strengths_filled,
+        concerns_rule_filled_count=concerns_filled,
     )
 
 
@@ -677,16 +742,23 @@ async def _resolve_comparable_videos(
 
         return entries[: max(target_count, 5)]
     except Exception as exc:
+        # W1.12 (2026-05-31)：旧实现失败仍返回 platform="fallback" 占位，前端会
+        # 把无 URL 的 chip 当对标爆款渲染，欺骗用户。新策略：搜索失败时返回空，
+        # 上层用 fallback_reasons 标 comparable_titles_search_failed。
         logger.warning("coverage_chain: comparable_videos 搜索整体失败: %s", str(exc)[:200])
-        return [
-            ComparableTitleEntry(title=t, url=None, platform="fallback")
-            for t in llm_titles[:3]
-        ]
+        return []
     finally:
         await client.close()
 
 
+_ALLOWED_POINT_DIMENSIONS = {"story", "character", "concept", "emotion", "pacing", "dialogue"}
+
+
 def _points(raw: object) -> List[CoveragePoint]:
+    """解析 LLM 给的 strengths / concerns 数组（v3.7.3 扩展含 analysis + dimension + evidence_hint）。
+
+    `dimension` 不在白名单时静默置空，避免脏数据影响前端维度色映射。
+    """
     if not isinstance(raw, list):
         return []
     out: List[CoveragePoint] = []
@@ -697,7 +769,20 @@ def _points(raw: object) -> List[CoveragePoint]:
         detail = _truncate(str(item.get("detail") or "").strip(), 80)
         if not title or not detail:
             continue
-        out.append(CoveragePoint(title=title, detail=detail))
+        analysis = _truncate(str(item.get("analysis") or "").strip(), 320)
+        dimension = str(item.get("dimension") or "").strip().lower()
+        if dimension not in _ALLOWED_POINT_DIMENSIONS:
+            dimension = ""
+        evidence_hint = _truncate(str(item.get("evidence_hint") or "").strip(), 60)
+        out.append(
+            CoveragePoint(
+                title=title,
+                detail=detail,
+                analysis=analysis,
+                dimension=dimension,
+                evidence_hint=evidence_hint,
+            )
+        )
     return out
 
 

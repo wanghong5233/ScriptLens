@@ -54,13 +54,24 @@ class DecisionJudgement:
 
 @dataclass
 class MotivationResult:
-    """rubric §6：score/level 在「证据不足」时为 None；其余正常 0-10/三档。"""
+    """rubric §6：score/level 在「证据不足」时为 None；其余正常 0-10/三档。
+
+    W1.11 (2026-05-31)：增 provenance 字段，让上层 ChainResult 能透明传达：
+      - ``partial_failure``: 是否有 decision 评估失败（≠ 整 chain 失败）
+      - ``judged_count`` / ``attempted_count``: 实际成功 vs 尝试评估的决策数
+      - ``filter_degraded``: filter 阶段是否走了 top-K 降级（说明 noise 风险）
+    """
 
     score: Optional[int]
     level: Optional[str]  # high | medium | low | None
     reason: str
     evidence_ref_ids: List[str]
     judged_decisions: List[DecisionJudgement] = field(default_factory=list)
+    partial_failure: bool = False
+    judged_count: int = 0
+    attempted_count: int = 0
+    filter_degraded: bool = False
+    filter_degraded_reason: Optional[str] = None
 
 
 _PROMPT_TEMPLATE = """你是中文短剧剧本审稿专家。下面给你一个【关键决策场景】和它前面 N 场的【上下文场景】。
@@ -120,7 +131,9 @@ async def score_motivation(
         )
 
     # LLM 一级筛：从关键词召回里挑「真的是关键决策」的（避免角色嘴上说"我不认你"但只是日常吵架）
-    real_decisions = await _filter_real_decisions(candidates[: max_decisions * 2], caller)
+    real_decisions, filter_degraded, filter_degraded_reason = await _filter_real_decisions(
+        candidates[: max_decisions * 2], caller
+    )
     if not real_decisions:
         # 关键词召回但 LLM 二筛无真实决策 → 证据不足（不伪造 6/medium）
         return MotivationResult(
@@ -141,10 +154,13 @@ async def score_motivation(
         *tasks, return_exceptions=False
     )
     judged: List[DecisionJudgement] = [j for j in judgements if j is not None]
+    attempted_count = len(real_decisions)
+    judged_count = len(judged)
+    partial_failure = judged_count < attempted_count
     if not judged:
         # 所有决策判定都失败 → 真故障 fail aloud（不再返回伪 5/medium）
         raise ScoreLLMError(
-            f"motivation: {len(real_decisions)} 个决策场景的 LLM 回扫全部失败，"
+            f"motivation: {attempted_count} 个决策场景的 LLM 回扫全部失败，"
             f"无法给出动机维度评分"
         )
 
@@ -167,6 +183,10 @@ async def score_motivation(
         f"评估 {n} 个关键决策："
         f"{setup2_count} 个铺垫充足、{no_setup_count} 个无铺垫、{ooc_count} 个 OOC"
     )
+    if partial_failure:
+        reason += f"（其中 {attempted_count - judged_count} 个判定失败已忽略）"
+    if filter_degraded:
+        reason += f"（决策筛选 LLM 失败，已使用 top-K 关键词候选，{filter_degraded_reason}）"
     evidence_ref_ids = [j.decision_scene_id for j in judged[:5]]
     return MotivationResult(
         score=score,
@@ -174,16 +194,35 @@ async def score_motivation(
         reason=reason,
         evidence_ref_ids=evidence_ref_ids,
         judged_decisions=judged,
+        partial_failure=partial_failure,
+        judged_count=judged_count,
+        attempted_count=attempted_count,
+        filter_degraded=filter_degraded,
+        filter_degraded_reason=filter_degraded_reason,
     )
+
+
+# W1.11 (2026-05-31): filter 降级时不再全保留候选，避免噪声决策污染评分。
+# 取 top-K：按 reward 关键词命中数降序（这里简化为按 scene_no 顺序前 K 场，
+# 因为候选已经是按时间序的关键词召回结果，相当于剧情前 K 个"看起来像决策"的场）。
+_FILTER_FALLBACK_TOP_K = 8
 
 
 async def _filter_real_decisions(
     candidates: List[Scene],
     caller: LlmCaller,
-) -> List[Scene]:
-    """LLM 一级筛：把关键词召回里的真"关键决策"挑出来（一次 batch 完成）。"""
+) -> tuple[List[Scene], bool, Optional[str]]:
+    """LLM 一级筛：把关键词召回里的真"关键决策"挑出来（一次 batch 完成）。
+
+    Returns:
+        (filtered_decisions, filter_degraded, degraded_reason)
+
+        - filter_degraded=False: LLM 正常返回结果
+        - filter_degraded=True: LLM 失败，已用 top-K 兜底；上层 MotivationResult
+          应标记 partial_failure 并把降级信息透给前端
+    """
     if not candidates:
-        return []
+        return [], False, None
     blocks = []
     for sc in candidates:
         excerpt = (sc.text or "")[:300]
@@ -201,11 +240,23 @@ async def _filter_real_decisions(
             max_tokens=TokenBudget.DECISION_FILTER,
         )
     except ScoreLLMError as e:
-        logger.warning("decision filter failed, fall back to keyword-only: %s", e)
-        return candidates  # 失败时全保留
+        # 旧实现 bug：失败时 `return candidates` 把全部关键词召回都当真决策，
+        # noise 决策（如「我走了」日常吵架）直接进入 judge，污染动机分。
+        # 新策略：取 top-K（默认 8），并显式上报 degraded，让上层 MotivationResult
+        # 透给前端「决策筛选已降级」。
+        topk = candidates[:_FILTER_FALLBACK_TOP_K]
+        logger.warning(
+            "decision filter failed, degrade to top-K (%d/%d): %s",
+            len(topk), len(candidates), e,
+        )
+        return (
+            topk,
+            True,
+            f"取关键词召回前 {len(topk)}/{len(candidates)} 场作为候选，可能含 noise",
+        )
     nos = resp.parsed.get("scene_nos", []) if isinstance(resp.parsed, dict) else []
     nos_set = {str(n) for n in nos}
-    return [sc for sc in candidates if sc.scene_no in nos_set]
+    return [sc for sc in candidates if sc.scene_no in nos_set], False, None
 
 
 async def _judge_one(

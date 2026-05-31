@@ -84,6 +84,37 @@ class CoverageCard(BaseModel):
 - Tooltip：平台名 + 视频标题 + snippet 摘要 + 完整 URL
 - 未命中（platform="fallback"）：muted 虚线 chip + 提示
 
+## 6.x v3.7.4：beat_chain 节拍数据驱动 + fallback summary 重写
+
+### 关键修复
+
+| 位置 | 旧 | 新 |
+|---|---|---|
+| `_scene_label_summary` | path 2 拼 `"{type}：{角色} 关键场"` 死分支 | 删除该分支，改用 `_extract_plot_excerpt` 从 scene.text 抽 12-38 字真实剧情 |
+| `_SCENE_HEADER_LINE_RE` | 无 | 跳过 "第X集 / X-Y / 人物：xxx / 卧室日内" 等 metadata 行 |
+| `_MAX_CANDIDATES` | 12（写死） | `_candidate_cap(n_scenes)`：6/9/12/15 按场数分级 |
+| 每幕 beat 上限 | prompt 硬写「1-3」 | `_max_beats_per_act(n_scenes)`：act1/act2/act3 分级注入 prompt |
+
+### 数据驱动配比
+
+```python
+_max_beats_per_act(20)  # {1: 2, 2: 3, 3: 2}
+_max_beats_per_act(35)  # {1: 2, 2: 4, 3: 2}
+_max_beats_per_act(100) # {1: 3, 2: 5, 3: 3}
+_max_beats_per_act(250) # {1: 3, 2: 6, 3: 3}
+```
+
+依据：
+- Save the Cat 15-beat（电影 120 分钟基准）
+- Truby 22 Building Blocks
+- Linda Aronson 短剧节拍密度调研：每 6-10 分钟 1 个核心 beat（1 集 ~ 6 分钟）
+
+### 关于 LLM cache
+
+`call_json` （beat_chain / coverage_chain 实际用的方法）**不走 LlmCache**。
+LlmCache 只服务于 `call_json_deterministic`（tag 抽取实验接口）。
+**用户重新上传一定会重新调 LLM**，不存在「缓存了垃圾数据」。
+
 ## 七、后续 follow-up
 
 - P1：接入自有平台短剧库（用户原话：「后续其实会接自己平台的视频库」）

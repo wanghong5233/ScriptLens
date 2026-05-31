@@ -80,6 +80,8 @@ def build_view(
         evaluation=report.evaluation,
         rewrite_seeds=rewrite_seeds,
         task_status=task_status,
+        # W1.3 (2026-05-31)：透传报告级 provenance 元数据给前端。
+        meta=report.meta,
     )
 
 

@@ -28,7 +28,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Awaitable, Optional
+from typing import Any, Awaitable, Dict, List, Optional
 
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
@@ -48,7 +48,7 @@ from service.script_tools.character_pipeline import (
     resolve_entities,
     write_bios_concurrent,
 )
-from service.script_tools.compliance_scorer import screen_compliance
+from service.script_tools.compliance_scorer import ComplianceResult, screen_compliance
 from service.script_tools.coverage_chain import CoverageCard, extract_coverage_card
 from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.scene_repo import get_all_scenes
@@ -249,12 +249,65 @@ def _compute_overall_cuts(scorecard: list[dict[str, Any]]) -> dict[str, float]:
     }
 
 
-async def _optional_chain(name: str, coro: Awaitable[Any]) -> Any:
-    """叙事层 chain 可降级为 None；只吞已知业务失败，避免一个 LLM JSON 解析失败把整份报告拖崩。"""
+# W1.3 (2026-05-31)：全链路 provenance 透传到 report.meta.chain_status。
+# 每个 chain 完成（或失败）后通过 _record_chain_status 把状态写入 _ChainStatusCollector，
+# 最终在 _build_report_payload 里序列化进 payload，前端据此渲染降级提示条。
+_ChainStatusCollector = Dict[str, Dict[str, Any]]
+
+
+def _new_chain_status_collector() -> _ChainStatusCollector:
+    return {}
+
+
+def _record_chain_status(
+    collector: _ChainStatusCollector,
+    chain_name: str,
+    *,
+    status: str,  # ok | degraded | failed
+    source: str,  # llm | hybrid | rule_fallback
+    fallback_reasons: Optional[List[str]] = None,
+    partial_failure_fields: Optional[List[str]] = None,
+) -> None:
+    """把 chain 的 provenance 写入 collector。
+
+    禁止 silent success：每个 chain 调用结束**必须**调一次这个 helper，
+    哪怕是 status="ok"。否则就会出现「chain 跑了但 chain_status 漏了」的 invisibility。
+    """
+    if status not in ("ok", "degraded", "failed"):
+        raise ValueError(f"invalid chain status: {status!r}")
+    if source not in ("llm", "hybrid", "rule_fallback"):
+        raise ValueError(f"invalid chain source: {source!r}")
+    collector[chain_name] = {
+        "status": status,
+        "source": source,
+        "fallback_reasons": list(fallback_reasons or []),
+        "partial_failure_fields": list(partial_failure_fields or []),
+    }
+
+
+async def _optional_chain(
+    name: str,
+    coro: Awaitable[Any],
+    *,
+    chain_status: Optional[_ChainStatusCollector] = None,
+) -> Any:
+    """叙事层 chain 可降级为 None；只吞已知业务失败，避免一个 LLM JSON 解析失败把整份报告拖崩。
+
+    W1.3：失败时同时写入 chain_status（status=failed, source=rule_fallback, reasons=异常类型）。
+    成功时**不**写入 status——由调用方根据 chain 自身的 source 字段写入 ok/degraded。
+    """
     try:
         return await coro
     except (ScoreLLMError, ValueError) as exc:
         logger.exception("%s failed and will be stored as null: %s", name, exc)
+        if chain_status is not None:
+            _record_chain_status(
+                chain_status,
+                name,
+                status="failed",
+                source="rule_fallback",
+                fallback_reasons=[f"{type(exc).__name__}: {str(exc)[:200]}"],
+            )
         return None
 
 
@@ -423,10 +476,16 @@ def _build_highlights_minimal(
     reward_events: list[RewardEvent],
     beat_sheet: Optional[BeatSheet],
     evidence_refs: list[dict[str, Any]],
+    scenes_by_id: Optional[dict[str, Any]] = None,
 ) -> list[dict[str, Any]]:
     """从 reward_events + 开场节拍派生 highlights[]。
 
     highlight.id 复用对应 evidence_ref.id（同空间），前端点击高亮即可定位锚点。
+
+    Args:
+        scenes_by_id: 可选 scene 查找表（id → Scene 对象），用于补齐 hook 类
+            highlight 的 episode_no / scene_no / scene_label —— 不然前端只能
+            fallback 到 scene_id 前 6 位字符串（"9ad1e2" 这种垃圾定位符）。
     """
     reward_evi_index: dict[tuple[str, str], str] = {}
     for er in evidence_refs:
@@ -473,14 +532,17 @@ def _build_highlights_minimal(
         for act in beat_sheet.acts:
             for beat in act.beats:
                 if beat.type == "opening" and beat.anchor_scene_id and beat.anchor_scene_id not in used:
+                    # v3.7.2：从 scenes_by_id 反查补齐定位字段（episode_no / scene_no /
+                    # scene_label），避免前端 fallback 到 scene_id 前 6 位。
+                    scene = (scenes_by_id or {}).get(beat.anchor_scene_id)
                     out.append(
                         {
                             "id": f"evi_hook_{beat.anchor_scene_id}",
                             "type": "hook",
                             "scene_id": beat.anchor_scene_id,
-                            "episode_no": None,
-                            "scene_no": None,
-                            "scene_label": None,
+                            "episode_no": getattr(scene, "episode_no", None) if scene else None,
+                            "scene_no": getattr(scene, "scene_no", None) if scene else None,
+                            "scene_label": getattr(scene, "scene_label", None) if scene else None,
                             "start_line": None,
                             "end_line": None,
                             "oneliner": _trim_oneliner(f"开场抓人 · {beat.summary}"),
@@ -901,9 +963,38 @@ async def generate_report(
       4. compliance                —— 独立合规扫描
       5. building_payload          —— 组装 report payload
       6. persisting                —— 落库 reports / scoring_runs / script_scores
+
+    W1.7 (2026-05-31)：per-script DB advisory lock。
+    阻止同一 script_id 被并发分析（reanalyze 重入、双开 worker、用户连点重新诊断）。
+    旧实现允许两个 generate_report 同时跑，会产生：
+      - persist_entities 盲删旧 character_entities → 互踩 ID
+      - 双份 scoring_runs 写入
+      - report_json 互覆盖
+    advisory_lock 是 transaction-bound，连接关闭自动释放，零运维成本。
     """
     caller = caller or LlmCaller()
     progress_tracker.start(script_id)
+
+    # W1.3 (2026-05-31)：收集每个 chain 的 provenance。最终写入 report.meta.chain_status。
+    chain_status: _ChainStatusCollector = _new_chain_status_collector()
+
+    # W1.6 (2026-05-31)：run_id 提到流水线开头，立刻 INSERT scoring_runs status='running'。
+    # 用户从 dashboard 能看到一行「analysis_in_progress」记录，而不是「沉默几分钟」。
+    run_id = str(uuid.uuid4())
+
+    # W1.7 (2026-05-31)：尝试拿 advisory lock；拿不到说明已有其他 generate_report 在跑。
+    lock_acquired = _try_acquire_script_lock(script_id, engine=engine)
+    if not lock_acquired:
+        raise ValueError(
+            f"script_id={script_id} 正在被其他分析任务处理，请等待当前任务结束后再触发"
+        )
+
+    _insert_scoring_run_running(
+        run_id=run_id, script_id=script_id, engine=engine,
+    )
+    # W1.5：在 scripts.last_analysis_status 标记 running，让 dashboard 列能立刻显示
+    # 「正在分析」徽章。scripts.status 保持不变（ingest 维度）。
+    _mark_analysis_status(script_id=script_id, status="running", engine=engine)
 
     try:
         progress_tracker.update_stage(script_id, "loading_meta", "running", detail="读取剧本元数据")
@@ -955,6 +1046,7 @@ async def generate_report(
             _optional_chain(
                 "reward_extractor",
                 extract_reward_events(script_id=script_id, caller=caller),
+                chain_status=chain_status,
             )
         )
         # 透传 entities + 共现候选关系：chain 走 resolver baseline 路径，节点 id =
@@ -970,15 +1062,19 @@ async def generate_report(
                     characters=[e.to_chain_dict() for e in entities],
                     relationships=candidate_relationships,
                 ),
+                chain_status=chain_status,
             )
         )
         motivation_task = asyncio.create_task(
             _optional_chain(
             "motivation_chain",
             score_motivation(script_id=script_id, caller=caller),
+            chain_status=chain_status,
         )
         )
         # 小传与 graph / beat / motivation 并发：bio 单点失败不影响其他链。
+        # W1.8 (2026-05-31): bios 不走 _optional_chain 因为 write_bios_concurrent
+        # 内部已有 return_exceptions=True + _empty_bio 占位降级，无需重复包装。
         bios_task = asyncio.create_task(
             write_bios_concurrent(
                 entities, scenes=scenes, caller=caller, semaphore_size=4
@@ -986,12 +1082,23 @@ async def generate_report(
         )
         # v3.6：合规扫描提前到 narrative 阶段并行——只依赖 scenes 表，不依赖任何 chain
         # 结果，并发收益 30-60s。compliance 阶段下方仅等 task 完成（大概率已 done）。
+        # W1.8: compliance 也走 _optional_chain，与叙事 chain 一致 best-effort，
+        # 一个 LLM 抖动不再拖垮整报告。
         compliance_task = asyncio.create_task(
-            screen_compliance(script_id=script_id, caller=caller)
+            _optional_chain(
+                "compliance_chain",
+                screen_compliance(script_id=script_id, caller=caller),
+                chain_status=chain_status,
+            )
         )
 
         # reward 一完成立刻启动 beat（reward 通常 ~30s，bios 通常更长）
         reward_events: list[RewardEvent] = (await reward_task) or []
+        # W1.3: reward 成功的话写 ok（_optional_chain 只写 failed）
+        if "reward_extractor" not in chain_status:
+            _record_chain_status(
+                chain_status, "reward_extractor", status="ok", source="llm"
+            )
         beat_task = asyncio.create_task(
             _optional_chain(
                 "beat_chain",
@@ -1001,14 +1108,89 @@ async def generate_report(
                     caller=caller,
                     engine=engine,
                 ),
+                chain_status=chain_status,
             )
         )
 
-        beat_sheet, character_graph, motivation_result, bios = (
-            await asyncio.gather(
-                beat_task, graph_task, motivation_task, bios_task
-            )
+        # W1.8 (2026-05-31): gather 加 return_exceptions=True 防止 sibling chain
+        # 被 cancel；任一非 _optional_chain 包装的 task 抛出时也只是返回 Exception
+        # 实例，不再 propagate。
+        gathered = await asyncio.gather(
+            beat_task, graph_task, motivation_task, bios_task,
+            return_exceptions=True,
         )
+
+        def _safe_unwrap(result: Any, chain_name: str) -> Any:
+            if isinstance(result, BaseException):
+                logger.exception(
+                    "%s raised unexpectedly through gather: %s", chain_name, result,
+                )
+                if chain_name not in chain_status:
+                    _record_chain_status(
+                        chain_status, chain_name,
+                        status="failed", source="rule_fallback",
+                        fallback_reasons=[
+                            f"{type(result).__name__}: {str(result)[:200]}"
+                        ],
+                    )
+                return None
+            return result
+
+        beat_sheet = _safe_unwrap(gathered[0], "beat_chain")
+        character_graph = _safe_unwrap(gathered[1], "character_graph_chain")
+        motivation_result = _safe_unwrap(gathered[2], "motivation_chain")
+        bios_raw = _safe_unwrap(gathered[3], "bios")
+        bios = bios_raw if bios_raw is not None else []
+
+        # W1.3：根据每个 chain 自带的 source/fallback_reasons 字段写 chain_status。
+        # 失败已在 _optional_chain / _safe_unwrap 写入；这里只补 ok / degraded。
+        if beat_sheet is not None and "beat_chain" not in chain_status:
+            _record_chain_status(
+                chain_status, "beat_chain",
+                status="degraded" if beat_sheet.fallback_reasons else "ok",
+                source=beat_sheet.source,
+                fallback_reasons=beat_sheet.fallback_reasons,
+            )
+        if character_graph is not None and "character_graph_chain" not in chain_status:
+            graph_failed = (character_graph.enrichment_status == "failed")
+            _record_chain_status(
+                chain_status, "character_graph_chain",
+                status="degraded" if graph_failed or character_graph.enrichment_status == "degraded" else "ok",
+                source="rule_fallback" if graph_failed else "llm",
+                fallback_reasons=character_graph.enrichment_failed_reasons,
+            )
+        if motivation_result is not None and "motivation_chain" not in chain_status:
+            mot_reasons: List[str] = []
+            mot_partial: List[str] = []
+            if motivation_result.partial_failure:
+                mot_reasons.append(
+                    f"partial_judge_failure:{motivation_result.judged_count}/{motivation_result.attempted_count}"
+                )
+                mot_partial.append("judged_decisions")
+            if motivation_result.filter_degraded:
+                mot_reasons.append(
+                    f"filter_degraded:{motivation_result.filter_degraded_reason or 'top_k_fallback'}"
+                )
+            _record_chain_status(
+                chain_status, "motivation_chain",
+                status="degraded" if mot_reasons else "ok",
+                source="hybrid" if mot_reasons else "llm",
+                fallback_reasons=mot_reasons,
+                partial_failure_fields=mot_partial,
+            )
+        if bios is not None and "bios" not in chain_status:
+            failed_bios = [
+                b for b in bios
+                if isinstance(b.evidence, dict) and b.evidence.get("status") == "failed"
+            ]
+            _record_chain_status(
+                chain_status, "bios",
+                status="degraded" if failed_bios else "ok",
+                source="hybrid" if failed_bios else "llm",
+                fallback_reasons=(
+                    [f"failed_bio_count={len(failed_bios)}"] if failed_bios else []
+                ),
+            )
         coverage_card: Optional[CoverageCard] = None  # 见下方 composing_coverage 阶段
         # 持久化 bios + 把 chain 输出的 enriched edges 写入 character_relationships。
         persist_bios(bios, engine=engine)
@@ -1033,6 +1215,14 @@ async def generate_report(
             script_id, "compliance", "running", detail="等待合规并行 task 完成"
         )
         compliance = await compliance_task
+        # W1.8: compliance 走了 _optional_chain，失败会返回 None；这里给降级口径。
+        if compliance is None:
+            compliance = ComplianceResult.empty()  # 降级为空报告占位
+        else:
+            if "compliance_chain" not in chain_status:
+                _record_chain_status(
+                    chain_status, "compliance_chain", status="ok", source="llm"
+                )
         progress_tracker.update_stage(
             script_id,
             "compliance",
@@ -1062,7 +1252,20 @@ async def generate_report(
                 drama_tags=drama_tags_for_cov,
                 caller=caller,
             ),
+            chain_status=chain_status,
         )
+        # W1.3: coverage 成功的话根据自身 source 写 ok/degraded
+        if coverage_card is not None and "coverage_chain" not in chain_status:
+            _record_chain_status(
+                chain_status, "coverage_chain",
+                status="degraded" if coverage_card.fallback_reasons else "ok",
+                source=coverage_card.source,
+                fallback_reasons=coverage_card.fallback_reasons,
+                partial_failure_fields=(
+                    (["strengths"] if coverage_card.strengths_rule_filled_count > 0 else [])
+                    + (["concerns"] if coverage_card.concerns_rule_filled_count > 0 else [])
+                ),
+            )
         progress_tracker.update_stage(
             script_id,
             "composing_coverage",
@@ -1098,7 +1301,7 @@ async def generate_report(
         progress_tracker.update_stage(
             script_id, "building_payload", "running", detail="组装报告 payload"
         )
-        run_id = str(uuid.uuid4())
+        # W1.6: run_id 已在流水线入口 INSERT (status='running')，此处复用。
         report_payload = _build_report_payload(
             meta=meta,
             dim_outputs=dim_outputs,
@@ -1109,6 +1312,8 @@ async def generate_report(
             character_bios=bios,
             reward_events=reward_events,
             engine=engine,
+            scenes_by_id={s.id: s for s in scenes},
+            chain_status=chain_status,
         )
         progress_tracker.update_stage(script_id, "building_payload", "done")
 
@@ -1126,19 +1331,38 @@ async def generate_report(
             engine=engine,
         )
         _mark_script_status(script_id=script_id, status="ready", failure_reason=None, engine=engine)
+        # W1.5: analysis 维度独立标 done。
+        _mark_analysis_status(script_id=script_id, status="done", engine=engine)
         progress_tracker.update_stage(script_id, "persisting", "done", detail="report persisted")
         progress_tracker.finalize(script_id)
         return report_payload
     except Exception as exc:  # noqa: BLE001
         logger.exception("generate_report failed script_id=%s: %s", script_id, exc)
-        _mark_script_status(
-            script_id=script_id,
-            status="failed",
-            failure_reason=f"{type(exc).__name__}: {exc}",
+        # W1.6 (2026-05-31)：scoring_runs 标 failed + 写入 error message，让用户能在
+        # script 列表看到「上一次分析失败」徽章并知道为什么。
+        _mark_scoring_run_failed(
+            run_id=run_id,
+            error=f"{type(exc).__name__}: {exc}",
             engine=engine,
         )
+        # W1.5 (2026-05-31)：分析失败不再把 scripts.status 翻成 failed，避免
+        # 「上传成功（status=ready）→ 分析失败（status=failed）」语义错位。
+        # ingest 阶段失败仍会通过 ingestion_service 写 status=failed；这里只标
+        # failure_reason 让前端能在 dashboard 显示「分析失败，请重新诊断」。
+        _mark_script_status(
+            script_id=script_id,
+            status="ready",  # ingest 仍然有效；分析重试入口走 reanalyze
+            failure_reason=f"analysis_failed:{type(exc).__name__}: {str(exc)[:200]}",
+            engine=engine,
+        )
+        # W1.5: analysis 维度独立标 failed。dashboard 列能显示「上次分析失败」。
+        _mark_analysis_status(script_id=script_id, status="failed", engine=engine)
         progress_tracker.finalize(script_id, error=f"{type(exc).__name__}: {exc}")
         raise
+    finally:
+        # W1.7: 无论成功失败都要释放 advisory lock。
+        if lock_acquired:
+            _release_script_lock(script_id, engine=engine)
 
 
 def _scorecard_from_outputs(dim_outputs: dict[str, ScoreOutput]) -> list[dict[str, Any]]:
@@ -1251,6 +1475,8 @@ def _build_report_payload(
     character_graph: Optional[CharacterGraph] = None,
     character_bios: Optional[list[CharacterBio]] = None,
     reward_events: Optional[list[RewardEvent]] = None,
+    scenes_by_id: Optional[dict[str, Any]] = None,
+    chain_status: Optional[_ChainStatusCollector] = None,
 ) -> dict[str, Any]:
     """release/v1-mvp 报告 payload 组装。
 
@@ -1283,7 +1509,9 @@ def _build_report_payload(
     must_read_scene_ids = _select_beat_anchor_scenes(beat_sheet, top_k=3)
     risk_flags = _derive_risk_flags(compliance_payload)
     evidence_refs_payload = _build_evidence_refs_minimal(reward_events, compliance_hits)
-    highlights_payload = _build_highlights_minimal(reward_events, beat_sheet, evidence_refs_payload)
+    highlights_payload = _build_highlights_minimal(
+        reward_events, beat_sheet, evidence_refs_payload, scenes_by_id=scenes_by_id
+    )
 
     return {
         "script_id": meta.script_id,
@@ -1347,7 +1575,34 @@ def _build_report_payload(
             ],
             "rewrite_seeds": [],
         },
+        # W1.3 (2026-05-31)：报告级 provenance。每个 chain 的 status/source/reasons
+        # 都在这里，前端用来渲染降级提示条；BI 用来计算 fallback rate。
+        # overall_status = aggregate(各 chain status)，前端只需看这一个字段决定是否
+        # 显示「报告含降级内容」横幅。
+        "meta": {
+            "chain_status": dict(chain_status or {}),
+            "overall_status": _aggregate_chain_status(chain_status or {}),
+            "score_ver": _SCORE_VER,
+        },
     }
+
+
+def _aggregate_chain_status(chain_status: _ChainStatusCollector) -> str:
+    """聚合各 chain status 到报告总 status。
+
+    规则（与 chain_result.aggregate_overall_status 一致）：
+      - 任一 chain=failed → overall=degraded（仍能出报告但有降级）
+      - 任一 chain=degraded → overall=degraded
+      - 否则 ok
+    """
+    if not chain_status:
+        return "ok"
+    statuses = [s.get("status") for s in chain_status.values()]
+    if any(s == "failed" for s in statuses):
+        return "degraded"
+    if any(s == "degraded" for s in statuses):
+        return "degraded"
+    return "ok"
 
 
 def _persist_report(
@@ -1385,6 +1640,10 @@ def _persist_report(
     }
 
     with engine.begin() as conn:
+        # W1.6 (2026-05-31)：scoring_runs 已在 generate_report 入口 INSERT (status='running')。
+        # 这里改成 UPSERT（ON CONFLICT 由 input_hash / id PK 决定）：
+        #   - 入口同 run_id 存在 → 走 UPDATE 分支，把 status 改为 'done'、补齐数据字段
+        #   - 入口 INSERT 失败（DB 故障）→ 这里 INSERT 兜底，仍能写入完整记录
         conn.execute(
             text(
                 """
@@ -1399,6 +1658,13 @@ def _persist_report(
                     CAST(:model_versions AS jsonb), CAST(:prompt_versions AS jsonb),
                     :status, :error, :created_at
                 )
+                ON CONFLICT (id) DO UPDATE SET
+                    input_hash = EXCLUDED.input_hash,
+                    quality_flags = EXCLUDED.quality_flags,
+                    model_versions = EXCLUDED.model_versions,
+                    prompt_versions = EXCLUDED.prompt_versions,
+                    status = EXCLUDED.status,
+                    error = NULL
                 """
             ),
             {
@@ -1622,3 +1888,176 @@ def _mark_script_status(
             )
     except Exception:  # noqa: BLE001
         logger.exception("failed to mark script status script_id=%s status=%s", script_id, status)
+
+
+def _mark_analysis_status(
+    *,
+    script_id: str,
+    status: str,  # running | done | failed
+    engine: Engine,
+) -> None:
+    """W1.5：写 scripts.last_analysis_status，与 ingest 维度的 status 解耦。
+
+    new column 由 09 migration 加；DB 未升级时 UPDATE 会失败但不抛——保留兼容。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE scriptlens.scripts
+                    SET last_analysis_status = :status
+                    WHERE id = :sid
+                    """
+                ),
+                {"status": status, "sid": script_id},
+            )
+    except Exception:  # noqa: BLE001
+        # DB 未跑 migration 09 时此处会报 undefined column；不要让流水线挂掉。
+        logger.warning(
+            "failed to mark analysis status (migration 09 未运行?) script_id=%s status=%s",
+            script_id, status,
+        )
+
+
+# ============================================================
+# W1.6 + W1.7：scoring_runs 状态机 + per-script advisory lock
+# ============================================================
+
+
+# advisory lock key: 用 zlib.crc32(script_id) 把 UUID 字符串映射到 bigint。
+# PG advisory lock 是 session-scope（连接关闭自动释放）。
+# 选 advisory 而非行级 lock 是因为：① 不阻塞 SELECT，② 跨多个 UPDATE/INSERT/DELETE
+# 仍是同一把锁，③ 同 session 内可重入，④ 不需要 schema migration。
+def _script_lock_key(script_id: str) -> int:
+    """把 UUID 字符串映射到 bigint advisory lock key。
+
+    用 PG 内置 hashtext()-equivalent（Python hash 会跨进程不一致）。
+    这里用 zlib.crc32 保证跨进程一致性；命名空间 fixed = 8101（"sl" + 报告链）。
+    """
+    import zlib
+    return (8101 << 32) | (zlib.crc32(script_id.encode("utf-8")) & 0xFFFF_FFFF)
+
+
+# advisory lock 是 session-scope；必须用一个**长 connection** 持锁直到 generate_report
+# 结束。这里把 connection 实例放进 module 级 dict，key=script_id。
+# 注意：此 dict 仅用于「记得退出时去哪个 connection 上释放锁」，不是用作 lock 本身。
+_active_lock_connections: Dict[str, Any] = {}
+
+
+def _try_acquire_script_lock(script_id: str, *, engine: Engine) -> bool:
+    """尝试拿到 per-script advisory lock。拿到 True；已被占 False。
+
+    实现策略：
+      - 开一个长 connection（**不进事务**，避免被外层逻辑误 commit/rollback）
+      - SELECT pg_try_advisory_lock(key)
+      - 把 connection 存入 _active_lock_connections，generate_report 结束时再释放
+    """
+    key = _script_lock_key(script_id)
+    if script_id in _active_lock_connections:
+        # 同进程里已经有一份持锁，说明流水线 reentry → 拒绝
+        return False
+    try:
+        conn = engine.connect()
+        row = conn.execute(
+            text("SELECT pg_try_advisory_lock(:k)"), {"k": key}
+        ).fetchone()
+        acquired = bool(row and row[0])
+        if acquired:
+            _active_lock_connections[script_id] = conn
+        else:
+            conn.close()
+        return acquired
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to acquire advisory lock script_id=%s", script_id)
+        return False
+
+
+def _release_script_lock(script_id: str, *, engine: Engine) -> None:
+    key = _script_lock_key(script_id)
+    conn = _active_lock_connections.pop(script_id, None)
+    if conn is None:
+        return
+    try:
+        conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": key})
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to release advisory lock script_id=%s", script_id)
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _insert_scoring_run_running(
+    *,
+    run_id: str,
+    script_id: str,
+    engine: Engine,
+) -> None:
+    """W1.6：流水线入口立刻插一行 status='running'，让 dashboard 立刻能看到任务在跑。
+
+    最终成功会被 _persist_report 内的 INSERT 改写（同 run_id 唯一 → 走 upsert）。
+    失败会被 _mark_scoring_run_failed 更新。
+    """
+    now = datetime.utcnow()
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO scriptlens.scoring_runs (
+                        id, script_id, rubric_version, tag_set_ver, input_hash,
+                        genre_scope, episode_count, plot_unit_count,
+                        quality_flags, model_versions, prompt_versions,
+                        status, error, created_at
+                    )
+                    VALUES (
+                        :id, :script_id, :rubric_version, :tag_set_ver, :input_hash,
+                        :genre_scope, 0, 0,
+                        CAST('{}' AS jsonb), CAST('{}' AS jsonb), CAST('{}' AS jsonb),
+                        'running', NULL, :created_at
+                    )
+                    ON CONFLICT (id) DO NOTHING
+                    """
+                ),
+                {
+                    "id": run_id,
+                    "script_id": script_id,
+                    "rubric_version": _SCORE_VER,
+                    "tag_set_ver": _TAG_SET_VER_NONE,
+                    "input_hash": "pending",
+                    "genre_scope": "default",
+                    "created_at": now,
+                },
+            )
+    except Exception:  # noqa: BLE001
+        # 写不进 scoring_runs 不应阻塞流水线（DB 故障下 LLM 任务仍可跑完出报告）。
+        logger.exception(
+            "failed to insert running scoring_run run_id=%s script_id=%s",
+            run_id, script_id,
+        )
+
+
+def _mark_scoring_run_failed(
+    *,
+    run_id: str,
+    error: str,
+    engine: Engine,
+) -> None:
+    """W1.6：generate_report 失败时把对应 scoring_run 标 failed + error。"""
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE scriptlens.scoring_runs
+                    SET status = 'failed',
+                        error = :err
+                    WHERE id = :rid
+                    """
+                ),
+                {"rid": run_id, "err": error[:1000]},
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception("failed to mark scoring_run failed run_id=%s", run_id)
