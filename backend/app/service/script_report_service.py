@@ -58,6 +58,10 @@ from service.script_tools.pacing_aggregator import aggregate_pacing_curve
 from service.script_tools.scene_repo import get_all_scenes
 from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
 from service.script_tools.motivation_chain import MotivationResult, score_motivation
+from service.script_tools.cliffhanger_extractor import (
+    CliffhangerEvent,
+    extract_cliffhangers,
+)
 from service.script_tools.reward_extractor import RewardEvent, extract_reward_events
 from service.scoring import ScoringContext, score_script
 from utils.database import engine as default_engine
@@ -782,14 +786,15 @@ async def score_one_dimension(
     # ============================================================
     # 装配上游依赖（按维度需要选择性触发，避免全量拉链）
     # 依赖矩阵（详见 service/scoring/dimensions/*.py）：
-    #   hook         : scenes + llm_caller
+    #   hook         : scenes + llm_caller + cliffhangers
     #   archetype    : scenes + coverage_card + character_graph + llm_caller
     #   payoff       : scenes + reward_events + beat_sheet
-    #   monetization : scenes + reward_events + total_episodes
+    #   monetization : scenes + reward_events + cliffhangers + total_episodes
     #   producibility: scenes + total_episodes
     # ============================================================
     scenes = get_all_scenes(script_id=script_id, engine=engine)
     reward_events: list[RewardEvent] = []
+    cliffhangers: list[CliffhangerEvent] = []
     coverage_card: Optional[CoverageCard] = None
     beat_sheet: Optional[BeatSheet] = None
     character_graph: Optional[CharacterGraph] = None
@@ -798,12 +803,21 @@ async def score_one_dimension(
     needs_beat = dimension == "payoff"
     needs_graph = dimension == "archetype"
     needs_coverage = dimension == "archetype"
+    needs_cliffhangers = dimension in {"hook", "monetization"}
 
     if needs_reward:
         reward_events = (
             await _optional_chain(
                 "reward_extractor",
                 extract_reward_events(script_id=script_id, caller=caller),
+            )
+            or []
+        )
+    if needs_cliffhangers:
+        cliffhangers = (
+            await _optional_chain(
+                "cliffhanger_extractor",
+                extract_cliffhangers(script_id=script_id, caller=caller),
             )
             or []
         )
@@ -850,6 +864,7 @@ async def score_one_dimension(
         total_episodes=meta.total_episodes or 0,
         beat_sheet=beat_sheet,
         reward_events=reward_events,
+        cliffhangers=cliffhangers,
         character_graph=character_graph,
         coverage_card=coverage_card,
         motivation_result=None,  # v4 5 维都不依赖 motivation_result
@@ -980,6 +995,16 @@ async def generate_report(
                 chain_status=chain_status,
             )
         )
+        # v4.1 (2026-05-31): cliffhanger 抽取与 reward 同级并行（同样关键词召回 +
+        # LLM 二级判定模式），用于 HOOK / MONETIZATION 中 3 个 cliffhanger 信号，
+        # 取代旧版 naive 关键词扫。失败时走 best-effort（信号自降级到 raw=0）。
+        cliffhanger_task = asyncio.create_task(
+            _optional_chain(
+                "cliffhanger_extractor",
+                extract_cliffhangers(script_id=script_id, caller=caller),
+                chain_status=chain_status,
+            )
+        )
         # 透传 entities + 共现候选关系：chain 走 resolver baseline 路径，节点 id =
         # entity.id（UUID），LLM enrichment 仅补 motivation/goal/obstacle 与边的
         # type/polarity；id-space 与 character_bios 严格一致。
@@ -1029,6 +1054,12 @@ async def generate_report(
         if "reward_extractor" not in chain_status:
             _record_chain_status(
                 chain_status, "reward_extractor", status="ok", source="llm"
+            )
+        # cliffhanger 与 reward 同期并行启动，这里收口（与 reward 同款 ok 标记）
+        cliffhangers: list[CliffhangerEvent] = (await cliffhanger_task) or []
+        if "cliffhanger_extractor" not in chain_status:
+            _record_chain_status(
+                chain_status, "cliffhanger_extractor", status="ok", source="llm"
             )
         beat_task = asyncio.create_task(
             _optional_chain(
@@ -1219,6 +1250,7 @@ async def generate_report(
             total_episodes=meta.total_episodes or 0,
             beat_sheet=beat_sheet,
             reward_events=reward_events or [],
+            cliffhangers=cliffhangers or [],
             character_graph=character_graph,
             coverage_card=coverage_card,
             motivation_result=motivation_result,
@@ -1340,6 +1372,7 @@ async def _run_scoring_v4(
     total_episodes: int,
     beat_sheet: Optional[BeatSheet],
     reward_events: list[RewardEvent],
+    cliffhangers: list[CliffhangerEvent],
     character_graph: Optional[CharacterGraph],
     coverage_card: Optional[CoverageCard],
     motivation_result: Optional[MotivationResult],
@@ -1361,6 +1394,7 @@ async def _run_scoring_v4(
             total_episodes=total_episodes,
             beat_sheet=beat_sheet,
             reward_events=reward_events,
+            cliffhangers=cliffhangers,
             character_graph=character_graph,
             coverage_card=coverage_card,
             motivation_result=motivation_result,

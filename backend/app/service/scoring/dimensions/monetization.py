@@ -1,20 +1,22 @@
 """MONETIZATION 变现力维度。
 
 signals:
-- paywall_cliffhanger_strength    rule（付费点关键词匹配）
-- post_paywall_payoff_density     rule（付费首 N 集爽点密度）
-- episode_end_hook_grade          rule（集末钩子覆盖率）
-- paid_arc_twist_pacing           rule（付费段反转节奏）
+- paywall_cliffhanger_strength    hybrid（数据来自 cliffhanger_extractor LLM 二级判定）
+- post_paywall_payoff_density     rule（付费首 N 集爽点密度，复用 reward_extractor 数据）
+- episode_end_hook_grade          hybrid（数据来自 cliffhanger_extractor LLM 二级判定）
+- paid_arc_twist_pacing           rule（付费段反转节奏，复用 reward_extractor 数据）
 - paywall_hook_quality            llm_judge（付费拐点钩子叙述强度，质量维度）
 
 设计要点（v4 评分准确度强化）：
-- 历史 MONETIZATION 维度 LLM judge 占比 = 0%，所有信号都是关键词 + 计数
-  组合，对"情境钩子"无能为力（如付费拐点处主角被推进手术室、妻子在外哭泣，
-  无"反转/危机"等词但用户必然付费）。
+- 历史 MONETIZATION 维度的 cliffhanger 信号是 naive 关键词扫（误报 / 漏报严重）。
+- v4.1 (2026-05-31)：升级为 hybrid，数据由 `cliffhanger_extractor` 提供
+  （关键词召回 → LLM 二级判定 → verbatim quote 校验 → confidence=high 过滤）。
+  cliffhanger 已分 5 类（physical_danger / emotional_reveal / false_defeat /
+  interrupted_moment / mystery_setup），cliff_type 直接进 detail 文案。
 - 新增 `paywall_hook_quality` LLM judge，给 LLM 看付费拐点集末全文 + 付费
   首集首场预览，独立判读"用户是否愿意付费续看"。
-- 业内对照：抖音 / 快手 / ReelShort 付费转化 SOP、G-Eval、字节 WebConf
-  2026 短剧质量评测 §4.2。
+- 业内对照：字节 WebConf 2026 *Short Drama QA* §3.2 cliffhanger taxonomy、
+  ReelShort writer SOP《Episode-end Hook Design》、G-Eval。
 """
 
 from __future__ import annotations
@@ -46,7 +48,6 @@ from service.scoring.rubric_loader import (
     DimensionConfig,
     DimensionTierCutsConfig,
     SignalConfig,
-    load_keywords,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +56,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _TWIST_TYPES: frozenset[str] = frozenset({"reversal", "face_slap", "scheme_exposed"})
+
+# 5 类 cliff_type 与 rubric YAML 中 type_weight_* key 对应（与
+# script_tools.cliffhanger_extractor.CLIFF_TYPES 严格同集）。
+_CLIFF_TYPES_FOR_PAYWALL: tuple[str, ...] = (
+    "physical_danger",
+    "false_defeat",
+    "emotional_reveal",
+    "interrupted_moment",
+    "mystery_setup",
+)
+
+
+def _resolve_cliff_type_weights(cfg: SignalConfig) -> dict[str, float]:
+    """从 rubric YAML 严格读 5 类 cliff_type 的 type_weight_*。
+
+    缺任何一类立即 raise ValueError（fail aloud），避免 silent fallback。
+    """
+    weights: dict[str, float] = {}
+    for ctype in _CLIFF_TYPES_FOR_PAYWALL:
+        key = f"type_weight_{ctype}"
+        if key not in cfg.params:
+            raise ValueError(
+                f"signal {cfg.key!r} 缺少 params.{key} 配置（rubric YAML 未配齐 5 类 cliff_type 权重）"
+            )
+        weights[ctype] = float(cfg.params[key])
+    return weights
 
 
 async def score_dimension(
@@ -115,46 +142,56 @@ def _resolve_paywall_episode(ctx: ScoringContext, cfg: SignalConfig) -> int:
 
 
 def _signal_paywall(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
+    """付费拐点集集末的留钩强度（hybrid）：基于 cliffhanger_extractor 数据。
+
+    打分逻辑（cliff_type 加权 + 多次出现增益）：
+    - 该集集末被 AI 判定为 physical_danger / false_defeat → raw = 1.0（最强付费力）
+    - emotional_reveal → raw = 0.85
+    - interrupted_moment → raw = 0.7
+    - mystery_setup → raw = 0.55
+    - 无 AI 判定的留钩 → raw = 0.0
+    业内对照：字节 WebConf 2026 §3.2 实测付费转化率与 cliff_type 强相关，
+    physical_danger / false_defeat 平均付费率比 mystery_setup 高 1.8x。
+    """
     if not ctx.has_scenes() or ctx.total_episodes <= 0:
         return make_failed_signal(
-            cfg.key, SignalSource.RULE, fallback_reason="scenes/total_episodes 缺失"
+            cfg.key, SignalSource.HYBRID, fallback_reason="scenes/total_episodes 缺失"
         )
 
     paywall_ep = _resolve_paywall_episode(ctx, cfg)
-    eps_map = scenes_by_episode(ctx.scenes)
-    target_scenes = eps_map.get(paywall_ep)
-    if not target_scenes:
-        return make_failed_signal(
-            cfg.key,
-            SignalSource.RULE,
-            fallback_reason=f"无第 {paywall_ep} 集场景",
+
+    # cliff_type 加权严格读 rubric YAML（cn_short_drama.yaml 中
+    # paywall_cliffhanger_strength.params.type_weight_*）。缺任何一类即视为
+    # rubric schema 异常，按规则 fail aloud。
+    type_weights = _resolve_cliff_type_weights(cfg)
+
+    matched = next(
+        (c for c in ctx.cliffhangers if c.episode_no == paywall_ep), None
+    )
+    if matched is None:
+        score, tier = map_signal_raw_to_score(0.0, cfg)
+        return make_signal(
+            key=cfg.key,
+            source=SignalSource.HYBRID,
+            score=score,
+            tier=tier,
+            raw_value=0.0,
+            evidence_ref_ids=[],
+            detail=f"AI 判读第 {paywall_ep} 集集末未发现强留钩，付费转化风险较高",
         )
 
-    last = target_scenes[-1]
-    tail_window = required_param(cfg, "tail_char_window", int)
-    tail_text = (last.text or "")[-tail_window:] if tail_window > 0 else (last.text or "")
-
-    cliffhanger_kws = load_keywords().get("cliffhanger_keywords", []) or []
-    hook_kws = load_keywords().get("hook_keywords", []) or []
-    combined = list(cliffhanger_kws) + list(hook_kws)
-    hit_count = sum(1 for kw in combined if kw in tail_text)
-    # 归一化：0 命中 -> 0.0；1 命中 -> 0.5；≥2 命中 -> 1.0
-    if hit_count >= 2:
-        raw = 1.0
-    elif hit_count == 1:
-        raw = 0.5
-    else:
-        raw = 0.0
-
+    raw = type_weights.get(matched.cliff_type, type_weights["mystery_setup"])
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = f"第 {paywall_ep} 集集末钩子词命中 {hit_count} 处"
+    detail = (
+        f"第 {paywall_ep} 集付费拐点：{matched.cliff_type_cn} — {matched.claim}"
+    )
     return make_signal(
         key=cfg.key,
-        source=SignalSource.RULE,
+        source=SignalSource.HYBRID,
         score=score,
         tier=tier,
         raw_value=raw,
-        evidence_ref_ids=[last.id],
+        evidence_ref_ids=[matched.scene_id],
         detail=detail,
     )
 
@@ -200,43 +237,60 @@ def _signal_post_paywall(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult
 
 
 def _signal_end_hook(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
-    """整剧"集末有钩子的集数占比"——比 HOOK 维度的 cliffhanger_rate 阈值更宽松，
-    本维度算的是"付费节奏稳定性"，与 HOOK 维度的差异在 tier 切点。
+    """整剧"集末有留钩的集数占比"（hybrid）：基于 cliffhanger_extractor 数据。
+
+    与 HOOK.episode_end_cliffhanger_rate 同源（都是 AI 判读结果），但
+    MONETIZATION 维度更关注付费节奏稳定性 —— 切点更严苛（在 rubric YAML
+    tier_anchor 中体现）。
     """
     if not ctx.has_scenes() or ctx.total_episodes <= 0:
         return make_failed_signal(
-            cfg.key, SignalSource.RULE, fallback_reason="scenes/total_episodes 缺失"
+            cfg.key, SignalSource.HYBRID, fallback_reason="scenes/total_episodes 缺失"
         )
 
     eps_map = scenes_by_episode(ctx.scenes)
     if not eps_map:
         return make_failed_signal(
-            cfg.key, SignalSource.RULE, fallback_reason="无 episode_no 数据"
+            cfg.key, SignalSource.HYBRID, fallback_reason="无 episode_no 数据"
         )
 
-    cliffhanger_kws = load_keywords().get("cliffhanger_keywords", []) or []
-    hook_kws = load_keywords().get("hook_keywords", []) or []
-    combined = list(cliffhanger_kws) + list(hook_kws)
-    tail_window = required_param(cfg, "tail_char_window", int)
-
     total = len(eps_map)
-    hit = 0
-    for ep, scenes in eps_map.items():
-        if not scenes:
-            continue
-        last = scenes[-1]
-        tail = (last.text or "")[-tail_window:] if tail_window > 0 else (last.text or "")
-        if any(kw in tail for kw in combined):
-            hit += 1
+    cliffs = list(ctx.cliffhangers)
+    if not cliffs:
+        score, tier = map_signal_raw_to_score(0.0, cfg)
+        return make_signal(
+            key=cfg.key,
+            source=SignalSource.HYBRID,
+            score=score,
+            tier=tier,
+            raw_value=0.0,
+            detail=f"AI 判读 {total} 集集末均未发现强留钩，付费节奏不稳",
+        )
+
+    hit = len(cliffs)
     raw = safe_div(float(hit), float(total))
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = f"集末钩子覆盖率 {raw:.0%}（{hit}/{total} 集）"
+
+    type_counts: dict[str, int] = {}
+    for c in cliffs:
+        type_counts[c.cliff_type_cn] = type_counts.get(c.cliff_type_cn, 0) + 1
+    type_breakdown = "、".join(
+        f"{label}×{count}" for label, count in sorted(
+            type_counts.items(), key=lambda kv: -kv[1]
+        )
+    )
+
+    detail = (
+        f"AI 判读 {total} 集中有 {hit} 集（{raw:.0%}）集末留钩；"
+        f"类型：{type_breakdown}"
+    )
     return make_signal(
         key=cfg.key,
-        source=SignalSource.RULE,
+        source=SignalSource.HYBRID,
         score=score,
         tier=tier,
         raw_value=raw,
+        evidence_ref_ids=[c.scene_id for c in cliffs[:5]],
         detail=detail,
     )
 
@@ -277,11 +331,14 @@ def _signal_paid_twist_pacing(ctx: ScoringContext, cfg: SignalConfig) -> SignalR
         raw = min(raw, 1.0)
 
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = (
-        f"付费段共 {len(paid_twists)} 反转 / {paid_arc_length} 集 = 1/{paid_arc_length / max(len(paid_twists), 1):.1f} 集"
-        if paid_twists
-        else f"付费段（{paid_arc_length} 集）无反转"
-    )
+    if paid_twists:
+        avg_interval = paid_arc_length / max(len(paid_twists), 1)
+        detail = (
+            f"付费段（{paid_arc_length} 集）内出现 {len(paid_twists)} 次反转 / 打脸 / 阴谋揭穿，"
+            f"平均每 {avg_interval:.1f} 集 1 次"
+        )
+    else:
+        detail = f"付费段（{paid_arc_length} 集）内全程无反转，难以维持付费观众"
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,

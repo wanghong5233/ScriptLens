@@ -76,10 +76,12 @@ dimensions:
         reference: "ReelShort/GoodShort writer SOP: 前 3 场连续钩子链"
 
       - key: episode_end_cliffhanger_rate
-        source: rule
+        source: hybrid
         weight_in_dim: 0.30
-        params:
-          tail_char_window: 150
+        # 数据来自 cliffhanger_extractor LLM 二级判定 + verbatim quote 校验，
+        # 5 类 cliff_type（physical_danger / emotional_reveal / false_defeat /
+        # interrupted_moment / mystery_setup）。本信号仅做覆盖率聚合。
+        params: {}
         tier_anchor:
           high: 0.6
           mid_high: 0.4
@@ -90,7 +92,7 @@ dimensions:
           mid_high: 7.0
           mid_low: 5.0
           low: 2.0
-        reference: "字节 WebConf 2026 Short Drama Quality Assessment §3"
+        reference: "字节 WebConf 2026 Short Drama QA §3.2 cliffhanger taxonomy + ReelShort writer SOP"
 
       - key: first_minute_inciting_incident
         source: llm_judge
@@ -266,12 +268,19 @@ dimensions:
     # 这里下调 rule weight 因为付费转化是质量判断，纯关键词匹配 FN 率 35%+。
     signals:
       - key: paywall_cliffhanger_strength
-        source: rule
+        source: hybrid
         weight_in_dim: 0.25
+        # 数据来自 cliffhanger_extractor。cliff_type 加权（业内字节 WebConf 2026 §3.2
+        # 实证：physical_danger / false_defeat 平均付费转化率 > emotional_reveal >
+        # interrupted_moment > mystery_setup）。
         params:
           paywall_min_episode: 15
           paywall_max_episode: 20
-          tail_char_window: 200
+          type_weight_physical_danger: 1.0
+          type_weight_false_defeat: 1.0
+          type_weight_emotional_reveal: 0.85
+          type_weight_interrupted_moment: 0.7
+          type_weight_mystery_setup: 0.55
         tier_anchor:
           high: 1.0
           mid_high: 0.6
@@ -282,7 +291,7 @@ dimensions:
           mid_high: 7.0
           mid_low: 5.0
           low: 3.0
-        reference: "短剧典型付费拐点位于第 15-20 集"
+        reference: "短剧典型付费拐点位于第 15-20 集；字节 WebConf 2026 §3.2 cliff_type 加权"
 
       - key: post_paywall_payoff_density
         source: rule
@@ -304,11 +313,12 @@ dimensions:
           low: 3.0
 
       - key: episode_end_hook_grade
-        source: rule
+        source: hybrid
         weight_in_dim: 0.17
-        params:
-          tail_char_window: 200
-        # raw_value: 集末有钩子的集数 / 总集数
+        # 数据来自 cliffhanger_extractor。与 HOOK.episode_end_cliffhanger_rate 同源，
+        # 但本维度切点更严苛（关注付费节奏稳定性）。
+        params: {}
+        # raw_value: AI 判读集末有强留钩的集数 / 总集数
         tier_anchor:
           high: 0.70
           mid_high: 0.50

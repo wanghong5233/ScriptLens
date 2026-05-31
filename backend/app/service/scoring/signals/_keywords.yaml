@@ -9,6 +9,30 @@
 
 version: "v4-cn-2026-05-31"
 
+# reward_extractor 输出 event_type 的中文展示标签（PAYOFF 信号 detail 文案用）。
+# 与 script_tools/reward_extractor.py 8 种 event_type 一一对应。
+reward_type_cn_labels:
+  revenge: "复仇成功"
+  reversal: "情节反转"
+  face_slap: "打脸"
+  identity_reveal: "身份揭露"
+  romantic_progress: "CP 推进"
+  humiliate_villain: "反派败落"
+  scheme_exposed: "阴谋揭穿"
+  underdog_rise: "逆袭翻身"
+
+# reward type 强度优先级（用于"最强 reward claim"展示选优）。
+# 数字越大越强；与 reward_extractor 内 type_priority 同语义。
+reward_type_priority:
+  revenge: 8
+  reversal: 7
+  identity_reveal: 6
+  romantic_progress: 5
+  humiliate_villain: 4
+  scheme_exposed: 3
+  face_slap: 2
+  underdog_rise: 1
+
 # HOOK 关键词：用于 opening_30char_conflict / first_3_scene_hook_chain
 # 与 script_tools/risk_terms.py 中 HOOK_KEYWORDS 同语义；v4 优先读本文件，
 # risk_terms.HOOK_KEYWORDS 仍保留 import alias 给老模块。

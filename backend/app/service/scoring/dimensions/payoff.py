@@ -45,6 +45,7 @@ from service.scoring.rubric_loader import (
     DimensionConfig,
     DimensionTierCutsConfig,
     SignalConfig,
+    load_keywords,
 )
 
 if TYPE_CHECKING:
@@ -55,6 +56,41 @@ logger = logging.getLogger(__name__)
 
 # 与 reward_extractor 对齐的反转类型集合
 _TWIST_TYPES: frozenset[str] = frozenset({"reversal", "face_slap", "scheme_exposed"})
+
+
+def _reward_type_cn_labels() -> dict[str, str]:
+    """从 signals/_keywords.yaml 读 reward type 中文标签。"""
+    return load_keywords().get("reward_type_cn_labels", {}) or {}
+
+
+def _reward_type_priority() -> dict[str, int]:
+    """从 signals/_keywords.yaml 读 reward type 强度优先级。"""
+    raw = load_keywords().get("reward_type_priority", {}) or {}
+    return {k: int(v) for k, v in raw.items()}
+
+
+def _reward_type_breakdown(rewards: list["RewardEvent"]) -> str:
+    """把 reward_events 按 event_type 计数 + 中文化，返回 "打脸×9、反转×3" 字串。"""
+    cn_labels = _reward_type_cn_labels()
+    counts: dict[str, int] = {}
+    for r in rewards:
+        counts[r.event_type] = counts.get(r.event_type, 0) + 1
+    items = sorted(counts.items(), key=lambda kv: -kv[1])
+    return "、".join(
+        f"{cn_labels.get(t, t)}×{n}" for t, n in items
+    )
+
+
+def _top_reward_claim(rewards: list["RewardEvent"]) -> str:
+    """返回最强 reward 事件的中文诠释（reward_extractor LLM 输出的 claim）。"""
+    type_priority = _reward_type_priority()
+    sorted_rewards = sorted(
+        rewards, key=lambda r: -type_priority.get(r.event_type, 0)
+    )
+    for r in sorted_rewards:
+        if r.claim:
+            return r.claim
+    return ""
 
 
 async def score_dimension(
@@ -114,11 +150,22 @@ def _signal_reward_density(ctx: ScoringContext, cfg: SignalConfig) -> SignalResu
     if err is not None:
         return err
 
-    rewards = ctx.reward_events
+    rewards = list(ctx.reward_events)
     raw = safe_div(float(len(rewards)), float(ctx.total_episodes))
     score, tier = map_signal_raw_to_score(raw, cfg)
     evidence = [r.scene_id for r in rewards[:3]]
-    detail = f"全剧爽点密度 {raw:.2f}/集（共 {len(rewards)} 条）"
+
+    if not rewards:
+        detail = f"AI 在全剧 {ctx.total_episodes} 集中未识别出任何爽点事件"
+    else:
+        breakdown = _reward_type_breakdown(rewards)
+        top_claim = _top_reward_claim(rewards)
+        detail = (
+            f"AI 在 {ctx.total_episodes} 集中识别出 {len(rewards)} 个爽点事件（平均 {raw:.2f}/集），"
+            f"类型分布：{breakdown}"
+        )
+        if top_claim:
+            detail += f"；其中最强一处：「{top_claim}」"
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,
@@ -144,7 +191,18 @@ def _signal_twist_density(ctx: ScoringContext, cfg: SignalConfig) -> SignalResul
     raw = safe_div(float(len(twists)), float(ctx.total_episodes))
     score, tier = map_signal_raw_to_score(raw, cfg)
     evidence = [r.scene_id for r in twists[:3]]
-    detail = f"反转密度 {raw:.2f}/集（共 {len(twists)} 条）"
+
+    if not twists:
+        detail = f"AI 在全剧 {ctx.total_episodes} 集中未识别出反转 / 打脸 / 阴谋揭穿事件"
+    else:
+        breakdown = _reward_type_breakdown(twists)
+        top_claim = _top_reward_claim(twists)
+        detail = (
+            f"AI 识别出 {len(twists)} 个反转级事件（平均 {raw:.2f}/集），"
+            f"类型：{breakdown}"
+        )
+        if top_claim:
+            detail += f"；代表场景：「{top_claim}」"
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,
@@ -170,7 +228,10 @@ def _signal_dry_streak(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
     raw = 1.0 - safe_div(float(max_dry), float(ctx.total_episodes))
     raw = max(0.0, min(1.0, raw))
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = f"最长无爽点连续 {max_dry} 集 / 共 {ctx.total_episodes} 集"
+    detail = (
+        f"全剧最长连续 {max_dry} 集没有爽点 "
+        f"（占 {ctx.total_episodes} 集中的 {max_dry / max(ctx.total_episodes, 1):.0%}）"
+    )
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,
@@ -214,7 +275,10 @@ def _signal_episode_coverage(ctx: ScoringContext, cfg: SignalConfig) -> SignalRe
     eps_with_reward = {r.episode_no for r in ctx.reward_events if r.episode_no is not None}
     raw = safe_div(float(len(eps_with_reward)), float(ctx.total_episodes))
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = f"有爽点的集数占比 {raw:.0%}"
+    detail = (
+        f"{ctx.total_episodes} 集中有 {len(eps_with_reward)} 集（{raw:.0%}）"
+        f"出现爽点事件"
+    )
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,

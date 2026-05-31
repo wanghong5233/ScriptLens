@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Optional
 if TYPE_CHECKING:
     from service.script_tools.beat_chain import BeatSheet
     from service.script_tools.character_graph_chain import CharacterGraph
+    from service.script_tools.cliffhanger_extractor import CliffhangerEvent
     from service.script_tools.compliance_scorer import ComplianceResult
     from service.script_tools.coverage_chain import CoverageCard
     from service.script_tools.llm_caller import LlmCaller
@@ -236,6 +237,7 @@ class ScoringContext:
 
     beat_sheet: Optional["BeatSheet"] = None
     reward_events: list["RewardEvent"] = field(default_factory=list)
+    cliffhangers: list["CliffhangerEvent"] = field(default_factory=list)
     character_graph: Optional["CharacterGraph"] = None
     coverage_card: Optional["CoverageCard"] = None
     motivation_result: Optional["MotivationResult"] = None

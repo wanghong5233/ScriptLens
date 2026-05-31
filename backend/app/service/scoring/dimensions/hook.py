@@ -3,18 +3,18 @@
 signals:
 - opening_30char_conflict        hybrid（rule 命中走 rule，未命中走 LLM 兜底）
 - first_3_scene_hook_chain       rule
-- episode_end_cliffhanger_rate   rule
+- episode_end_cliffhanger_rate   hybrid（数据来自 cliffhanger_extractor LLM 二级判定）
 - first_minute_inciting_incident llm_judge
 
 所有阈值 / 关键词从 rubric YAML + _keywords.yaml 读，本文件无业务字面量。
 
 设计要点（v4 评分准确度强化）：
-- `opening_30char_conflict` 从 rule 升级为 hybrid。业内事实：规则关键词在
-  开场冲突判定上 FN 率 25-40%（如《钓系娇娇》首场命中 0%，但 LLM judge
-  独立判读为 incident_strength=0.8）。hybrid 策略：
-    1. 规则关键词命中 → 走规则（快、可解释、零成本）
-    2. 规则未命中 → 调 LLM judge 二次判读首场是否真的有强冲突
-       （避免 keyword-only FN）
+- `opening_30char_conflict` 从 rule 升级为 hybrid（rule 兜底 + LLM 判读首场冲突）
+- `episode_end_cliffhanger_rate` 从 naive 关键词扫升级为 hybrid：
+  数据源由 `cliffhanger_extractor`（关键词召回 → LLM 二级判定 → verbatim quote）提供，
+  本信号只做"覆盖率 + 类型加权"聚合。
+  业内对照：字节 WebConf 2026 *Short Drama QA* §3.2 cliffhanger taxonomy
+  （5 类 cliff_type 替代纯关键词），ReelShort writer SOP《Episode-end Hook Design》。
 - 业内对照：G-Eval (Liu et al, EMNLP 2023)、字节 WebConf 2026 *Short Drama
   Quality Assessment* 都证明 hybrid 比纯 rule / 纯 LLM 在该类任务上都更稳。
 """
@@ -267,7 +267,9 @@ def _signal_first_3_hook_chain(ctx: ScoringContext, cfg: SignalConfig) -> Signal
 
     raw = safe_div(float(hit_count), float(max(window, 1)))
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = f"前 {window} 场钩子链命中 {hit_count}/{window}"
+    detail = (
+        f"开篇前 {window} 场中有 {hit_count} 场出现强冲突 / 反转 / 危机类钩子词"
+    )
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,
@@ -285,46 +287,72 @@ def _signal_first_3_hook_chain(ctx: ScoringContext, cfg: SignalConfig) -> Signal
 
 
 def _signal_episode_end_cliffhanger(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
+    """集末留钩覆盖率（hybrid）：基于 cliffhanger_extractor 的 LLM 判读结果。
+
+    数据契约（替代旧版关键词扫）：
+    - 输入：`ctx.cliffhangers`（CliffhangerEvent[]）—— 上游 cliffhanger_extractor
+      已经做了"关键词召回 + LLM 二级判定 + verbatim quote 校验 + confidence=high
+      过滤"，每条事件都是高置信度的真 cliffhanger。
+    - 输出：覆盖率（多少集集末被 AI 判读为有留钩）+ 类型分布人话叙述。
+
+    上游 chain 故障时 (`ctx.cliffhangers` 为空且应有数据) 走 FAILED；空剧本
+    走 NOT_APPLICABLE。
+    """
     if not ctx.has_scenes():
         return make_failed_signal(
-            cfg.key, SignalSource.RULE, fallback_reason="scenes 为空"
+            cfg.key, SignalSource.HYBRID, fallback_reason="scenes 为空"
         )
-
     episodes = scenes_by_episode(ctx.scenes)
     if not episodes:
         return make_failed_signal(
             cfg.key,
-            SignalSource.RULE,
+            SignalSource.HYBRID,
             fallback_reason="无 episode_no 数据，无法判定集末钩子",
         )
 
-    keywords = load_keywords().get("cliffhanger_keywords", [])
-    hook_keywords = load_keywords().get("hook_keywords", [])
-    combined = list(keywords) + list(hook_keywords)
-
     total_eps = len(episodes)
-    hit_eps = 0
-    evidence: list[str] = []
-    tail_window = required_param(cfg, "tail_char_window", int)
-    for ep, scenes in episodes.items():
-        if not scenes:
-            continue
-        last = scenes[-1]
-        tail_text = (last.text or "")[-tail_window:] if tail_window > 0 else (last.text or "")
-        if any(kw in tail_text for kw in combined):
-            hit_eps += 1
-            evidence.append(last.id)
+    cliffs = list(ctx.cliffhangers)
 
+    if not cliffs:
+        # 上游 cliffhanger_extractor 失败或剧本确实零留钩。前者已在 chain_status
+        # 标 failed；本信号保守按 raw=0 计分，让用户看到"0 集留钩"的明确信号。
+        score, tier = map_signal_raw_to_score(0.0, cfg)
+        return make_signal(
+            key=cfg.key,
+            source=SignalSource.HYBRID,
+            score=score,
+            tier=tier,
+            raw_value=0.0,
+            evidence_ref_ids=[],
+            detail=f"AI 判读全剧 {total_eps} 集集末均未发现强留钩",
+        )
+
+    hit_eps = len(cliffs)
+    evidence_ids = [c.scene_id for c in cliffs[:5]]
     raw = safe_div(float(hit_eps), float(total_eps))
     score, tier = map_signal_raw_to_score(raw, cfg)
-    detail = f"集末有 cliffhanger 的集占比 {raw:.0%}（{hit_eps}/{total_eps}）"
+
+    # 类型分布人话叙述（替代英文 "cliffhanger" 术语）
+    type_counts: dict[str, int] = {}
+    for c in cliffs:
+        type_counts[c.cliff_type_cn] = type_counts.get(c.cliff_type_cn, 0) + 1
+    type_breakdown = "、".join(
+        f"{label}×{count}" for label, count in sorted(
+            type_counts.items(), key=lambda kv: -kv[1]
+        )
+    )
+    detail = (
+        f"AI 判读 {total_eps} 集中有 {hit_eps} 集（{raw:.0%}）集末留有强钩子；"
+        f"类型分布：{type_breakdown}"
+    )
+
     return make_signal(
         key=cfg.key,
-        source=SignalSource.RULE,
+        source=SignalSource.HYBRID,
         score=score,
         tier=tier,
         raw_value=raw,
-        evidence_ref_ids=evidence[:5],
+        evidence_ref_ids=evidence_ids,
         detail=detail,
     )
 
