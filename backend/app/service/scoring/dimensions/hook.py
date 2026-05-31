@@ -214,8 +214,8 @@ async def _signal_opening_30char(ctx: ScoringContext, cfg: SignalConfig) -> Sign
 
     score, tier = map_signal_raw_to_score(final_raw, cfg)
     detail = (
-        f"规则关键词未命中（{rule_raw:.0%}），AI 判读："
-        f"{payload.conflict_type}（强度 {payload.conflict_strength:.1f}）— {payload.rationale}"
+        f"开场冲突类型：{payload.conflict_type}（强度 {payload.conflict_strength:.1f}/1.0）— "
+        f"{payload.rationale}"
     )
     return make_signal(
         key=cfg.key,
@@ -287,13 +287,13 @@ def _signal_first_3_hook_chain(ctx: ScoringContext, cfg: SignalConfig) -> Signal
 
 
 def _signal_episode_end_cliffhanger(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
-    """集末留钩覆盖率（hybrid）：基于 cliffhanger_extractor 的 LLM 判读结果。
+    """集末留钩覆盖率（hybrid）：基于 cliffhanger_extractor 的判读结果。
 
     数据契约（替代旧版关键词扫）：
     - 输入：`ctx.cliffhangers`（CliffhangerEvent[]）—— 上游 cliffhanger_extractor
       已经做了"关键词召回 + LLM 二级判定 + verbatim quote 校验 + confidence=high
       过滤"，每条事件都是高置信度的真 cliffhanger。
-    - 输出：覆盖率（多少集集末被 AI 判读为有留钩）+ 类型分布人话叙述。
+    - 输出：覆盖率（多少集集末判读为有留钩）+ 类型分布。
 
     上游 chain 故障时 (`ctx.cliffhangers` 为空且应有数据) 走 FAILED；空剧本
     走 NOT_APPLICABLE。
@@ -324,7 +324,7 @@ def _signal_episode_end_cliffhanger(ctx: ScoringContext, cfg: SignalConfig) -> S
             tier=tier,
             raw_value=0.0,
             evidence_ref_ids=[],
-            detail=f"AI 判读全剧 {total_eps} 集集末均未发现强留钩",
+            detail=f"全剧 {total_eps} 集集末均未出现强留钩",
         )
 
     hit_eps = len(cliffs)
@@ -342,7 +342,7 @@ def _signal_episode_end_cliffhanger(ctx: ScoringContext, cfg: SignalConfig) -> S
         )
     )
     detail = (
-        f"AI 判读 {total_eps} 集中有 {hit_eps} 集（{raw:.0%}）集末留有强钩子；"
+        f"全剧 {total_eps} 集中 {hit_eps} 集（{raw:.0%}）集末留有强钩子；"
         f"类型分布：{type_breakdown}"
     )
 
@@ -429,5 +429,5 @@ def _build_reason(signals: list[SignalResult]) -> str:
         if sig.detail and sig.score >= 0:
             parts.append(sig.detail)
     if not parts:
-        return "信号缺失，无法形成 HOOK 抓人力判断"
+        return "数据不足，暂时无法判断抓人力"
     return "；".join(parts[:3])

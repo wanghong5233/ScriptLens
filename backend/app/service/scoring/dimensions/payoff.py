@@ -156,16 +156,16 @@ def _signal_reward_density(ctx: ScoringContext, cfg: SignalConfig) -> SignalResu
     evidence = [r.scene_id for r in rewards[:3]]
 
     if not rewards:
-        detail = f"AI 在全剧 {ctx.total_episodes} 集中未识别出任何爽点事件"
+        detail = f"全剧 {ctx.total_episodes} 集中未识别出明确爽点事件"
     else:
         breakdown = _reward_type_breakdown(rewards)
         top_claim = _top_reward_claim(rewards)
         detail = (
-            f"AI 在 {ctx.total_episodes} 集中识别出 {len(rewards)} 个爽点事件（平均 {raw:.2f}/集），"
+            f"全剧 {ctx.total_episodes} 集共 {len(rewards)} 个爽点事件（平均 {raw:.2f}/集），"
             f"类型分布：{breakdown}"
         )
         if top_claim:
-            detail += f"；其中最强一处：「{top_claim}」"
+            detail += f"；最强一处：「{top_claim}」"
     return make_signal(
         key=cfg.key,
         source=SignalSource.RULE,
@@ -193,13 +193,13 @@ def _signal_twist_density(ctx: ScoringContext, cfg: SignalConfig) -> SignalResul
     evidence = [r.scene_id for r in twists[:3]]
 
     if not twists:
-        detail = f"AI 在全剧 {ctx.total_episodes} 集中未识别出反转 / 打脸 / 阴谋揭穿事件"
+        detail = f"全剧 {ctx.total_episodes} 集中未出现反转 / 打脸 / 阴谋揭穿类强转折"
     else:
         breakdown = _reward_type_breakdown(twists)
         top_claim = _top_reward_claim(twists)
         detail = (
-            f"AI 识别出 {len(twists)} 个反转级事件（平均 {raw:.2f}/集），"
-            f"类型：{breakdown}"
+            f"全剧共 {len(twists)} 个强转折事件（平均 {raw:.2f}/集），"
+            f"类型分布：{breakdown}"
         )
         if top_claim:
             detail += f"；代表场景：「{top_claim}」"
@@ -398,4 +398,4 @@ def _collect_reward_sample_excerpts(
 
 def _build_reason(signals: list[SignalResult]) -> str:
     parts = [s.detail for s in signals if s.detail]
-    return "；".join(parts[:3]) if parts else "信号缺失，无法形成 PAYOFF 判断"
+    return "；".join(parts[:3]) if parts else "数据不足，暂时无法判断爽感力"

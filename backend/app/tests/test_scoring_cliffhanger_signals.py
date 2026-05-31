@@ -94,8 +94,27 @@ def _load_signal_cfg(dim_key: str, signal_key: str):
 # ============================================================
 
 
+# 业内 SOP（抖音红果 / 快手星芒 / 九州文化 / 点众选品报告）：
+# detail 字符串严禁出现技术主语 "AI 判读" / "AI 在 / AI 给" / "LLM" 等，
+# 用户视角只关心剧本事实，不关心评分链路实现细节。
+_FORBIDDEN_DETAIL_PHRASES: tuple[str, ...] = (
+    "AI 判读",
+    "AI 在",
+    "AI 给",
+    "LLM",
+    "cliffhanger",  # 5 类 cliff_type 中文化后严禁出现英文词
+)
+
+
+def _assert_clean_detail(detail: str) -> None:
+    for phrase in _FORBIDDEN_DETAIL_PHRASES:
+        assert phrase.lower() not in detail.lower(), (
+            f"detail 含禁用技术词 {phrase!r}；实际 detail={detail!r}"
+        )
+
+
 def test_episode_end_cliffhanger_rate_uses_extractor_data():
-    """信号 source = HYBRID，detail 含中文 cliff_type，不含 "cliffhanger" 英文词。"""
+    """信号 source = HYBRID，detail 含中文 cliff_type，detail 严禁含技术主语。"""
     cfg = _load_signal_cfg("hook", "episode_end_cliffhanger_rate")
     ctx = ScoringContext(
         script_id="t",
@@ -116,12 +135,11 @@ def test_episode_end_cliffhanger_rate_uses_extractor_data():
     assert any(label in sig.detail for label in CLIFF_TYPE_CN_LABELS.values()), (
         f"detail 应含中文 cliff_type，实际={sig.detail!r}"
     )
-    # 严禁 detail 字面含英文 "cliffhanger"（用户读不懂的术语）
-    assert "cliffhanger" not in sig.detail.lower()
+    _assert_clean_detail(sig.detail)
 
 
 def test_episode_end_cliffhanger_rate_zero_cliffs():
-    """无 cliffhanger 时 raw=0，detail 给"未发现强留钩"叙述。"""
+    """无 cliffhanger 时 raw=0，detail 用中性事实陈述（不带技术主语）。"""
     cfg = _load_signal_cfg("hook", "episode_end_cliffhanger_rate")
     ctx = ScoringContext(
         script_id="t",
@@ -131,8 +149,8 @@ def test_episode_end_cliffhanger_rate_zero_cliffs():
     )
     sig = _signal_episode_end_cliffhanger(ctx, cfg)
     assert sig.raw_value == pytest.approx(0.0)
-    assert "未发现" in sig.detail
-    assert "cliffhanger" not in sig.detail.lower()
+    assert "未出现" in sig.detail or "未发现" in sig.detail
+    _assert_clean_detail(sig.detail)
 
 
 # ============================================================
@@ -157,7 +175,7 @@ def test_paywall_cliffhanger_strength_picks_paywall_ep():
     assert sig.source == SignalSource.HYBRID
     assert sig.raw_value == pytest.approx(1.0)
     assert "危机时刻" in sig.detail
-    assert "cliffhanger" not in sig.detail.lower()
+    _assert_clean_detail(sig.detail)
 
 
 def test_paywall_cliffhanger_strength_weight_by_type():
@@ -185,7 +203,8 @@ def test_paywall_cliffhanger_strength_no_cliff_at_paywall():
     )
     sig = _signal_paywall(ctx, cfg)
     assert sig.raw_value == pytest.approx(0.0)
-    assert "未发现强留钩" in sig.detail or "付费转化风险" in sig.detail
+    assert "未出现强留钩" in sig.detail or "付费转化风险" in sig.detail
+    _assert_clean_detail(sig.detail)
 
 
 # ============================================================
@@ -205,4 +224,4 @@ def test_episode_end_hook_grade_uses_extractor_data():
     assert sig.source == SignalSource.HYBRID
     assert sig.raw_value == pytest.approx(0.7)
     assert "真相揭露" in sig.detail
-    assert "cliffhanger" not in sig.detail.lower()
+    _assert_clean_detail(sig.detail)

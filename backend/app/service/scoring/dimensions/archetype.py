@@ -288,4 +288,4 @@ async def _signal_differentiation(
 
 def _build_reason(signals: list[SignalResult]) -> str:
     parts = [s.detail for s in signals if s.detail]
-    return "；".join(parts[:3]) if parts else "信号缺失，无法形成 ARCHETYPE 判断"
+    return "；".join(parts[:3]) if parts else "数据不足，暂时无法判断模板力"

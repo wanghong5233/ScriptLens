@@ -318,7 +318,7 @@ dimensions:
         # 数据来自 cliffhanger_extractor。与 HOOK.episode_end_cliffhanger_rate 同源，
         # 但本维度切点更严苛（关注付费节奏稳定性）。
         params: {}
-        # raw_value: AI 判读集末有强留钩的集数 / 总集数
+        # raw_value: 集末有强留钩的集数 / 总集数（数据源 cliffhanger_extractor）
         tier_anchor:
           high: 0.70
           mid_high: 0.50

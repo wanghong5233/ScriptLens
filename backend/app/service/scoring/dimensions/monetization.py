@@ -177,7 +177,7 @@ def _signal_paywall(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
             tier=tier,
             raw_value=0.0,
             evidence_ref_ids=[],
-            detail=f"AI 判读第 {paywall_ep} 集集末未发现强留钩，付费转化风险较高",
+            detail=f"第 {paywall_ep} 集集末未出现强留钩，付费转化风险较高",
         )
 
     raw = type_weights.get(matched.cliff_type, type_weights["mystery_setup"])
@@ -239,9 +239,8 @@ def _signal_post_paywall(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult
 def _signal_end_hook(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
     """整剧"集末有留钩的集数占比"（hybrid）：基于 cliffhanger_extractor 数据。
 
-    与 HOOK.episode_end_cliffhanger_rate 同源（都是 AI 判读结果），但
-    MONETIZATION 维度更关注付费节奏稳定性 —— 切点更严苛（在 rubric YAML
-    tier_anchor 中体现）。
+    与 HOOK.episode_end_cliffhanger_rate 同数据源，但 MONETIZATION 维度更关注
+    付费节奏稳定性 —— 切点更严苛（在 rubric YAML tier_anchor 中体现）。
     """
     if not ctx.has_scenes() or ctx.total_episodes <= 0:
         return make_failed_signal(
@@ -264,7 +263,7 @@ def _signal_end_hook(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
             score=score,
             tier=tier,
             raw_value=0.0,
-            detail=f"AI 判读 {total} 集集末均未发现强留钩，付费节奏不稳",
+            detail=f"{total} 集集末均未出现强留钩，付费节奏不稳",
         )
 
     hit = len(cliffs)
@@ -281,8 +280,8 @@ def _signal_end_hook(ctx: ScoringContext, cfg: SignalConfig) -> SignalResult:
     )
 
     detail = (
-        f"AI 判读 {total} 集中有 {hit} 集（{raw:.0%}）集末留钩；"
-        f"类型：{type_breakdown}"
+        f"{total} 集中 {hit} 集（{raw:.0%}）集末留有强钩子；"
+        f"类型分布：{type_breakdown}"
     )
     return make_signal(
         key=cfg.key,
@@ -436,4 +435,4 @@ async def _signal_paywall_hook_quality(
 
 def _build_reason(signals: list[SignalResult]) -> str:
     parts = [s.detail for s in signals if s.detail]
-    return "；".join(parts[:3]) if parts else "信号缺失，无法形成 MONETIZATION 判断"
+    return "；".join(parts[:3]) if parts else "数据不足，暂时无法判断变现力"
