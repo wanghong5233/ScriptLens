@@ -962,7 +962,7 @@ async def generate_report(
         # type/polarity；id-space 与 character_bios 严格一致。
         graph_task = asyncio.create_task(
             _optional_chain(
-                "character_graph_chain",
+            "character_graph_chain",
                 extract_character_graph(
                     script_id=script_id,
                     caller=caller,
@@ -974,9 +974,9 @@ async def generate_report(
         )
         motivation_task = asyncio.create_task(
             _optional_chain(
-                "motivation_chain",
-                score_motivation(script_id=script_id, caller=caller),
-            )
+            "motivation_chain",
+            score_motivation(script_id=script_id, caller=caller),
+        )
         )
         # 小传与 graph / beat / motivation 并发：bio 单点失败不影响其他链。
         bios_task = asyncio.create_task(
@@ -1054,7 +1054,7 @@ async def generate_report(
                 title=meta.title,
                 total_episodes=meta.total_episodes or 0,
                 total_scenes=meta.total_scenes or 0,
-                reward_events=reward_events,
+            reward_events=reward_events,
                 beat_sheet=beat_sheet,
                 characters=characters_for_cov,
                 relationships=relationships_for_cov,
@@ -1076,15 +1076,15 @@ async def generate_report(
         dim_outputs: dict[str, ScoreOutput] = {
             dim: _score_one(
                 dimension=dim,
-                script_id=script_id,
+            script_id=script_id,
                 meta=meta,
             reward_events=reward_events,
                 coverage_card=coverage_card,
                 beat_sheet=beat_sheet,
             character_graph=character_graph,
                 motivation_result=motivation_result,
-                engine=engine,
-            )
+            engine=engine,
+        )
             for dim in _DIM_ORDER
         }
         scored_count = sum(1 for o in dim_outputs.values() if o.score is not None)

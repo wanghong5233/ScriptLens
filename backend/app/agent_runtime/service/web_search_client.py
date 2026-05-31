@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -41,25 +41,76 @@ class WebSearchClient:
 
         return bool(self._api_key)
 
-    async def search(self, query: str, max_results: int = 5) -> Dict[str, Any]:
-        """Execute a web search and return normalized results."""
+    async def search(
+        self,
+        query: str,
+        max_results: int = 5,
+        *,
+        search_depth: str = "basic",
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Execute a web search and return normalized results.
+
+        Args:
+            query: Free-text search query.
+            max_results: Upper bound of results returned by provider.
+            search_depth: Tavily-specific. "basic" (fast) or "advanced"
+                (deeper crawl, slower, higher relevance). Ignored by serper.
+            include_domains: Whitelist hostnames (e.g. ["douyin.com"]).
+                Tavily uses native `include_domains`; serper uses
+                Google `site:` operator joined with OR.
+            exclude_domains: Blacklist hostnames. Same routing as include.
+        """
 
         if self._provider == "tavily":
-            return await self._search_tavily(query, max_results)
+            return await self._search_tavily(
+                query,
+                max_results,
+                search_depth=search_depth,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
         if self._provider == "serper":
-            return await self._search_serper(query, max_results)
+            return await self._search_serper(
+                query,
+                max_results,
+                include_domains=include_domains,
+                exclude_domains=exclude_domains,
+            )
         raise ValueError(f"Unsupported web search provider: {self._provider}")
 
-    async def _search_tavily(self, query: str, max_results: int) -> Dict[str, Any]:
-        """Call Tavily search API."""
+    async def _search_tavily(
+        self,
+        query: str,
+        max_results: int,
+        *,
+        search_depth: str = "basic",
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Call Tavily search API.
+
+        Tavily payload reference (v0 docs, 2026-05):
+          - search_depth: "basic" | "advanced"
+          - include_domains: List[str]
+          - exclude_domains: List[str]
+          - include_answer / include_raw_content: bool
+        """
 
         url = self._base_url or "https://api.tavily.com/search"
-        payload = {
+        payload: Dict[str, Any] = {
             "api_key": self._api_key,
             "query": query,
             "max_results": max_results,
             "include_answer": False,
         }
+        if search_depth in {"basic", "advanced"}:
+            payload["search_depth"] = search_depth
+        if include_domains:
+            payload["include_domains"] = list(include_domains)
+        if exclude_domains:
+            payload["exclude_domains"] = list(exclude_domains)
         response = await self._client.post(url, json=payload)
         response.raise_for_status()
         data = response.json()
@@ -68,17 +119,36 @@ class WebSearchClient:
                 "title": item.get("title"),
                 "url": item.get("url"),
                 "snippet": item.get("content") or item.get("snippet"),
+                "score": item.get("score"),
             }
             for item in data.get("results", [])
         ]
         return {"provider": "tavily", "query": query, "results": results, "raw": data}
 
-    async def _search_serper(self, query: str, max_results: int) -> Dict[str, Any]:
-        """Call Serper search API."""
+    async def _search_serper(
+        self,
+        query: str,
+        max_results: int,
+        *,
+        include_domains: Optional[List[str]] = None,
+        exclude_domains: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Call Serper search API.
+
+        Serper doesn't have native include/exclude domain — we splice Google
+        `site:` operators into the query as a best-effort polyfill.
+        """
 
         url = self._base_url or "https://google.serper.dev/search"
         headers = {"X-API-KEY": self._api_key or ""}
-        payload = {"q": query, "num": max_results}
+        domain_clauses: List[str] = []
+        if include_domains:
+            inc = " OR ".join(f"site:{d}" for d in include_domains)
+            domain_clauses.append(f"({inc})")
+        if exclude_domains:
+            domain_clauses.extend(f"-site:{d}" for d in exclude_domains)
+        final_query = query if not domain_clauses else f"{query} {' '.join(domain_clauses)}"
+        payload = {"q": final_query, "num": max_results}
         response = await self._client.post(url, json=payload, headers=headers)
         response.raise_for_status()
         data = response.json()
@@ -87,10 +157,11 @@ class WebSearchClient:
                 "title": item.get("title"),
                 "url": item.get("link"),
                 "snippet": item.get("snippet"),
+                "score": None,
             }
             for item in data.get("organic", [])
         ]
-        return {"provider": "serper", "query": query, "results": results, "raw": data}
+        return {"provider": "serper", "query": final_query, "results": results, "raw": data}
 
 
 _web_search_client: Optional[WebSearchClient] = None

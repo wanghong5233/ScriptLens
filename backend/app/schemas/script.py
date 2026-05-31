@@ -334,11 +334,41 @@ class CoveragePoint(BaseModel):
     detail: str = Field(..., description="≤ 80 字，面向选品/编剧/审核的人话说明")
 
 
-class CoverageCard(BaseModel):
-    """30 秒决策层（v3.5）：借鉴 Hollywood Studio Coverage / Final Draft Bullet
-    Summary / NotebookLM Source Summary 的结构。
+class ComparableTitleEntry(BaseModel):
+    """同类爆款条目（v3.7.1）：基于剧本题材直接搜垂直平台短剧视频，返回真实链接。
 
-    `synopsis` 是工业 coverage 必有项：200-300 字全剧故事浓缩。
+    业内对照：
+      - Hollywood Coverage Comparable Titles：纯文本锚点
+      - Reelytics / Parrot Analytics 选品工具：基于题材+卖点搜视频平台
+      - Perplexity Discover / Tavily best practice：多 query 并发 + site 限定 + 聚合去重
+
+    v3.7.1 实现：放弃 LLM 编造剧名（幻觉太严重），改为用 coverage.genre + logline
+    构造多个搜索 query，并发跑 Tavily advanced search 限定垂直平台（抖音/西瓜/B站/快手），
+    聚合去重 + 平台权重排序，保底返回 3 条。
+
+    `platform` 用于前端按平台上色（抖音红 / 西瓜橙 / B 站蓝 / 快手浅橙 / 其他灰）。
+    """
+
+    title: str = Field(..., description="真实视频/文章标题（来自搜索结果）或 LLM 给的剧名")
+    url: Optional[str] = Field(
+        None,
+        description="Tavily 搜索校验后的真实视频链接；失败/未配置 search key 时为 None",
+    )
+    platform: Optional[str] = Field(
+        None,
+        description="平台标识：douyin / ixigua / bilibili / kuaishou / other / fallback",
+    )
+    snippet: Optional[str] = Field(
+        None,
+        description="搜索结果摘要，前端 chip hover 时展示",
+    )
+
+
+class CoverageCard(BaseModel):
+    """30 秒决策层（v3.7）：对齐 Hollywood Studio Coverage / ReelShort 选品端 6 段范式。
+
+    `synopsis` 是工业 coverage 必有项：200-300 字全剧故事浓缩，前端在速览第二屏直接展开。
+    `comparable_titles` v3.7 起从纯字符串升级为 `ComparableTitleEntry`（带跳转 URL）。
     """
 
     logline: str = Field(..., description="≤ 60 字一句话剧情概括")
@@ -349,11 +379,9 @@ class CoverageCard(BaseModel):
     core_value: str = Field("", description="≤ 30 字，这份剧本最值得关注的价值")
     strengths: List[CoveragePoint] = Field(default_factory=list)
     concerns: List[CoveragePoint] = Field(default_factory=list)
-    # 业内对照：抖音红果 / 快手星芒选品必看「同类爆款」做对照判断。
-    # 由 LLM 在 coverage 阶段产出 2-3 部题材相近、规模相当的已成爆款，给选品端"这部像哪部"的直接锚点。
-    comparable_titles: List[str] = Field(
+    comparable_titles: List[ComparableTitleEntry] = Field(
         default_factory=list,
-        description="同类爆款 2-3 部，每条 ≤ 16 字（剧名 或 剧名+赛道说明）",
+        description="同类爆款 2-3 部，每条含 title + Tavily 校验后的 url（命中时）",
     )
 
 

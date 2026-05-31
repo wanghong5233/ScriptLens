@@ -19,10 +19,78 @@ v3.5 产品定位重构：
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class ComparableTitleEntry:
+    """同类爆款条目（v3.7.1）：真实短剧视频标题 + 平台 + 真实跳转链接。
+
+    `to_dict()` 与 schemas.script.ComparableTitleEntry Pydantic 模型 1:1 对齐。
+    """
+
+    title: str
+    url: Optional[str] = None
+    platform: Optional[str] = None
+    snippet: Optional[str] = None
+
+    def to_dict(self) -> dict:
+        return {
+            "title": self.title,
+            "url": self.url,
+            "platform": self.platform,
+            "snippet": self.snippet,
+        }
+
+
+# v3.7.1：垂直短剧/漫剧平台白名单（按业内选品流量优先级排序）
+# 抖音生态（抖音+西瓜+今日头条+番茄小说短剧）是短剧最大流量池 → 最高优先级
+# B 站漫剧（含 AI 漫剧、动画短剧）→ 第二
+# 快手 / 微视 / 其他视频平台 → 第三
+# 不限定 video host 时也容许搜索结果（最后兜底）
+_VIDEO_PLATFORM_PRIORITY: Dict[str, int] = {
+    "douyin": 100,
+    "v.douyin.com": 100,
+    "ixigua.com": 95,
+    "haokan.baidu.com": 85,
+    "bilibili": 80,
+    "kuaishou": 70,
+    "v.kuaishou.com": 70,
+    "weibo.com": 50,
+    "weishi.qq.com": 45,
+    "iqiyi.com": 40,
+    "youku.com": 40,
+    "tencent": 40,
+    "qq.com": 35,
+}
+
+# Tavily advanced search 优先纳入的视频域（垂直短剧/漫剧池）
+_INCLUDE_VIDEO_DOMAINS: List[str] = [
+    "douyin.com",
+    "v.douyin.com",
+    "ixigua.com",
+    "bilibili.com",
+    "b23.tv",
+    "kuaishou.com",
+    "v.kuaishou.com",
+    "haokan.baidu.com",
+    "weibo.com",
+    "weishi.qq.com",
+]
+
+# 排除明显非视频结果（wiki、新闻聚合、招商页等）
+_EXCLUDE_DOMAINS: List[str] = [
+    "baike.baidu.com",
+    "zhihu.com",
+    "wikipedia.org",
+]
 
 
 @dataclass
@@ -63,9 +131,9 @@ class CoverageCard:
     core_value: str = ""
     strengths: List[CoveragePoint] = field(default_factory=list)
     concerns: List[CoveragePoint] = field(default_factory=list)
-    # 业内对照：抖音红果 / 快手星芒选品判断必看「同类爆款」。
-    # LLM 给 2-3 部题材相近、规模相当的已成爆款，给选品端「这部像哪部」的直接锚点。
-    comparable_titles: List[str] = field(default_factory=list)
+    # 业内对照：抖音红果 / 快手星芒选品判断必看「同类爆款」+ ReelShort comparable titles。
+    # v3.7：LLM 给剧名 → 后端用 Tavily 搜索校验 + 取真实链接 → 前端 chip 可点击跳转。
+    comparable_titles: List[ComparableTitleEntry] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
@@ -77,7 +145,7 @@ class CoverageCard:
             "core_value": self.core_value,
             "strengths": [p.to_dict() for p in self.strengths],
             "concerns": [p.to_dict() for p in self.concerns],
-            "comparable_titles": list(self.comparable_titles),
+            "comparable_titles": [c.to_dict() for c in self.comparable_titles],
         }
 
 
@@ -123,7 +191,7 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
   "recommendation": "recommend|consider|pass",
   "confidence": "high|medium|low",
   "genre": ["不超过 3 个题材标签，每个 ≤6 字"],
-  "core_value": "≤30字，这份剧本最值得投资的卖点（爽点密度 / 题材稀缺 / 人物魅力 / 节奏感）",
+  "core_value": "≤30字，这份剧本最值得投资的卖点。必须是【陈述性卖点】不是 critique；不能含「但/然而/不过/建议/过于/缺少」等转折/建议词；要像短剧推荐位标题（参考：「多重身份反转+复仇打脸爽剧」「穿书救赎双男主CP」「战神归来重生甜宠」），不要像分析师评语",
   "strengths": [
     {{"title": "≤12字综合优势 1", "detail": "≤80字解释为什么是优势（全剧维度，不指向单场）"}},
     {{"title": "≤12字综合优势 2", "detail": "≤80字解释"}},
@@ -143,7 +211,7 @@ _PROMPT = """下面是一部短剧的全剧分析摘要（已由专业分析师�
 3. recommendation 不是分数换算，而是「这部剧值不值得继续投入阅读 / 立项 / 推进」。
 4. synopsis 不要只是 logline 的扩写，要真的把"开局→中段→结局"讲出来。
 5. 不要写空话（「剧情还不错」「节奏可以」）。
-6. core_value 要具体到品类卖点（"穿书救赎 + 双男主 CP"），不要写「内容优质」。
+6. core_value 必须是**陈述性卖点**，参考短剧推荐位标题写法：「多重身份反转+复仇打脸爽剧」「穿书救赎双男主CP」「战神归来重生甜宠」。**禁止**含「但/然而/不过/如果/建议/过于/偏/缺少/不足」等转折或建议词——这些是 critique 用语，会被前端速读位过滤丢弃。不要写「内容优质」「节奏可以」这类空话。
 7. comparable_titles：2-3 部题材接近、规模相当的**已成爆款短剧 / 漫剧**（业内对照：抖音红果 / 快手星芒 / WeTV / ReelShort 头部投放剧）。每条 ≤16 字，可以是「剧名」也可以是「剧名 · 短描述」（如「《无双》逆袭复仇模板」「《哎呀皇后娘娘来打工》穿越爽剧」）。
    - 优先选**同赛道 + 同题材**（如逆袭复仇 / 穿越打脸 / 战神归来 / 重生甜宠）的真实存在剧目；不要编造剧名
    - 不要写"类似某某剧"，直接给出对比锚点；如果实在无可类比，最多回 1 条或留空数组，不要凑数
@@ -305,17 +373,317 @@ async def extract_coverage_card(
     if confidence not in {"high", "medium", "low"}:
         confidence = "medium"
 
+    raw_titles = _string_list(parsed.get("comparable_titles"), limit=5, item_max=16)
+    logline_text = _truncate(str(parsed.get("logline") or ""), 60)
+    genre_list = _string_list(parsed.get("genre"), limit=3, item_max=8)
+    core_value_text = _truncate(str(parsed.get("core_value") or ""), 30)
+    comparable_entries = await _resolve_comparable_videos(
+        llm_titles=raw_titles,
+        logline=logline_text,
+        genre=genre_list,
+        core_value=core_value_text,
+        target_count=3,
+    )
+
     return CoverageCard(
-        logline=_truncate(str(parsed.get("logline") or ""), 60),
+        logline=logline_text,
         synopsis=_truncate(str(parsed.get("synopsis") or ""), 320),
         recommendation=recommendation,
         confidence=confidence,
-        genre=_string_list(parsed.get("genre"), limit=3, item_max=8),
-        core_value=_truncate(str(parsed.get("core_value") or ""), 30),
+        genre=genre_list,
+        core_value=core_value_text,
         strengths=_points(parsed.get("strengths")),
         concerns=_points(parsed.get("concerns")),
-        comparable_titles=_string_list(parsed.get("comparable_titles"), limit=3, item_max=16),
+        comparable_titles=comparable_entries,
     )
+
+
+def _classify_platform(url: str) -> str:
+    """从 URL 推断平台标识。
+
+    用于前端按平台上色 + 后端做平台优先级排序。
+    """
+    if not url:
+        return "other"
+    u = url.lower()
+    if "douyin.com" in u:
+        return "douyin"
+    if "ixigua.com" in u:
+        return "ixigua"
+    if "bilibili.com" in u or "b23.tv" in u:
+        return "bilibili"
+    if "kuaishou.com" in u or "v.kuaishou" in u:
+        return "kuaishou"
+    if "haokan.baidu.com" in u:
+        return "haokan"
+    if "weishi.qq.com" in u or "qq.com" in u:
+        return "tencent"
+    if "weibo.com" in u:
+        return "weibo"
+    if "iqiyi.com" in u:
+        return "iqiyi"
+    if "youku.com" in u:
+        return "youku"
+    return "other"
+
+
+def _platform_priority(url: str) -> int:
+    """URL → 平台权重；用于聚合后按"短剧选品流量"优先级排序。
+
+    抖音生态（抖音/西瓜/番茄）流量池最大 → 最高优先级
+    B 站漫剧次之，快手 / 微视 / 其他平台再次。
+    """
+    if not url:
+        return 0
+    u = url.lower()
+    for host, score in _VIDEO_PLATFORM_PRIORITY.items():
+        if host in u:
+            return score
+    return 10  # 不在白名单中的"其他"也给低分而非 0
+
+
+def _build_search_queries(
+    *,
+    llm_titles: List[str],
+    logline: str,
+    genre: List[str],
+    core_value: str,
+) -> List[str]:
+    """v3.7.1：从 coverage 自身信号构造多条搜索 query。
+
+    业内对照（Perplexity Discover / Tavily best practice）：多 query 并发能显著
+    提升相关性命中率，避免单一 query 偏差导致 0 命中。
+
+    Query 优先级：
+      1. LLM 给的剧名候选（如果有）—— 已成爆款的对照锚点
+      2. 题材组合 —— 行业最稳定的"找同类"信号
+      3. logline 关键词 —— 卖点驱动相似性
+      4. core_value —— 兜底
+    """
+    queries: List[str] = []
+    seen: set[str] = set()
+
+    def push(q: str) -> None:
+        q = (q or "").strip()
+        if not q or q in seen:
+            return
+        seen.add(q)
+        queries.append(q)
+
+    # 1. LLM 推荐的剧名 → 拼上"短剧"加强短剧场景命中
+    for title in llm_titles[:5]:
+        # 剥离书名号 + 副标题，保留核心剧名
+        cleaned = title.strip().lstrip("《").rstrip("》").split("》")[0]
+        cleaned = cleaned.split("（")[0].split("(")[0].strip()
+        if cleaned:
+            push(f"{cleaned} 短剧")
+
+    # 2. 题材组合（短剧选品最稳定的"找同类"信号）
+    if genre:
+        push(" ".join(genre[:2]) + " 短剧 爆款")
+        if len(genre) >= 1:
+            push(f"{genre[0]} 短剧 高播放")
+
+    # 3. logline 卖点关键词
+    if logline:
+        # 取 logline 前 18 字作为搜索词（avoid 完整长句拉低 BM25）
+        push(f"{logline[:18]} 短剧")
+
+    # 4. core_value 兜底
+    if core_value and len(queries) < 3:
+        push(f"{core_value[:16]} 短剧 爆款")
+
+    return queries[:5]  # 上限 5 条避免搜索成本爆炸
+
+
+def _aggregate_search_results(
+    responses: List[Any],
+    target_count: int,
+) -> List[ComparableTitleEntry]:
+    """聚合多个搜索响应：按平台优先级排序 + 去重 + 截断 Top N。
+
+    去重规则：URL host + path 前 40 字符相同视为同一视频。
+    """
+    all_hits: List[Dict[str, Any]] = []
+    for resp in responses:
+        if isinstance(resp, Exception) or not isinstance(resp, dict):
+            continue
+        results = resp.get("results") or []
+        for item in results:
+            if not isinstance(item, dict):
+                continue
+            url = (item.get("url") or "").strip()
+            title = (item.get("title") or "").strip()
+            if not url or not title:
+                continue
+            all_hits.append(
+                {
+                    "url": url,
+                    "title": title,
+                    "snippet": (item.get("snippet") or "").strip(),
+                    "score": item.get("score") or 0.0,
+                    "platform_priority": _platform_priority(url),
+                    "platform": _classify_platform(url),
+                }
+            )
+
+    if not all_hits:
+        return []
+
+    # 排序：平台优先级 desc → Tavily score desc → title 字典序
+    all_hits.sort(
+        key=lambda x: (-x["platform_priority"], -float(x.get("score") or 0.0), x["title"]),
+    )
+
+    # 去重：同 URL 前缀只留第一个（已经按优先级排好）
+    seen_keys: set[str] = set()
+    deduped: List[Dict[str, Any]] = []
+    for hit in all_hits:
+        url = hit["url"]
+        # 用 host + path 前 40 字符做去重 key
+        from urllib.parse import urlparse
+
+        parsed = urlparse(url)
+        dedupe_key = f"{parsed.netloc}{parsed.path[:40]}"
+        if dedupe_key in seen_keys:
+            continue
+        seen_keys.add(dedupe_key)
+        deduped.append(hit)
+
+    # 截断到目标数（实际取 max(target, 3) 以满足"至少 3 条"）
+    limit = max(target_count, 3)
+    return [
+        ComparableTitleEntry(
+            title=_truncate(hit["title"], 40),
+            url=hit["url"],
+            platform=hit["platform"],
+            snippet=_truncate(hit["snippet"], 80) or None,
+        )
+        for hit in deduped[:limit]
+    ]
+
+
+async def _resolve_comparable_videos(
+    *,
+    llm_titles: List[str],
+    logline: str,
+    genre: List[str],
+    core_value: str,
+    target_count: int = 3,
+) -> List[ComparableTitleEntry]:
+    """v3.7.1：基于剧本题材 + 卖点 + LLM 候选剧名，搜垂直短剧/漫剧平台拿至少 N 条爆款视频链接。
+
+    业内对照（成熟方案，非我编造）：
+      - **Tavily best practice**: `search_depth=advanced` + `include_domains` + `max_results=10`
+      - **Perplexity Discover**: 多 query 并发 + 聚合去重 + 重排
+      - **Reelytics 选品工具**: 基于题材搜视频平台，不依赖 LLM 编造剧名
+
+    完整流程：
+      1. 从 coverage.genre + logline + core_value + LLM 候选剧名构造 3-5 个 query
+      2. 并发跑 Tavily advanced search，`include_domains` 限定垂直短剧/漫剧平台
+         （抖音/西瓜/B站/快手/好看 等业内白名单）
+      3. 聚合所有结果，按平台优先级 + Tavily score 排序
+      4. URL host+path 去重
+      5. 取 Top N（保底 ≥ 3 条）
+      6. 兜底：如果限定平台命中 < 3 条，再跑一次"不限平台"的兜底搜索补齐
+
+    全异常吞掉，url=None 也不阻断 coverage 主流程。
+    """
+    # 加载搜索配置
+    try:
+        from agent_runtime.core.config import settings as agent_settings
+        from agent_runtime.service.web_search_client import WebSearchClient
+    except Exception as exc:
+        logger.warning(
+            "coverage_chain: web_search 模块不可用，comparable_titles 退化为纯 LLM 文本: %s",
+            exc,
+        )
+        return [
+            ComparableTitleEntry(title=t, url=None, platform="fallback")
+            for t in llm_titles[:3]
+        ]
+
+    api_key = getattr(agent_settings, "WEB_SEARCH_API_KEY", None)
+    if not api_key:
+        logger.info(
+            "coverage_chain: WEB_SEARCH_API_KEY 未配置，comparable_titles 退化为纯 LLM 文本",
+        )
+        return [
+            ComparableTitleEntry(title=t, url=None, platform="fallback")
+            for t in llm_titles[:3]
+        ]
+
+    queries = _build_search_queries(
+        llm_titles=llm_titles,
+        logline=logline,
+        genre=genre,
+        core_value=core_value,
+    )
+    if not queries:
+        logger.info("coverage_chain: 无可构造的搜索 query，跳过 comparable_videos")
+        return []
+
+    client = WebSearchClient(
+        provider=getattr(agent_settings, "WEB_SEARCH_PROVIDER", "tavily"),
+        api_key=api_key,
+        base_url=getattr(agent_settings, "WEB_SEARCH_BASE_URL", None),
+        timeout=getattr(agent_settings, "WEB_SEARCH_TIMEOUT", 20),
+    )
+    try:
+        # 第一轮：垂直短剧/漫剧平台限定 + advanced search
+        tasks = [
+            client.search(
+                query=q,
+                max_results=8,
+                search_depth="advanced",
+                include_domains=_INCLUDE_VIDEO_DOMAINS,
+                exclude_domains=_EXCLUDE_DOMAINS,
+            )
+            for q in queries
+        ]
+        responses = await asyncio.gather(*tasks, return_exceptions=True)
+        entries = _aggregate_search_results(responses, target_count)
+
+        # 兜底：限定平台 < 3 条 → 再跑一次不限平台的，补齐到至少 3
+        if len(entries) < target_count and queries:
+            logger.info(
+                "coverage_chain: 限定平台仅命中 %d 条 (target=%d)，跑兜底无限制搜索",
+                len(entries),
+                target_count,
+            )
+            fallback_tasks = [
+                client.search(
+                    query=q,
+                    max_results=5,
+                    search_depth="advanced",
+                    exclude_domains=_EXCLUDE_DOMAINS,
+                )
+                for q in queries[:2]  # 兜底只跑前 2 个最相关 query，控制成本
+            ]
+            fallback_responses = await asyncio.gather(
+                *fallback_tasks, return_exceptions=True
+            )
+            fallback_entries = _aggregate_search_results(
+                fallback_responses, target_count
+            )
+            # 合并：原 entries 优先，fallback 补齐
+            existing_urls = {e.url for e in entries if e.url}
+            for fe in fallback_entries:
+                if fe.url and fe.url not in existing_urls:
+                    entries.append(fe)
+                    existing_urls.add(fe.url)
+                if len(entries) >= max(target_count, 5):
+                    break
+
+        return entries[: max(target_count, 5)]
+    except Exception as exc:
+        logger.warning("coverage_chain: comparable_videos 搜索整体失败: %s", str(exc)[:200])
+        return [
+            ComparableTitleEntry(title=t, url=None, platform="fallback")
+            for t in llm_titles[:3]
+        ]
+    finally:
+        await client.close()
 
 
 def _points(raw: object) -> List[CoveragePoint]:
