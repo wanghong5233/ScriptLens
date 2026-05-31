@@ -183,38 +183,11 @@ CharacterRelationType = Literal[
 RelationPolarity = Literal["positive", "negative", "mixed"]
 
 
-class ReportDecision(BaseModel):
-    """决策卡。"""
-
-    label: DecisionLabel
-    confidence: ConfidenceLevel
-    one_sentence_reason: str
-    summary: str = Field("", description="3-5 句剧本概览")
-    decision_inputs: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ReportScorecardItem(BaseModel):
-    """六维 scorecard 的一项（docs/08-evaluation-framework.md §3）。
-
-    失败模式：上游信号缺失 → score=null/tier=insufficient/reason 写明缺什么。
-    前端展示规则：score 为 null 时不画分数条，只显示 reason。
-    """
-
-    dimension: DimensionName
-    score: Optional[float] = Field(
-        None,
-        ge=0,
-        le=10,
-        description="0-10；coverage 不足时可为 null",
-    )
-    tier: TierName = "insufficient"
-    confidence: ConfidenceLevel = "low"
-    coverage_ratio: Optional[float] = Field(None, ge=0, le=1)
-    signal_refs: List[Dict[str, Any]] = Field(default_factory=list)
-    top_signals: List[Dict[str, Any]] = Field(default_factory=list)
-    tier_cuts: Dict[str, float] = Field(default_factory=dict)
-    reason: str
-    evidence_ref_ids: List[str] = Field(default_factory=list)
+# Wave C-3c (2026-05-31)：v3 6 维评分模型（ReportDecision / ReportScorecardItem）
+# 已删除。Literal 别名 DecisionLabel / DimensionName / TierName 暂保留：
+# - DecisionLabel：暂无消费者（C-3c 后无 schema 字段引用），下次清理 PR 一并移除
+# - DimensionName：RewriteSeed.dimension 仍在使用（v3 6 维改写候选）
+# - TierName：SceneTag / SceneScore / ReportCompliance.tier 等 v2 字段仍在使用
 
 
 class ReportComplianceHit(BaseModel):
@@ -626,46 +599,34 @@ class PacingCurve(BaseModel):
     dead_zones: List[PacingCurveDeadZone] = Field(default_factory=list)
 
 
-class EvaluationDimension(BaseModel):
-    key: DimensionName
-    label: str
-    score: Optional[float] = Field(None, ge=0, le=10)
-    tier: TierName = "insufficient"
-    confidence: ConfidenceLevel = "low"
-    coverage_ratio: Optional[float] = Field(None, ge=0, le=1)
-    reason: str
-    signal_refs: List[Dict[str, Any]] = Field(default_factory=list)
-    evidence_ref_ids: List[str] = Field(default_factory=list)
-    top_signals: List[Dict[str, Any]] = Field(default_factory=list)
-    tier_cuts: Dict[str, float] = Field(default_factory=dict)
-
-
-class EvaluationPayload(BaseModel):
-    dimensions: List[EvaluationDimension] = Field(default_factory=list)
-    risk_flags: List[str] = Field(default_factory=list)
-    rewrite_seeds: List[Dict[str, Any]] = Field(default_factory=list)
+# Wave C-3c：v3 EvaluationDimension / EvaluationPayload 已删除。
+# v4 评分结构存在 ReportPayload.evaluation_v4（Dict[str, Any]，结构由
+# service.scoring.ScoringReport.to_dict 产出）。
 
 
 class ReportPayload(BaseModel):
-    """整份分析报告 JSON（落库到 reports.report_json）。对应 PRD §7。"""
+    """整份分析报告 JSON（落库到 reports.report_json）。
+
+    Wave C-3c (2026-05-31)：v3 6 维评分字段 decision / overall_score / scorecard /
+    evaluation 已删除，正式切到 v4 投资决策评分（verdict / investment_score /
+    evaluation_v4 / top_improvements）。详见 docs/2026-05-31-投资决策评分框架-v4.md。
+    """
 
     script_id: str
     title: str
-    decision: ReportDecision
-    decision_reason: str = Field("", description="兼容字段；与 decision.one_sentence_reason 一致")
-    overall_score: Optional[float] = Field(
-        None,
-        ge=0,
-        le=10,
-        description="6 维加权聚合；当关键维证据不足时可为 null",
+    decision_reason: str = Field(
+        "",
+        description=(
+            "兼容字段（C-3c 起从 v4 verdict.reason 派生）；保留以最小化前端 BC 改动。"
+            "未来 PR 可删除。"
+        ),
     )
-    summary: str = Field("", description="冗余字段：与 decision.summary 一致")
-    scorecard: List[ReportScorecardItem]
+    summary: str = Field("", description="冗余字段：与 decision_reason 一致")
     compliance: Optional[ReportCompliance] = Field(
         None,
         description=(
-            "合规审核（docs/08-evaluation-framework.md §4），与 scorecard 平级独立。"
-            "前端在右栏单独的「合规审核」面板展示；不参与 overall_score。"
+            "合规审核（docs/08-evaluation-framework.md §4），独立 gate。"
+            "前端在右栏单独的「合规审核」面板展示；high_risk 一票否决 v4 verdict。"
         ),
     )
     drama_tags: List[ReportDramaTag] = Field(default_factory=list)
@@ -692,13 +653,10 @@ class ReportPayload(BaseModel):
     beat_sheet: Optional[BeatSheet] = None
     character_graph: Optional[CharacterGraph] = None
     pacing_curve: Optional[PacingCurve] = None
-    evaluation: Optional[EvaluationPayload] = None
     risk_flags: List[str] = Field(default_factory=list)
     # ============================================================
-    # v4 投资决策评分新字段（scoring/ 模块，docs/2026-05-31-投资决策评分框架-v4.md）
-    # Wave C-1 增量添加；与 v3 6 维 scorecard / decision 字段**并存**。
-    # Wave D 前端切换到 v4 字段渲染；Wave C-3 删除旧 scorecard / decision。
-    # 全部 Optional / default_factory，旧客户端不受影响。
+    # v4 投资决策评分（主链路 · scoring/ 模块）
+    # 详见 docs/2026-05-31-投资决策评分框架-v4.md
     # ============================================================
     verdict: Optional[Dict[str, Any]] = Field(
         default=None,
@@ -944,15 +902,7 @@ class ViewResponse(BaseModel):
     """
 
     script_id: str
-    decision: ReportDecision
-    overall_score: Optional[float] = Field(
-        None,
-        ge=0,
-        le=10,
-        description="6 维加权聚合；当关键维证据不足时可为 null",
-    )
     summary: str
-    scorecard: List[ReportScorecardItem]
     compliance: Optional[ReportCompliance] = None
     drama_tags: List[ReportDramaTag] = Field(default_factory=list)
     plot_units: List[ReportPlotUnit] = Field(default_factory=list)
@@ -976,7 +926,6 @@ class ViewResponse(BaseModel):
     beat_sheet: Optional[BeatSheet] = None
     character_graph: Optional[CharacterGraph] = None
     pacing_curve: Optional[PacingCurve] = None
-    evaluation: Optional[EvaluationPayload] = None
     rewrite_seeds: List[RewriteSeed] = Field(
         default_factory=list,
         description=(

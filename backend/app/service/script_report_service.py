@@ -1,15 +1,17 @@
-"""Script scoring report pipeline — Wave C-3a (v4 投资决策评分主链路).
+"""Script scoring report pipeline — Wave C-3c (v4 投资决策评分主链路).
 
 报告生成流程（self-contained，零 tag_pipeline 依赖）：
   1. 叙事层 5 chain（reward / coverage / beat / character_graph / motivation）
   2. 合规扫描（compliance_scorer.screen_compliance，独立 gate）
   3. v4 投资决策评分（service.scoring.score_script —
      hook / archetype / payoff / monetization / producibility 五维 + compliance 一票否决）
-  4. 报告 payload 组装（v3 兼容字段 decision/overall_score 从 v4 verdict 派生）
+  4. 报告 payload 组装（v4 verdict / investment_score / evaluation_v4 / top_improvements）
   5. 落库 reports + scoring_runs
 
-v3 6 维规则评分（service/script_tools/dimension_scorer.py）已于 Wave C-3a 删除，
-service.scoring/ 模块成为唯一评分入口。详见 docs/2026-05-31-投资决策评分框架-v4.md。
+v3 6 维规则评分（service/script_tools/dimension_scorer.py）已于 Wave C-3a 删除；
+v3 schema 字段（decision / overall_score / scorecard / evaluation）已于 Wave C-3c
+从 ReportPayload 移除。service.scoring/ 模块是唯一评分入口。
+详见 docs/2026-05-31-投资决策评分框架-v4.md。
 
 历史 cleanup 残留（这些模块已废弃但 grep 仍可见）：
 - score_registry / tag_pipeline / decision_aggregator / dimension_aggregator /
@@ -1202,10 +1204,9 @@ async def generate_report(
             detail=f"速览{'已生成' if coverage_card else '降级'}",
         )
 
-        # Wave C-3a (2026-05-31)：v3 6 维评分（_score_one + dimension_scorer）已删除；
-        # v4 投资决策评分成为主链路，失败回退到 chain_status['scoring_v4']。
-        # v3 字段 ReportPayload.{scorecard, decision, overall_score} 暂时由 v4 verdict
-        # 兼容映射填充，C-3b 才正式删字段。
+        # Wave C-3c (2026-05-31)：v4 投资决策评分是唯一主评分链路；v3 6 维 schema
+        # 字段（decision / overall_score / scorecard / evaluation）已全部从 ReportPayload
+        # 移除。v4 失败回退到 chain_status['scoring_v4']，verdict=None，前端展示「未评分」。
         progress_tracker.update_stage(
             script_id,
             "scoring_v4",
@@ -1307,49 +1308,29 @@ async def generate_report(
 
 
 # ============================================================
-# v4 → v3 decision/overall_score 兼容映射（Wave C-3a 中间态）
+# v4 verdict / 合规 → 报告级一句话摘要（C-3c：v3 verdict / overall_score / scorecard
+# 字段已从 schema 移除，仅保留 decision_reason / summary 兼容字段）
 # ============================================================
-# v3 字段 ReportPayload.{decision, overall_score, scorecard} 还保留在 schema 里，
-# 前端 overview tab + 老版 evaluation tab 仍在消费。Wave C-3c 前端切到 verdict /
-# investment_score 后，Wave C-3b 才正式从 schema 移除这三个字段。
-#
-# 这段映射的存在期 = Wave C-3a → C-3c 之间，**不要扩展**它，不要为它加新逻辑。
-
-_V4_VERDICT_TO_V3_DECISION_LABEL: dict[str, str] = {
-    "qualified": "recommend_continue",
-    "needs_polish": "cautious_continue",
-    "not_recommended": "not_recommended",
-}
 
 
-def _derive_v3_decision_from_v4_verdict(
+def _derive_decision_reason(
     v4_verdict: Optional[dict[str, Any]],
     compliance_payload: dict[str, Any],
-) -> tuple[str, str, str]:
-    """v4 verdict → v3 (label, confidence, one_sentence_reason)。
+) -> str:
+    """v4 verdict / 合规结果 → 报告级一句话摘要（前端列表卡片 / summary 兼容字段）。
 
-    合规一票否决优先：compliance.tier == 'high_risk' → not_recommended。
-    v4 评分缺失（v4 失败 / 老报告无 verdict） → cautious_continue + 提示。
+    优先级：
+      1. compliance.tier == 'high_risk' → 合规一票否决文案
+      2. v4 verdict.reason → 直接使用
+      3. fallback：评分未完成提示
     """
     if str(compliance_payload.get("tier") or "").strip() == "high_risk":
-        return (
-            "not_recommended",
-            "high",
-            "合规扫描发现高风险红线命中，建议先做内容整改。",
-        )
-    if not v4_verdict:
-        return (
-            "cautious_continue",
-            "low",
-            "v4 投资决策评分未完成，建议人工复核后再定。",
-        )
-    raw_label = str(v4_verdict.get("label") or "not_recommended").strip()
-    label = _V4_VERDICT_TO_V3_DECISION_LABEL.get(raw_label, "not_recommended")
-    reason = str(v4_verdict.get("reason") or "").strip() or "v4 投资决策评分已生成。"
-    confidence = str(v4_verdict.get("confidence") or "medium").strip()
-    if confidence not in ("high", "medium", "low"):
-        confidence = "medium"
-    return (label, confidence, reason)
+        return "合规扫描发现高风险红线命中，建议先做内容整改。"
+    if v4_verdict:
+        reason = str(v4_verdict.get("reason") or "").strip()
+        if reason:
+            return reason
+    return "v4 投资决策评分未完成，建议人工复核后再定。"
 
 
 async def _run_scoring_v4(
@@ -1434,15 +1415,12 @@ def _build_report_payload(
     chain_status: Optional[_ChainStatusCollector] = None,
     v4_report: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Wave C-3a 报告 payload 组装。
+    """Wave C-3c 报告 payload 组装。
 
     主链路：v4 投资决策评分（verdict / investment_score / evaluation_v4 / top_improvements）。
 
-    v3 兼容字段（中间态，C-3b 才删 schema 字段）：
-      - decision         : 从 v4 verdict 派生（_derive_v3_decision_from_v4_verdict）
-      - overall_score    : = investment_score
-      - scorecard        : 空列表（前端 evaluation tab Wave D 已切到 v4 渲染）
-      - evaluation.dimensions: 空列表
+    C-3c 起 v3 6 维字段（decision / overall_score / scorecard / evaluation）全部移除，
+    仅保留 `decision_reason` / `summary` 作为前端列表卡片的一句话摘要（从 v4 verdict 派生）。
 
     其它字段不变：
       - compliance / risk_flags             : 独立合规扫描
@@ -1464,34 +1442,18 @@ def _build_report_payload(
         reward_events, beat_sheet, evidence_refs_payload, scenes_by_id=scenes_by_id
     )
 
-    v4_verdict = (v4_report or {}).get("verdict")
-    v4_overall_score = (v4_verdict or {}).get("overall_score") if v4_verdict else None
-    decision_label, decision_confidence, decision_reason = _derive_v3_decision_from_v4_verdict(
-        v4_verdict, compliance_payload
-    )
+    v4_verdict = (v4_report or {}).get("verdict") or {}
+    v4_overall_score = v4_verdict.get("overall_score") if v4_verdict else None
+    decision_reason = _derive_decision_reason(v4_verdict, compliance_payload)
 
     return {
         "script_id": meta.script_id,
         "title": meta.title,
-        # v3 兼容（C-3b 删字段）：decision / overall_score / scorecard / evaluation
-        "decision": {
-            "label": decision_label,
-            "confidence": decision_confidence,
-            "one_sentence_reason": decision_reason,
-            "summary": decision_reason,
-            "decision_inputs": {
-                "raw_decision": decision_label,
-                "score_ver": _SCORE_VER,
-                "v4_verdict_label": (v4_verdict or {}).get("label") if v4_verdict else None,
-            },
-        },
+        # 一句话摘要（兼容字段，前端列表卡片用）。v4 verdict.reason 派生。
         "decision_reason": decision_reason,
-        "overall_score": v4_overall_score,
         "summary": decision_reason,
-        "scorecard": [],
-        "evaluation": {"dimensions": [], "rewrite_seeds": []},
-        # 主链路 v4 字段（Wave D 前端从这里渲染 verdict / 5 维 / improvements）
-        "verdict": v4_verdict,
+        # 主链路 v4 字段
+        "verdict": v4_verdict or None,
         "investment_score": v4_overall_score,
         "evaluation_v4": v4_report,
         "top_improvements": (v4_report or {}).get("top_improvements") or [],
@@ -1554,13 +1516,11 @@ def _persist_report(
     report_payload: dict[str, Any],
     engine: Engine,
 ) -> None:
-    """Wave C-3a 持久化：reports + scoring_runs（**不再写 script_scores 6 维行**）。
+    """Wave C-3c 持久化：reports + scoring_runs（v4 主链路）。
 
-    script_scores 表 release/v1-mvp 已不被前端 / agent 消费，Wave C-3b 会随
-    alembic 一起清理；Wave C-3a 先停止写入避免持续累积 v3 残留数据。
-
-    scoring_runs.{verdict, investment_score} 由 Wave C-1 引入；C-3a 起 score_ver
-    切到 v4-cn 版本号（_SCORE_VER），quality_flags 中 v3 残留字段清理。
+    - scoring_runs.{verdict, investment_score} 由 Wave C-1 引入；C-3c 起为主信号源。
+    - reports.decision_payload 列内容口径切换为 v4 verdict 完整 dict。
+    - script_scores 6 维表已停止写入（alembic/11 会随 schema 一起 drop）。
     """
     now = datetime.utcnow()
     report_id = str(uuid.uuid4())
@@ -1641,9 +1601,14 @@ def _persist_report(
         # Wave C-3a：script_scores 6 维行已停止写入（v4 5 维存在 reports.evaluation_v4 + scoring_runs）。
         # Wave C-3b 会删表，此处不再 INSERT 残留 6 维记录。
 
-        decision_payload = (
-            report_payload.get("decision", {}).get("decision_inputs") or {}
-        )
+        # Wave C-3c：v3 ReportDecision 字段已删除，decision_payload 列改为存
+        # v4 verdict 完整结构（label / overall_score / confidence / dimension_breakdown 等）。
+        # alembic/11 不改列定义，仅做内容口径切换。
+        decision_payload: dict[str, Any] = dict(v4_verdict) if v4_verdict else {
+            "label": None,
+            "score_ver": _SCORE_VER,
+            "note": "v4 投资决策评分未生成（v4 失败或被跳过）",
+        }
         conn.execute(
             text("DELETE FROM scriptlens.reports WHERE script_id = :sid"),
             {"sid": script_id},

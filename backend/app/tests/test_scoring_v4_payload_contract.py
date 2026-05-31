@@ -1,15 +1,18 @@
-"""Wave C-1：v4 评分字段在 ReportPayload 中的契约测试。
+"""Wave C-1 / C-3c：v4 评分字段在 ReportPayload 中的契约测试。
 
 目标：守住 scoring.ScoringReport.to_dict() 产出的 dict 可以无损塞入
 ReportPayload 的 verdict / investment_score / evaluation_v4 / top_improvements
-4 个新字段，给 Wave D 前端一个稳定依赖。
+4 个新字段，给前端一个稳定依赖。
+
+C-3c 更新：v3 字段（decision / overall_score / scorecard / evaluation）已从
+ReportPayload 移除，本测试只构造 v4 + 最小必填字段。
 
 不依赖 DB / LLM，纯走 Pydantic 模型验证 + scoring 类型 to_dict。
 """
 
 from __future__ import annotations
 
-from schemas.script import ReportCompliance, ReportDecision, ReportPayload, ReportScorecardItem
+from schemas.script import ReportCompliance, ReportPayload
 from service.scoring.framework import (
     ConfidenceLabel,
     DimensionScore,
@@ -22,30 +25,6 @@ from service.scoring.framework import (
     TierLabel,
     VerdictLabel,
 )
-
-
-def _make_minimal_decision() -> ReportDecision:
-    """v3 字段最小占位，让 ReportPayload 能构造成功。"""
-    return ReportDecision(
-        label="recommend_continue",
-        confidence="medium",
-        one_sentence_reason="占位",
-        summary="",
-        decision_inputs={},
-    )
-
-
-def _make_minimal_scorecard() -> list[ReportScorecardItem]:
-    return [
-        ReportScorecardItem(
-            dimension="story",
-            score=7.0,
-            tier="good",
-            confidence="medium",
-            coverage_ratio=1.0,
-            reason="占位",
-        )
-    ]
 
 
 def _make_minimal_compliance() -> ReportCompliance:
@@ -117,11 +96,8 @@ def test_scoring_report_to_dict_matches_report_payload_v4_fields() -> None:
     payload = ReportPayload(
         script_id="test-script",
         title="占位",
-        decision=_make_minimal_decision(),
-        decision_reason="",
-        overall_score=7.0,
-        summary="",
-        scorecard=_make_minimal_scorecard(),
+        decision_reason="qualified 占位",
+        summary="qualified 占位",
         compliance=_make_minimal_compliance(),
         verdict=v4["verdict"],
         investment_score=v4["verdict"]["overall_score"],
@@ -154,13 +130,9 @@ def test_report_payload_accepts_null_v4_fields_for_legacy_compatibility() -> Non
     payload = ReportPayload(
         script_id="legacy-script",
         title="占位",
-        decision=_make_minimal_decision(),
         decision_reason="",
-        overall_score=7.0,
         summary="",
-        scorecard=_make_minimal_scorecard(),
         compliance=_make_minimal_compliance(),
-        # 不传 verdict / investment_score / evaluation_v4 / top_improvements
     )
     assert payload.verdict is None
     assert payload.investment_score is None
@@ -178,11 +150,28 @@ def test_investment_score_rejects_out_of_range() -> None:
             ReportPayload(
                 script_id="s",
                 title="t",
-                decision=_make_minimal_decision(),
                 decision_reason="",
-                overall_score=7.0,
                 summary="",
-                scorecard=_make_minimal_scorecard(),
                 compliance=_make_minimal_compliance(),
                 investment_score=bad,
             )
+
+
+def test_report_payload_rejects_v3_legacy_fields() -> None:
+    """Wave C-3c：v3 字段（decision / overall_score / scorecard / evaluation）已删除。
+
+    构造时传这些字段应该被 Pydantic 拒绝（默认 model_config 不允许 extra='ignore'
+    会静默丢弃；这里通过 model_dump 验证字段确实不存在）。
+    """
+    payload = ReportPayload(
+        script_id="s",
+        title="t",
+        decision_reason="",
+        summary="",
+        compliance=_make_minimal_compliance(),
+    )
+    dumped = payload.model_dump()
+    for legacy_field in ("decision", "overall_score", "scorecard", "evaluation"):
+        assert legacy_field not in dumped, (
+            f"Wave C-3c 已删除字段 {legacy_field}，仍出现在 ReportPayload.model_dump() 中"
+        )

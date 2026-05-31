@@ -77,7 +77,7 @@ _REPORT_PIPELINE_STAGES: List[tuple[str, str, str]] = [
     (
         "persisting",
         "写入数据库",
-        "事务写入 scoring_runs / script_scores / reports.decision_payload",
+        "事务写入 scoring_runs / reports（含 v4 verdict / decision_payload）",
     ),
 ]
 

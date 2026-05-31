@@ -2,10 +2,8 @@
 
 GET /api/scripts/{id}/view 的核心逻辑：
 
-  1. 透传 reports.report_json（scorecard 顺序固定，不按角色重排）
-  2. 派生 `rewrite_seeds`：从 score<7 维度的第一条 evidence 生成
-     「最值得改的 N 场」候选（详见 docs/03-system-mental-model.md §6）
-     注：合规违规不进改写候选——合规问题需人工二次审核，不交给 LLM 改写
+  1. 透传 reports.report_json（v4 投资决策评分 verdict / 5 维 + 合规 gate）
+  2. 派生 `rewrite_seeds`（C-3c 起暂为 []，后续从 v4 top_improvements 派生）
   3. 派生 `task_status`：从 script_operations 表派生每个 (scene_id, dimension)
      上的改写任务状态（详见 docs/03-system-mental-model.md §8）
 
@@ -19,11 +17,10 @@ ViewResponse 不返回 card 结构、不带 role 参数（详见 docs/09-action-
 from __future__ import annotations
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 from schemas.script import (
     ReportPayload,
-    ReportScorecardItem,
     RewriteSeed,
     RewriteTaskStatus,
     ViewResponse,
@@ -59,10 +56,7 @@ def build_view(
 
     return ViewResponse(
         script_id=script_id,
-        decision=report.decision,
-        overall_score=report.overall_score,
-        summary=report.summary or report.decision.summary,
-        scorecard=list(report.scorecard),
+        summary=report.summary or report.decision_reason,
         compliance=report.compliance,
         drama_tags=list(report.drama_tags or []),
         plot_units=list(report.plot_units or []),
@@ -77,13 +71,11 @@ def build_view(
         beat_sheet=report.beat_sheet,
         character_graph=report.character_graph,
         pacing_curve=report.pacing_curve,
-        evaluation=report.evaluation,
         rewrite_seeds=rewrite_seeds,
         task_status=task_status,
         # W1.3 (2026-05-31)：透传报告级 provenance 元数据给前端。
         meta=report.meta,
-        # Wave C-1 / D (2026-05-31)：v4 投资决策评分字段透传给前端。
-        # report 缺这些字段（老报告 / v4 评分失败）时 None / []，前端走 v3 兼容分支。
+        # Wave C-1 / D (2026-05-31) / C-3c：v4 投资决策评分主链路字段透传给前端。
         verdict=report.verdict,
         investment_score=report.investment_score,
         evaluation_v4=report.evaluation_v4,
@@ -92,101 +84,16 @@ def build_view(
 
 
 def _derive_rewrite_seeds(report: ReportPayload, *, max_seeds: int = 3) -> List[RewriteSeed]:
-    """优先使用 Batch 3 improvement_actions 生成 rewrite seeds，兼容旧链路回退。"""
-    evaluation = report.evaluation
-    if evaluation and evaluation.rewrite_seeds:
-        seeds: List[RewriteSeed] = []
-        for raw in evaluation.rewrite_seeds[:max_seeds]:
-            if not isinstance(raw, dict):
-                continue
-            evidence_refs = raw.get("evidence_refs") if isinstance(raw.get("evidence_refs"), list) else []
-            scene_id = str(raw.get("scene_id") or "").strip()
-            scene_label = str(raw.get("scene_label") or "").strip() or None
-            if not scene_id and evidence_refs:
-                first = evidence_refs[0] if isinstance(evidence_refs[0], dict) else {}
-                scene_id = str(first.get("scene_id") or "").strip()
-                scene_label = scene_label or str(first.get("scene_label") or "").strip() or None
-            if not scene_id:
-                continue
-            seeds.append(
-                RewriteSeed(
-                    id=str(raw.get("id") or "").strip() or None,
-                    dimension=str(raw.get("dimension") or ""),
-                    signal_key=str(raw.get("signal_key") or ""),
-                    scene_id=scene_id,
-                    scene_label=scene_label,
-                    issue=str(raw.get("issue") or "").strip() or "改写优化项",
-                    target=str(raw.get("target") or "").strip(),
-                    action_steps=[str(item) for item in raw.get("action_steps") or [] if str(item).strip()],
-                    evidence_refs=[item for item in evidence_refs if isinstance(item, dict)],
-                    estimated_lift=raw.get("estimated_lift") if isinstance(raw.get("estimated_lift"), dict) else {},
-                    evidence_ref_id=str(raw.get("evidence_ref_id") or "").strip() or None,
-                )
-            )
-        if seeds:
-            return seeds
+    """Wave C-3c：rewrite_seeds 不再从 v3 scorecard / evaluation 派生。
 
-    if not report.scorecard:
-        return []
-    candidates: List[Tuple[float, ReportScorecardItem]] = []
-    for sc in report.scorecard:
-        if sc.score is None or sc.score >= 7:
-            continue
-        if not sc.signal_refs:
-            continue
-        candidates.append((float(sc.score), sc))
-    candidates.sort(key=lambda t: t[0])
+    历史实现基于 v3 `scorecard.signal_refs.evidence_refs[].scene_id` 提取低分维度
+    的代表场景，作为"最值得改的 N 场"卡片。Wave C-3c 删除 v3 字段后，等效信息
+    应改走 v4 `report.top_improvements`（按 dim × signal × score_gap 排序）。
 
-    seeds: List[RewriteSeed] = []
-    used_scenes: set[str] = set()
-    for _, sc in candidates:
-        if len(seeds) >= max_seeds:
-            break
-        first_scene_id = ""
-        for signal_ref in sc.signal_refs:
-            if not isinstance(signal_ref, dict):
-                continue
-            evidence_refs = signal_ref.get("evidence_refs")
-            if not isinstance(evidence_refs, list):
-                continue
-            for evidence in evidence_refs:
-                if not isinstance(evidence, dict):
-                    continue
-                candidate_scene = str(evidence.get("scene_id") or "").strip()
-                if candidate_scene:
-                    first_scene_id = candidate_scene
-                    break
-            if first_scene_id:
-                break
-        if not first_scene_id or first_scene_id in used_scenes:
-            continue
-        used_scenes.add(first_scene_id)
-        seeds.append(
-            RewriteSeed(
-                dimension=sc.dimension,
-                scene_id=first_scene_id,
-                scene_label=first_scene_id,
-                issue=_first_sentence(sc.reason),
-                evidence_ref_id=None,
-            )
-        )
-    return seeds
+    暂时返回 []：前端 ScriptViewResponseDTO.rewrite_seeds 仍保留字段，但内容
+    自然为空。后续独立 PR 把 top_improvements 派生成场景级 rewrite seeds 后再填。
 
-
-def _first_sentence(text_: str, *, max_len: int = 80) -> str:
-    """从一段 reason 里抽第一句作为 issue 一句话点题。
-
-    规则：先按 `\\n` / `。` / `；` 切，取第一段；再按 max_len 截断。
-    短剧 reason 通常已经是一句话，这一层主要为兜底。
+    max_seeds 保留参数以最小化调用方 BC 改动；后续 PR 一并清理。
     """
-    if not text_:
-        return ""
-    chunk = text_.strip()
-    for sep in ("\n", "。", "；", "！", "?"):
-        if sep in chunk:
-            chunk = chunk.split(sep, 1)[0]
-            break
-    chunk = chunk.strip()
-    if len(chunk) > max_len:
-        chunk = chunk[: max_len - 1] + "…"
-    return chunk
+    _ = (report, max_seeds)
+    return []
