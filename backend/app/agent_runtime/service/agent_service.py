@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 # 导入配置
 from ..core.config import settings
+from ..runtime_config import LoopLimits, RuntimeProfile, get_runtime_profile
 from .error_handler import async_error_guard
 from .intent_classifier import IntentType, IntentClassificationResult, classify_intent
 from .plan_builder import TaskPlan, build_plan
@@ -154,6 +155,52 @@ class LaTeXEditAgent(BaseAgent):
             "rewrite_line_range_tool": 4,
             "reply_to_user_tool": 1,
         }
+        # ReAct 主循环 guardrail 阈值：默认值与历史硬编码一致（保留 doc_studio 行为）；
+        # ScriptChatAgent 在 execute 入口处会按 intent 从 agent_runtime.yaml 覆盖。
+        self._loop_limits: LoopLimits = LoopLimits(
+            recovery_actions_max=2,
+            consecutive_tool_failures_threshold=2,
+            same_tool_convergence_count=4,
+            llm_retry_attempts=3,
+            llm_retry_backoff_base_seconds=0.35,
+            llm_retry_backoff_factor=2.0,
+            guardrail_reply_max_tokens=520,
+        )
+        # 工具白名单：None = 不限制（全部已注册工具进 prompt）；非 None 时 ReAct
+        # 主循环只把该子集喂给 LLM。父类默认不限；子类按 intent 覆盖。
+        self._tool_whitelist: Optional[Tuple[str, ...]] = None
+
+    def apply_runtime_profile(self, profile: RuntimeProfile) -> None:
+        """用 intent-aware RuntimeProfile 覆盖 tool_call_limits / loop_limits / tool_whitelist。
+
+        默认子类不必调用本方法；ScriptChatAgent 在 ``execute`` 中 intent 分类
+        完成后调用。本方法**只在单次 execute 上下文内**调用，因为每条 chat
+        请求都新建一个 agent 实例（见 ``build_chat_agent``），无并发竞争。
+        """
+        # tool_budgets: 合并到现有 tool_call_limits（保留父类未声明的工具默认值）
+        merged_limits = dict(self.tool_call_limits)
+        merged_limits.update(profile.tool_budgets)
+        self.tool_call_limits = merged_limits
+        self._loop_limits = profile.loop_limits
+        self._tool_whitelist = profile.tool_whitelist
+        logger.info(
+            "agent_runtime profile applied: intent=%s tool_budgets=%d loop_limits=%s whitelist=%s",
+            profile.intent,
+            len(profile.tool_budgets),
+            profile.loop_limits,
+            "all" if profile.tool_whitelist is None else f"{len(profile.tool_whitelist)} tools",
+        )
+
+    def _resolve_runtime_profile_for_intent(
+        self, intent_type: Optional[IntentType]
+    ) -> Optional[RuntimeProfile]:
+        """钩子：子类返回 intent-aware profile 时父类自动 apply。默认 None。
+
+        把"是否走 yaml 配置"的决策权下放给子类——LaTeXEditAgent 自己（doc_studio）
+        不需要 yaml，保持当前硬编码默认；ScriptChatAgent 覆盖本方法回返
+        ``get_runtime_profile(intent_type.value)``。
+        """
+        return None
 
     @staticmethod
     def _build_operation_id() -> str:
@@ -391,7 +438,7 @@ class LaTeXEditAgent(BaseAgent):
         """
         Build a deterministic recovery action after repeated failures.
         """
-        if state.recovery_actions_used >= 2:
+        if state.recovery_actions_used >= self._loop_limits.recovery_actions_max:
             return None
         failed_tool = str(failed_tool or "").strip()
         failed_error = str(failed_error or "").strip()
@@ -1034,6 +1081,14 @@ class LaTeXEditAgent(BaseAgent):
         state.intent_type = intent_type
         state.intent_confidence = intent_result.confidence
         record_intent_metric(intent_type.value, intent_result.confidence)
+
+        # intent-aware runtime profile：子类（ScriptChatAgent）按 intent 从 yaml
+        # 加载 tool_budgets / loop_limits / tool_whitelist 并覆盖父类默认；父类
+        # （doc_studio LaTeXEditAgent）_resolve_runtime_profile_for_intent 默认返回
+        # None，保持当前硬编码不变。
+        runtime_profile = self._resolve_runtime_profile_for_intent(intent_type)
+        if runtime_profile is not None:
+            self.apply_runtime_profile(runtime_profile)
         # 置信度警告仅在 Agent 模式且意图涉及文件编辑时展示，Ask 模式下不打扰用户
         # （商业逻辑：Ask 模式不编辑文件，该警告无意义且易造成困惑）
 
@@ -1475,33 +1530,46 @@ class LaTeXEditAgent(BaseAgent):
             if should_cancel and should_cancel():
                 raise AgentCancelledError("cancelled_by_user")
             
-            # 检测重复工具调用（如果连续 3 次调用同一工具，强制引导）
+            # 检测同工具收敛：连续 same_tool_convergence_count 次调同一工具，强制走 reply_to_user_tool
             if action.type == AgentStepType.ACTION and action.tool_name:
+                same_tool_n = self._loop_limits.same_tool_convergence_count
                 recent_tool_calls.append(action.tool_name)
-                if len(recent_tool_calls) > 3:
-                    recent_tool_calls.pop(0)  # 保持窗口大小为 3
-                    
-                    # 如果最近 3 次都是同一工具
-                    if len(set(recent_tool_calls)) == 1 and action.tool_name != "reply_to_user_tool":
-                        reason = f"检测到工具 {action.tool_name} 连续重复调用，已触发收敛保护"
-                        logger.warning("Detected repeated tool calls: %s x 3", action.tool_name)
-                        state.warnings.append(reason)
-                        forced_reply = await self._compose_guardrail_reply(
-                            state=state,
-                            user_intent=user_intent,
-                            reason=reason,
-                        )
-                        # 强制引导 LLM 调用 reply_to_user_tool
-                        action = AgentStep(
-                            type=AgentStepType.ACTION,
-                            content=f"Guardrail: {reason}",
-                            tool_name="reply_to_user_tool",
-                            parameters={
-                                "reply": forced_reply,
-                                "summary": reason
-                            },
-                            timestamp=time.time()
-                        )
+                if len(recent_tool_calls) > same_tool_n:
+                    recent_tool_calls.pop(0)
+                # 仅当窗口被填满且全是同一工具时触发；reply_to_user_tool 自身不参与收敛
+                if (
+                    len(recent_tool_calls) >= same_tool_n
+                    and len(set(recent_tool_calls)) == 1
+                    and action.tool_name != "reply_to_user_tool"
+                ):
+                    reason = (
+                        f"检测到工具 {action.tool_name} 连续 {same_tool_n} 次同名调用，已触发收敛保护"
+                    )
+                    logger.warning(
+                        "agent_guardrail kind=same_tool_convergence "
+                        "trace_id=%s intent=%s tool=%s count=%d limit=%d",
+                        getattr(state, "trace_id", None) or get_trace_id(),
+                        state.intent_type.value if state.intent_type else "unknown",
+                        action.tool_name,
+                        same_tool_n,
+                        same_tool_n,
+                    )
+                    state.warnings.append(reason)
+                    forced_reply = await self._compose_guardrail_reply(
+                        state=state,
+                        user_intent=user_intent,
+                        reason=reason,
+                    )
+                    action = AgentStep(
+                        type=AgentStepType.ACTION,
+                        content=f"Guardrail: {reason}",
+                        tool_name="reply_to_user_tool",
+                        parameters={
+                            "reply": forced_reply,
+                            "summary": reason,
+                        },
+                        timestamp=time.time(),
+                    )
             
             # 3. 检查是否完成
             if action.type == AgentStepType.FINISH:
@@ -1551,6 +1619,15 @@ class LaTeXEditAgent(BaseAgent):
             if tool_limit is not None and current_tool_calls >= tool_limit and action.tool_name != "reply_to_user_tool":
                 reason = f"工具 {action.tool_name} 达到调用上限({tool_limit})，已触发预算保护"
                 state.warnings.append(reason)
+                logger.warning(
+                    "agent_guardrail kind=tool_budget_exceeded trace_id=%s intent=%s "
+                    "tool=%s count=%d limit=%d",
+                    getattr(state, "trace_id", None) or get_trace_id(),
+                    state.intent_type.value if state.intent_type else "unknown",
+                    action.tool_name,
+                    current_tool_calls,
+                    tool_limit,
+                )
                 forced_reply = await self._compose_guardrail_reply(
                     state=state,
                     user_intent=user_intent,
@@ -1647,7 +1724,7 @@ class LaTeXEditAgent(BaseAgent):
                         "plan": self._build_plan_info(state),
                     },
                 )
-                if state.consecutive_tool_failures >= 2:
+                if state.consecutive_tool_failures >= self._loop_limits.consecutive_tool_failures_threshold:
                     recovery_action = self._build_recovery_action(
                         state=state,
                         user_intent=user_intent,
@@ -1664,6 +1741,20 @@ class LaTeXEditAgent(BaseAgent):
                         )
                         state.warnings.append(recovery_note)
                         self._push_tool_insight(state, recovery_note)
+                        # A6: 结构化日志，trace_id + intent + 上下文一键检索
+                        logger.warning(
+                            "agent_guardrail kind=consecutive_failures_recovery "
+                            "trace_id=%s intent=%s failing_tool=%s replacement_tool=%s "
+                            "consecutive_failures=%d threshold=%d recovery_actions_used=%d/%d",
+                            getattr(state, "trace_id", None) or get_trace_id(),
+                            state.intent_type.value if state.intent_type else "unknown",
+                            action.tool_name,
+                            recovery_action.tool_name,
+                            state.consecutive_tool_failures,
+                            self._loop_limits.consecutive_tool_failures_threshold,
+                            state.recovery_actions_used,
+                            self._loop_limits.recovery_actions_max,
+                        )
                         await self._emit_progress(
                             progress_callback,
                             "status",
@@ -1941,7 +2032,7 @@ class LaTeXEditAgent(BaseAgent):
 
             if (
                 not tool_result.success
-                and state.consecutive_tool_failures >= 2
+                and state.consecutive_tool_failures >= self._loop_limits.consecutive_tool_failures_threshold
             ):
                 recovery_action = self._build_recovery_action(
                     state=state,
@@ -1959,6 +2050,19 @@ class LaTeXEditAgent(BaseAgent):
                     )
                     state.warnings.append(recovery_note)
                     self._push_tool_insight(state, recovery_note)
+                    logger.warning(
+                        "agent_guardrail kind=consecutive_failures_recovery "
+                        "trace_id=%s intent=%s failing_tool=%s replacement_tool=%s "
+                        "consecutive_failures=%d threshold=%d recovery_actions_used=%d/%d",
+                        getattr(state, "trace_id", None) or get_trace_id(),
+                        state.intent_type.value if state.intent_type else "unknown",
+                        action.tool_name,
+                        recovery_action.tool_name,
+                        state.consecutive_tool_failures,
+                        self._loop_limits.consecutive_tool_failures_threshold,
+                        state.recovery_actions_used,
+                        self._loop_limits.recovery_actions_max,
+                    )
                     await self._emit_progress(
                         progress_callback,
                         "status",
@@ -2163,7 +2267,10 @@ class LaTeXEditAgent(BaseAgent):
             current_max_tokens = int(raw_max_tokens) if raw_max_tokens is not None else int(settings.LLM_MAX_TOKENS)
         except Exception:
             current_max_tokens = int(settings.LLM_MAX_TOKENS)
-        llm_options["llm_max_tokens"] = min(max(current_max_tokens, 256), 520)
+        # 收尾摘要要短促精炼,上限由 yaml 控制
+        llm_options["llm_max_tokens"] = min(
+            max(current_max_tokens, 256), self._loop_limits.guardrail_reply_max_tokens
+        )
         try:
             llm_result = await self.llm.generate(
                 prompt=prompt,
@@ -2460,9 +2567,28 @@ class LaTeXEditAgent(BaseAgent):
         Returns:
             AgentStep 包含下一步行动（工具调用或完成）
         """
-        # 获取可用工具列表（用于 LLM Tool Calling）
+        # 获取可用工具列表（用于 LLM Tool Calling），按 intent whitelist 过滤
         available_tools = self.tools.get_tools_for_llm()
-        
+        if self._tool_whitelist is not None:
+            allowed = set(self._tool_whitelist)
+            # ReAct 强制收尾工具必须可见,否则 agent 永远无法回话
+            allowed.add("reply_to_user_tool")
+            filtered = [
+                tool for tool in available_tools
+                if str(tool.get("function", {}).get("name") or tool.get("name") or "") in allowed
+            ]
+            if filtered:
+                available_tools = filtered
+            else:
+                logger.warning(
+                    "agent_guardrail kind=tool_whitelist_empty_match trace_id=%s intent=%s "
+                    "whitelist=%s registered=%s",
+                    getattr(state, "trace_id", None) or get_trace_id(),
+                    state.intent_type.value if state.intent_type else "unknown",
+                    sorted(allowed),
+                    [str(t.get("function", {}).get("name") or t.get("name") or "") for t in available_tools],
+                )
+
         # 构建执行历史（用于 LLM 上下文）
         history = [
             {
@@ -2476,7 +2602,10 @@ class LaTeXEditAgent(BaseAgent):
         
         llm_response: Optional[Dict[str, Any]] = None
         last_error: Optional[Exception] = None
-        for attempt in range(3):
+        retry_attempts = self._loop_limits.llm_retry_attempts
+        backoff_base = self._loop_limits.llm_retry_backoff_base_seconds
+        backoff_factor = self._loop_limits.llm_retry_backoff_factor
+        for attempt in range(retry_attempts):
             try:
                 llm_response = await self.llm.reason_and_act(
                     observation=observation,
@@ -2490,12 +2619,24 @@ class LaTeXEditAgent(BaseAgent):
                 raise
             except Exception as exc:
                 last_error = exc
-                if attempt >= 2:
+                if attempt >= retry_attempts - 1:
+                    logger.warning(
+                        "agent_guardrail kind=llm_retry_exhausted "
+                        "trace_id=%s intent=%s attempts=%d error=%s",
+                        getattr(state, "trace_id", None) or get_trace_id(),
+                        state.intent_type.value if state.intent_type else "unknown",
+                        retry_attempts,
+                        exc,
+                    )
                     raise
-                delay = 0.35 * (2 ** attempt)
+                delay = backoff_base * (backoff_factor ** attempt)
                 logger.warning(
-                    "LLM reason_and_act failed (attempt %s/3), retrying in %.2fs: %s",
+                    "agent_guardrail kind=llm_retry trace_id=%s intent=%s "
+                    "attempt=%d/%d backoff_s=%.2f error=%s",
+                    getattr(state, "trace_id", None) or get_trace_id(),
+                    state.intent_type.value if state.intent_type else "unknown",
                     attempt + 1,
+                    retry_attempts,
                     delay,
                     exc,
                 )

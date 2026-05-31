@@ -28,7 +28,9 @@ from sqlalchemy import text
 
 from utils.database import engine as db_engine
 
+from .runtime_config import RuntimeProfile, get_runtime_profile
 from .service.agent_service import AgentState, LaTeXEditAgent
+from .service.intent_classifier import IntentType
 from .service.llm_client import LLMClient
 from .service.tool_registry import create_tool_registry
 from .service.tools import ToolRegistry
@@ -102,19 +104,24 @@ class ScriptChatAgent(LaTeXEditAgent):
     def __init__(self, llm_client: LLMClient, tool_registry: ToolRegistry, *, script_id: str) -> None:
         super().__init__(llm_client=llm_client, tool_registry=tool_registry)
         self._script_id = script_id
-        self.tool_call_limits = {
-            "score_dimension_tool": 6,            # 六维 + compliance；rescore 闭环至少跑 1 次
-            "locate_scenes_tool": 6,              # 多场景定位允许多次但有上限
-            "extract_characters_tool": 1,         # 全剧人物 1 次足矣
-            "read_scene_tool": 8,                 # 单会话多次读取局部场景
-            "rewrite_selection_scene_tool": 8,    # 选区级改写（翻译/润色/局部重写）
-            "propose_full_script_plan_tool": 2,   # 计划生成 + 一次兜底
-            "rewrite_scene_tool": 12,             # execute 阶段逐场改写（默认上限 12 场）
-            "propose_rewrite_tool": 3,            # 单场临时改写兜底入口（chat 自然指令）
-            "propose_dimension_rewrite_tool": 2,  # 兼容旧入口：内部转发到三件套
-            "web_search_tool": 3,                 # reuse-matrix §5.1 规定上限
-            "reply_to_user_tool": 1,              # ReAct 强制收尾
-        }
+        # ScriptLens 默认按 configs/agent_runtime.yaml 的 default profile 起手；
+        # execute() 中 intent 分类完后由 _resolve_runtime_profile_for_intent 再覆盖。
+        # 父类的 LaTeX 工具默认预算保留在 self.tool_call_limits 里，但 apply_runtime_profile
+        # 用 dict.update 合并，因此 ScriptLens 工具会替换默认值，未声明的 LaTeX 工具仍保留
+        # （短剧不会注册这些工具，留着无害）。
+        initial_profile = get_runtime_profile(None)
+        self.apply_runtime_profile(initial_profile)
+
+    # ------------------------------------------------------------------
+    # intent-aware profile resolution（被父类 execute 在 intent 分类后调用）
+    # ------------------------------------------------------------------
+
+    def _resolve_runtime_profile_for_intent(
+        self, intent_type: Optional[IntentType]
+    ) -> Optional[RuntimeProfile]:
+        """从 ``agent_runtime.yaml`` 取 intent 对应 profile；unknown 走 default。"""
+        intent_value = intent_type.value if intent_type is not None else None
+        return get_runtime_profile(intent_value)
 
     async def _load_workspace_context(
         self, state: AgentState, include_edit_state: bool = True

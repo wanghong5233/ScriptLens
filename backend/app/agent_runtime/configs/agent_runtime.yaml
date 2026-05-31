@@ -1,0 +1,95 @@
+# ScriptLens Agent Runtime 配置（per-intent 覆盖式）
+#
+# 三个 section：
+#   - tool_budgets    : 每个工具 per-session 调用上限
+#   - loop_limits     : ReAct 主循环的 6 个 guardrail 阈值（防 demo 硬编码）
+#   - tool_whitelist  : 当前 intent 暴露给 LLM 的工具子集；null = 全开
+#
+# 合并语义：
+#   - tool_budgets / loop_limits : 部分键覆盖，未声明键沿用 default
+#   - tool_whitelist             : intent 整段替换 default
+#
+# env 覆盖：
+#   AGENT_RUNTIME__<INTENT>__<SECTION>__<KEY>=<value>
+#   例如 AGENT_RUNTIME__EDIT__TOOL_BUDGETS__REWRITE_SCENE_TOOL=20
+#
+# 改完 reload 一次进程或调 invalidate_runtime_config_cache() 才生效。
+
+default:
+  tool_budgets:
+    # ScriptLens 11 个工具的默认 per-session 上限
+    score_dimension_tool: 6              # 六维 + compliance；rescore 闭环至少跑 1 次
+    locate_scenes_tool: 6                # 多场景定位允许多次但有上限
+    extract_characters_tool: 1           # 全剧人物 1 次足矣
+    read_scene_tool: 8                   # 单会话多次读取局部场景
+    rewrite_selection_scene_tool: 8      # 选区级改写（翻译/润色/局部重写）
+    propose_full_script_plan_tool: 4     # 计划生成 + 失败重试 + 用户追问微调
+    rewrite_scene_tool: 12               # execute 阶段逐场改写
+    propose_rewrite_tool: 3              # 单场临时改写兜底
+    propose_dimension_rewrite_tool: 2    # 兼容旧入口
+    web_search_tool: 3                   # reuse-matrix §5.1 规定上限
+    reply_to_user_tool: 1                # ReAct 强制收尾
+
+  loop_limits:
+    # 6 个原本散在 agent_service.py 的 demo 硬编码数字，统一外置
+    recovery_actions_max: 2                       # 单 session 内 recovery 路径调用上限
+    consecutive_tool_failures_threshold: 2        # 触发 recovery 的连续失败阈值
+    same_tool_convergence_count: 4                # 同一工具连续 N 次 → 强制走 reply_to_user_tool 收敛
+    llm_retry_attempts: 3                         # reason_and_act 重试次数
+    llm_retry_backoff_base_seconds: 0.35          # 退避基数
+    llm_retry_backoff_factor: 2.0                 # 退避指数
+    guardrail_reply_max_tokens: 520               # 强制收尾摘要最大 tokens
+
+  # null = 不限制（全部已注册工具进 prompt）；列表 = 仅这些工具进 LLM tool list
+  tool_whitelist: null
+
+intents:
+  # 用户提问（场景定位 / 维度解释 / 人物 / 市场对比 / 法规等）
+  qa:
+    tool_budgets:
+      web_search_tool: 5                          # 问答场景搜索更频繁
+    tool_whitelist:
+      - score_dimension_tool
+      - locate_scenes_tool
+      - read_scene_tool
+      - extract_characters_tool
+      - web_search_tool
+      - reply_to_user_tool
+
+  # 用户希望得到建议 / 评价（不修改原文）
+  suggest:
+    tool_whitelist:
+      - score_dimension_tool
+      - locate_scenes_tool
+      - read_scene_tool
+      - propose_rewrite_tool
+      - propose_dimension_rewrite_tool
+      - reply_to_user_tool
+
+  # 用户要求改写（单场或全剧）
+  edit:
+    tool_budgets:
+      rewrite_scene_tool: 16                      # edit 场景下改写更密
+      propose_full_script_plan_tool: 6
+    tool_whitelist:
+      - locate_scenes_tool
+      - read_scene_tool
+      - propose_full_script_plan_tool
+      - rewrite_scene_tool
+      - rewrite_selection_scene_tool
+      - reply_to_user_tool
+
+  # 证据定位（短剧无标准 citation 语义，这里更像精确取证）
+  citation:
+    tool_budgets:
+      locate_scenes_tool: 10
+      read_scene_tool: 12
+    loop_limits:
+      llm_retry_attempts: 2                       # 证据定位失败不值得太多重试
+    tool_whitelist:
+      - locate_scenes_tool
+      - read_scene_tool
+      - reply_to_user_tool
+
+  # 短剧没有文件系统语义；保留 intent 仅为 schema 兼容，工具列表给最小集
+  file_op: {}
