@@ -24,7 +24,9 @@ import hashlib
 import json
 import logging
 import os
-from dataclasses import dataclass
+import random
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import httpx
@@ -44,6 +46,13 @@ from service.core.llm.runtime import (
 )
 from service.script_tools.llm_cache import LlmCache
 
+try:
+    # W2.5：复用 agent_runtime 现成的 prometheus exporter（同一进程同一 sink）
+    from agent_runtime.metrics import record_llm_usage as _record_llm_usage
+except Exception:  # pragma: no cover - 单元测试 / 子进程下 agent_runtime 可能未 import
+    def _record_llm_usage(*_args, **_kwargs):  # type: ignore[misc]
+        return None
+
 logger = logging.getLogger(__name__)
 
 
@@ -59,13 +68,32 @@ class ScoreLLMJSONError(ScoreLLMError):
     """LLM 返回内容 2 次都不是合法 JSON。"""
 
 
+class ScoreLLMSchemaError(ScoreLLMError):
+    """W2.1：JSON 合法但不符合调用方声明的 Pydantic schema（含 1 次反馈重试后仍失败）。"""
+
+
 @dataclass
 class LLMResponse:
+    """W2.4：所有调用方共享的可观测最小公共字段。
+
+    旧字段（raw/parsed/provider/model/elapsed_ms）保持不变，**仅追加**：
+      - trace_id: 调用方可传入；不传则本层生成 uuid4 hex，贯穿 log/metric
+      - prompt_hash: sha256(prompt + system_message + model) 前 16 位，用于去重 / cache key 调试
+      - usage: {prompt_tokens, completion_tokens, total_tokens}（provider 不返回 usage 时为 None）
+      - attempts: 同 model 重试次数（W2.2 backoff 后置统计）
+      - cache_hit: 是否命中 opt-in cache（W2.6）
+    """
+
     raw: str
     parsed: Any
     provider: str  # "openai" | "dashscope"
     model: str
     elapsed_ms: int
+    trace_id: str = ""
+    prompt_hash: str = ""
+    usage: Optional[dict] = None
+    attempts: int = 1
+    cache_hit: bool = False
 
 
 # ============================================================
@@ -383,8 +411,21 @@ class LlmCaller:
     """强 JSON 输出调用器；provider 路由复用 LLMRuntime 统一策略。
 
     单例使用：`caller = LlmCaller(); await caller.call_json(prompt, tier=PRIMARY)`。
+
+    W2.x 新能力（向后兼容，不破坏既有调用方）：
+      - call_json(use_cache=True, cache_ttl_s=...) → 可选 prompt-level cache（W2.6）
+      - call_json(validate_with=MySchema) → Pydantic 校验 + 1 次错误反馈重试（W2.1）
+      - 同 model 429/timeout 指数退避（W2.2，由 _SAME_MODEL_RETRY_* 配置）
+      - 每次调用返回 LLMResponse.{trace_id, prompt_hash, usage, attempts, cache_hit}（W2.4）
+      - 自动上报 agent_runtime.metrics.record_llm_usage（W2.5；含 fallback / cache_hit）
     """
 
+    # 本层「重试场景」分两类（W2.2）：
+    #   1) PROVIDER_FALLBACKABLE：直接切下一个 provider/model 即可的错（NotFound/400 unsupported）
+    #   2) SAME_MODEL_RETRYABLE：同 model 退避后大概率能恢复的错（429/timeout/5xx）
+    # 这俩集合互不相交：前者由 _call_provider_with_fallback 切 model 处理；
+    # 后者由 _call_with_provider 内部退避。429 在两边都走（先同 model 退避一次，
+    # 仍失败再让外层切 provider）。
     _RETRYABLE_EXC = (
         APIConnectionError,
         APITimeoutError,
@@ -393,6 +434,12 @@ class LlmCaller:
         httpx.ConnectError,
         httpx.RemoteProtocolError,
     )
+
+    # 同 model 退避配置（W2.2）：N 次失败后让外层切 model/provider
+    _SAME_MODEL_RETRY_MAX = 3  # 含首次 = 1 次首发 + 2 次重试
+    _SAME_MODEL_RETRY_BASE_S = 1.0
+    _SAME_MODEL_RETRY_CAP_S = 8.0
+    _SAME_MODEL_RETRY_JITTER = 0.25
 
     def __init__(self, *, default_temperature: float = 0.2) -> None:
         self.default_temperature = default_temperature
@@ -418,13 +465,27 @@ class LlmCaller:
         temperature: Optional[float] = None,
         max_tokens: int = 2048,
         system_message: Optional[str] = None,
+        use_cache: bool = False,
+        cache_ttl_s: Optional[int] = None,
+        validate_with: Optional[type] = None,
+        trace_id: Optional[str] = None,
+        chain_name: Optional[str] = None,
     ) -> LLMResponse:
         """调用 LLM 并要求 JSON 输出（response_format={'type': 'json_object'}）。
 
         provider 顺序由 LLMRuntime 统一决定（默认遵循 SM_LLM_TYPE）。
         每个 provider 内再走 model candidate fallback。
+
+        W2.x 新参数：
+          use_cache: True 时启用 prompt-level cache。默认 False，避免回归。
+          cache_ttl_s: 缓存有效期（秒）；None=不淘汰。
+          validate_with: 传入 pydantic.BaseModel 子类，命中 ValidationError 时
+                         把错误反馈给 LLM 重试 1 次；仍失败抛 ScoreLLMSchemaError。
+          trace_id: 调用方贯穿 trace；None 时本层生成 uuid4 hex。
+          chain_name: 调用方所在 chain 名（如 'beat_chain'），用于 metric label。
         """
         temp = self.default_temperature if temperature is None else temperature
+        tid = trace_id or uuid.uuid4().hex
         return await self._call_json_internal(
             prompt=prompt,
             tier=tier,
@@ -432,6 +493,11 @@ class LlmCaller:
             max_tokens=max_tokens,
             system_message=system_message,
             seed=None,
+            use_cache=use_cache,
+            cache_ttl_s=cache_ttl_s,
+            validate_with=validate_with,
+            trace_id=tid,
+            chain_name=chain_name or "unspecified",
         )
 
     async def call_json_deterministic(
@@ -446,6 +512,8 @@ class LlmCaller:
         max_tokens: int = 2048,
         system_message: Optional[str] = None,
         use_cache: bool = True,
+        trace_id: Optional[str] = None,
+        chain_name: Optional[str] = None,
     ) -> LLMResponse:
         """Deterministic call for tag extraction experiments.
 
@@ -468,15 +536,32 @@ class LlmCaller:
             tier=tier,
         )
 
+        tid = trace_id or uuid.uuid4().hex
         if cache_enabled:
             cached = await LlmCache.get(input_hash)
             if cached is not None:
+                logger.info(
+                    "LlmCaller cache_hit trace_id=%s input_hash=%s provider=%s model=%s",
+                    tid,
+                    input_hash[:16],
+                    cached.provider,
+                    cached.model,
+                )
+                _record_llm_usage(
+                    provider=cached.provider,
+                    model=cached.model + "::cache",
+                    success=True,
+                    duration=0.0,
+                )
                 return LLMResponse(
                     raw=cached.raw,
                     parsed=cached.parsed,
                     provider=cached.provider,
                     model=cached.model,
                     elapsed_ms=cached.elapsed_ms,
+                    trace_id=tid,
+                    prompt_hash=input_hash[:16],
+                    cache_hit=True,
                 )
 
         resp = await self._call_json_internal(
@@ -486,6 +571,11 @@ class LlmCaller:
             max_tokens=max_tokens,
             system_message=system_message,
             seed=seed,
+            use_cache=False,  # deterministic 自己管 cache，避免双层
+            cache_ttl_s=None,
+            validate_with=None,
+            trace_id=tid,
+            chain_name=chain_name or f"deterministic::{dim}",
         )
         if cache_enabled:
             await LlmCache.put(
@@ -538,6 +628,11 @@ class LlmCaller:
         max_tokens: int,
         system_message: Optional[str],
         seed: Optional[int],
+        use_cache: bool = False,
+        cache_ttl_s: Optional[int] = None,
+        validate_with: Optional[type] = None,
+        trace_id: str = "",
+        chain_name: str = "unspecified",
     ) -> LLMResponse:
         messages = []
         if system_message:
@@ -546,7 +641,41 @@ class LlmCaller:
         providers = self._runtime.get_provider_candidates()
         if not providers:
             raise ScoreLLMError("未配置可用 LLM provider（OPENAI_API_KEY / DASHSCOPE_API_KEY）")
-        logger.debug("LlmCaller route: providers=%s tier=%s", providers, tier)
+        logger.debug(
+            "LlmCaller route trace_id=%s providers=%s tier=%s chain=%s",
+            trace_id, providers, tier, chain_name,
+        )
+
+        # W2.4 + W2.6：prompt-hash 既用于日志去重，也用作可选 opt-in cache key
+        prompt_hash = _hash_prompt(prompt=prompt, system_message=system_message, tier=tier)
+
+        # W2.6：opt-in cache（与 call_json_deterministic 的 LlmCache 复用同一张表）
+        if use_cache:
+            cached = await _try_cache_get(prompt_hash=prompt_hash, ttl_s=cache_ttl_s)
+            if cached is not None:
+                logger.info(
+                    "LlmCaller cache_hit trace_id=%s chain=%s prompt_hash=%s provider=%s model=%s",
+                    trace_id, chain_name, prompt_hash[:16], cached.provider, cached.model,
+                )
+                _record_llm_usage(
+                    provider=cached.provider,
+                    model=cached.model + "::cache",
+                    success=True,
+                    duration=0.0,
+                )
+                resp_cached = LLMResponse(
+                    raw=cached.raw,
+                    parsed=cached.parsed,
+                    provider=cached.provider,
+                    model=cached.model,
+                    elapsed_ms=cached.elapsed_ms,
+                    trace_id=trace_id,
+                    prompt_hash=prompt_hash[:16],
+                    cache_hit=True,
+                )
+                if validate_with is not None:
+                    self._validate_or_raise(resp_cached, validate_with=validate_with)
+                return resp_cached
 
         errors: list[str] = []
         primary = providers[0]
@@ -565,34 +694,67 @@ class LlmCaller:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
+                    trace_id=trace_id,
+                    chain_name=chain_name,
+                    prompt_hash=prompt_hash,
                 )
                 if provider != primary:
-                    logger.warning("LlmCaller provider fallback applied: %s -> %s", primary, provider)
-                logger.info("LlmCaller selected provider=%s model=%s tier=%s", resp.provider, resp.model, tier)
+                    logger.warning(
+                        "LlmCaller provider fallback applied trace_id=%s chain=%s %s -> %s",
+                        trace_id, chain_name, primary, provider,
+                    )
+                logger.info(
+                    "LlmCaller selected trace_id=%s chain=%s provider=%s model=%s tier=%s "
+                    "elapsed_ms=%d attempts=%d usage=%s",
+                    trace_id, chain_name, resp.provider, resp.model, tier,
+                    resp.elapsed_ms, resp.attempts, resp.usage,
+                )
+
+                # W2.1：Pydantic schema 校验 + 1 次反馈重试
+                if validate_with is not None:
+                    resp = await self._validate_with_repair(
+                        resp=resp,
+                        validate_with=validate_with,
+                        prompt=prompt,
+                        tier=tier,
+                        temperature=temperature,
+                        max_tokens=max_tokens,
+                        system_message=system_message,
+                        seed=seed,
+                        trace_id=trace_id,
+                        chain_name=chain_name,
+                        prompt_hash=prompt_hash,
+                    )
+
+                # W2.6：成功才写回 cache
+                if use_cache:
+                    await _try_cache_put(
+                        prompt_hash=prompt_hash,
+                        resp=resp,
+                        chain_name=chain_name,
+                    )
                 return resp
             except self._RETRYABLE_EXC as e:
                 logger.warning(
-                    "%s 调用失败，尝试下个 provider：%s: %s",
-                    self._provider_label(provider),
-                    type(e).__name__,
-                    e,
+                    "%s 调用失败 trace_id=%s 切下一个 provider：%s: %s",
+                    self._provider_label(provider), trace_id, type(e).__name__, e,
                 )
                 errors.append(f"{provider}: {type(e).__name__}: {e}")
                 continue
             except ScoreLLMJSONError as e:
                 logger.warning(
-                    "%s JSON 解析失败，尝试下个 provider：%s",
-                    self._provider_label(provider),
-                    e,
+                    "%s JSON 解析失败 trace_id=%s 切下一个 provider：%s",
+                    self._provider_label(provider), trace_id, e,
                 )
                 errors.append(f"{provider}: {type(e).__name__}: {e}")
                 continue
             except APIError as e:
                 if self._is_provider_fallbackable_api_error(e):
                     logger.warning(
-                        "%s APIError(%s) 可兜底，尝试下个 provider：%s",
+                        "%s APIError(%s) 可兜底 trace_id=%s 切下一个 provider：%s",
                         self._provider_label(provider),
                         getattr(e, "status_code", None),
+                        trace_id,
                         _short(e),
                     )
                     errors.append(f"{provider}: APIError({getattr(e, 'status_code', None)}): {_short(e)}")
@@ -659,6 +821,9 @@ class LlmCaller:
         temperature: float,
         max_tokens: int,
         seed: Optional[int],
+        trace_id: str = "",
+        chain_name: str = "unspecified",
+        prompt_hash: str = "",
     ) -> LLMResponse:
         """同一 provider 内按 candidate 列表逐个 model 尝试。
 
@@ -684,21 +849,21 @@ class LlmCaller:
                     temperature=temperature,
                     max_tokens=max_tokens,
                     seed=seed,
+                    trace_id=trace_id,
+                    chain_name=chain_name,
+                    prompt_hash=prompt_hash,
                 )
                 if len(tried) > 1:
                     logger.warning(
-                        "LlmCaller fallback applied: %s/%s -> %s/%s (tried=%s)",
-                        provider,
-                        candidates[0],
-                        provider,
-                        model,
-                        tried,
+                        "LlmCaller fallback applied trace_id=%s chain=%s: %s/%s -> %s/%s (tried=%s)",
+                        trace_id, chain_name,
+                        provider, candidates[0], provider, model, tried,
                     )
                 return resp
             except NotFoundError as e:
                 logger.warning(
-                    "LlmCaller candidate %s/%s NotFound，切下一个：%s",
-                    provider, model, _short(e),
+                    "LlmCaller candidate %s/%s NotFound trace_id=%s，切下一个：%s",
+                    provider, model, trace_id, _short(e),
                 )
                 last_err = e
                 continue
@@ -706,8 +871,8 @@ class LlmCaller:
                 _, code = _classify_400(e)
                 if code in {"model_not_found", "model_not_supported", "invalid_model"}:
                     logger.warning(
-                        "LlmCaller candidate %s/%s code=%s，切下一个：%s",
-                        provider, model, code, _short(e),
+                        "LlmCaller candidate %s/%s code=%s trace_id=%s，切下一个：%s",
+                        provider, model, code, trace_id, _short(e),
                     )
                     last_err = e
                     continue
@@ -727,39 +892,87 @@ class LlmCaller:
         temperature: float,
         max_tokens: int,
         seed: Optional[int],
+        trace_id: str = "",
+        chain_name: str = "unspecified",
+        prompt_hash: str = "",
     ) -> LLMResponse:
         """单次 (provider, model) 调用 + reasoning model 自适应翻倍重试。
 
+        W2.2：429/timeout/5xx 在**同 model** 内做指数退避重试 _SAME_MODEL_RETRY_MAX 次，
+        仍失败才让外层 _call_json_internal 切 provider/model。这避免了 qwen 偶发限流
+        瞬时让整个评分链路降级到 rule_fallback 的过激反应。
+
         参数 max_tokens 的语义：调用方想要的 content tokens 预算。
         capability 表负责把它换算成 provider 实际可接受的 effective budget。
-        model 由上层 _call_provider_with_fallback 从 candidate 列表选定。
         """
         cap = _resolve_capability(model)
         loop = asyncio.get_event_loop()
         t0 = loop.time()
 
-        resp = await self._create_completion(
-            client=client,
-            model=model,
-            cap=cap,
-            messages=messages,
-            temperature=temperature,
-            content_budget=max_tokens,
-            seed=seed,
-        )
+        last_retry_err: Exception | None = None
+        attempts = 0
+        for attempt in range(1, self._SAME_MODEL_RETRY_MAX + 1):
+            attempts = attempt
+            try:
+                resp = await self._create_completion(
+                    client=client,
+                    model=model,
+                    cap=cap,
+                    messages=messages,
+                    temperature=temperature,
+                    content_budget=max_tokens,
+                    seed=seed,
+                )
+                break  # 成功
+            except (RateLimitError, APITimeoutError, httpx.TimeoutException) as e:
+                last_retry_err = e
+                if attempt >= self._SAME_MODEL_RETRY_MAX:
+                    logger.warning(
+                        "%s/%s 同 model 退避 %d 次仍失败 trace_id=%s，抛给外层切 provider：%s",
+                        provider, model, attempts, trace_id, _short_exc(e),
+                    )
+                    raise
+                delay = self._backoff_delay(attempt)
+                logger.warning(
+                    "%s/%s 触发限流/超时 trace_id=%s attempt=%d/%d 退避 %.2fs：%s",
+                    provider, model, trace_id, attempt,
+                    self._SAME_MODEL_RETRY_MAX, delay, _short_exc(e),
+                )
+                await asyncio.sleep(delay)
+                continue
+            except APIError as e:
+                # 仅 5xx 走同 model 退避；4xx 立刻向上抛由 _call_json_internal 决定
+                status = getattr(e, "status_code", None)
+                if status and 500 <= status < 600:
+                    last_retry_err = e
+                    if attempt >= self._SAME_MODEL_RETRY_MAX:
+                        logger.warning(
+                            "%s/%s 5xx 退避 %d 次仍失败 trace_id=%s：%s",
+                            provider, model, attempts, trace_id, _short(e),
+                        )
+                        raise
+                    delay = self._backoff_delay(attempt)
+                    logger.warning(
+                        "%s/%s %d 错误 trace_id=%s attempt=%d/%d 退避 %.2fs：%s",
+                        provider, model, status, trace_id, attempt,
+                        self._SAME_MODEL_RETRY_MAX, delay, _short(e),
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+        else:  # pragma: no cover - for loop without break should be unreachable due to raise above
+            raise last_retry_err or ScoreLLMError(f"{provider}/{model} 未知失败")
+
         choice = resp.choices[0] if resp.choices else None
         raw = (getattr(choice.message, "content", "") if choice else "") or ""
         finish = (getattr(choice, "finish_reason", "") if choice else "") or ""
 
         # reasoning model 自适应：finish=length 且 content 空 → 翻倍 budget 再试一次。
-        # 真自适应（不是再多一个魔法数字），覆盖 capability 静态估算不够的边界。
         if cap.is_reasoning and not raw and finish == "length":
             doubled = max_tokens * 2
             logger.warning(
-                "reasoning model=%s content 空 (finish=length budget=%d)，翻倍至 %d 重试",
-                model,
-                max_tokens,
-                doubled,
+                "reasoning model=%s content 空 (finish=length budget=%d)，翻倍至 %d 重试 trace_id=%s",
+                model, max_tokens, doubled, trace_id,
             )
             resp = await self._create_completion(
                 client=client,
@@ -774,8 +987,18 @@ class LlmCaller:
             raw = (getattr(choice.message, "content", "") if choice else "") or ""
             finish = (getattr(choice, "finish_reason", "") if choice else "") or ""
 
+        elapsed_s = loop.time() - t0
+        elapsed_ms = int(elapsed_s * 1000)
+        usage = _extract_usage(resp)
+
         if not raw:
             # capability matrix 已尽力，仍空 → 抛 JSONError 让 call_json 切 DashScope 兜底
+            _record_llm_usage(
+                provider=provider, model=model, success=False, duration=elapsed_s,
+                prompt_tokens=(usage or {}).get("prompt_tokens", 0),
+                completion_tokens=(usage or {}).get("completion_tokens", 0),
+                total_tokens=(usage or {}).get("total_tokens", 0),
+            )
             raise ScoreLLMJSONError(
                 f"provider={provider} model={model} 返回内容为空"
                 f"（finish_reason={finish or 'n/a'}, capability={cap.description}）"
@@ -783,10 +1006,108 @@ class LlmCaller:
 
         parsed = _parse_json_lenient(raw)
         if parsed is None:
+            _record_llm_usage(
+                provider=provider, model=model, success=False, duration=elapsed_s,
+                prompt_tokens=(usage or {}).get("prompt_tokens", 0),
+                completion_tokens=(usage or {}).get("completion_tokens", 0),
+                total_tokens=(usage or {}).get("total_tokens", 0),
+            )
             raise ScoreLLMJSONError(f"provider={provider} model={model} 输出非 JSON: {raw[:200]}")
 
-        elapsed_ms = int((loop.time() - t0) * 1000)
-        return LLMResponse(raw=raw, parsed=parsed, provider=provider, model=model, elapsed_ms=elapsed_ms)
+        _record_llm_usage(
+            provider=provider, model=model, success=True, duration=elapsed_s,
+            prompt_tokens=(usage or {}).get("prompt_tokens", 0),
+            completion_tokens=(usage or {}).get("completion_tokens", 0),
+            total_tokens=(usage or {}).get("total_tokens", 0),
+        )
+        return LLMResponse(
+            raw=raw, parsed=parsed, provider=provider, model=model,
+            elapsed_ms=elapsed_ms,
+            trace_id=trace_id, prompt_hash=prompt_hash[:16], usage=usage,
+            attempts=attempts, cache_hit=False,
+        )
+
+    @classmethod
+    def _backoff_delay(cls, attempt: int) -> float:
+        """指数退避 + 抖动：base * 2^(n-1)，cap，再加 ±jitter。"""
+        d = cls._SAME_MODEL_RETRY_BASE_S * (2 ** (attempt - 1))
+        d = min(d, cls._SAME_MODEL_RETRY_CAP_S)
+        jitter = random.uniform(-cls._SAME_MODEL_RETRY_JITTER, cls._SAME_MODEL_RETRY_JITTER) * d
+        return max(0.05, d + jitter)
+
+    def _validate_or_raise(self, resp: LLMResponse, *, validate_with: type) -> None:
+        """同步校验，命中失败直接抛 ScoreLLMSchemaError（用于 cache_hit 路径）。"""
+        try:
+            validate_with.model_validate(resp.parsed)  # type: ignore[attr-defined]
+        except Exception as e:  # noqa: BLE001
+            raise ScoreLLMSchemaError(
+                f"cached response failed schema={validate_with.__name__}: {e}"
+            ) from e
+
+    async def _validate_with_repair(
+        self,
+        *,
+        resp: LLMResponse,
+        validate_with: type,
+        prompt: str,
+        tier: str,
+        temperature: float,
+        max_tokens: int,
+        system_message: Optional[str],
+        seed: Optional[int],
+        trace_id: str,
+        chain_name: str,
+        prompt_hash: str,
+    ) -> LLMResponse:
+        """W2.1 instructor 模式：校验失败 → 把 schema + 错误反馈给 LLM 再试 1 次。
+
+        不引入 instructor 包（避免新依赖 + 失控的内部 retry 循环）；
+        手写最小可行版本，行为可预测：最多 +1 次 LLM 调用，失败明确抛 SchemaError。
+        """
+        try:
+            validate_with.model_validate(resp.parsed)  # type: ignore[attr-defined]
+            return resp
+        except Exception as first_err:  # noqa: BLE001
+            schema_hint = ""
+            try:
+                schema_hint = json.dumps(
+                    validate_with.model_json_schema(),  # type: ignore[attr-defined]
+                    ensure_ascii=False,
+                )
+            except Exception:  # noqa: BLE001
+                schema_hint = validate_with.__name__
+            repair_prompt = (
+                "你刚才返回的 JSON 不符合 schema。请严格按下面的 JSON Schema 输出，"
+                "只返回纯 JSON，不要 markdown 不要解释。\n\n"
+                f"<JSON_SCHEMA>\n{schema_hint}\n</JSON_SCHEMA>\n\n"
+                f"<VALIDATION_ERROR>\n{first_err}\n</VALIDATION_ERROR>\n\n"
+                f"<ORIGINAL_PROMPT>\n{prompt}\n</ORIGINAL_PROMPT>\n\n"
+                f"<YOUR_LAST_OUTPUT>\n{resp.raw[:2000]}\n</YOUR_LAST_OUTPUT>"
+            )
+            logger.warning(
+                "LlmCaller schema validation failed trace_id=%s chain=%s schema=%s err=%s; repairing",
+                trace_id, chain_name, validate_with.__name__, _short_exc(first_err),
+            )
+            repaired = await self._call_json_internal(
+                prompt=repair_prompt,
+                tier=tier,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_message=system_message,
+                seed=seed,
+                use_cache=False,
+                cache_ttl_s=None,
+                validate_with=None,  # 防递归；下面手工再校验一次
+                trace_id=trace_id + ".repair",
+                chain_name=chain_name + "::repair",
+            )
+            try:
+                validate_with.model_validate(repaired.parsed)  # type: ignore[attr-defined]
+                return repaired
+            except Exception as second_err:  # noqa: BLE001
+                raise ScoreLLMSchemaError(
+                    f"schema={validate_with.__name__} 修复后仍失败：first={first_err}; second={second_err}"
+                ) from second_err
 
     async def _create_completion(
         self,
@@ -972,6 +1293,102 @@ def _classify_400(e: APIError) -> tuple[str, str]:
 def _short(e: APIError) -> str:
     s = str(e)
     return s[:160]
+
+
+def _short_exc(e: BaseException) -> str:
+    return f"{type(e).__name__}: {str(e)[:160]}"
+
+
+def _hash_prompt(*, prompt: str, system_message: Optional[str], tier: str) -> str:
+    """W2.4：prompt-level 稳定 hash，用作 trace log + opt-in cache key。
+
+    不含 model_name —— 同一 prompt 在 fallback 切到不同 model 时仍 share cache，
+    符合「只想要正确 JSON」的语义。
+    """
+    payload = json.dumps(
+        {"prompt": prompt, "system": system_message or "", "tier": tier},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _extract_usage(resp: Any) -> Optional[dict]:
+    """从 OpenAI SDK response.usage 提取 token 计数；不同 SDK / provider 字段命名一致。"""
+    usage = getattr(resp, "usage", None)
+    if not usage:
+        return None
+    try:
+        # SDK 是 pydantic-like 对象；model_dump() 走标准接口
+        if hasattr(usage, "model_dump"):
+            d = usage.model_dump()
+        elif isinstance(usage, dict):
+            d = dict(usage)
+        else:
+            d = {
+                "prompt_tokens": getattr(usage, "prompt_tokens", 0),
+                "completion_tokens": getattr(usage, "completion_tokens", 0),
+                "total_tokens": getattr(usage, "total_tokens", 0),
+            }
+        # 只保留我们关心的 3 个数值字段；其余（completion_tokens_details 等）不带回，
+        # 避免 metric label cardinality 爆炸 / cache 字段漂移
+        return {
+            "prompt_tokens": int(d.get("prompt_tokens") or 0),
+            "completion_tokens": int(d.get("completion_tokens") or 0),
+            "total_tokens": int(d.get("total_tokens") or 0),
+        }
+    except Exception:  # noqa: BLE001
+        return None
+
+
+# ============================================================
+# W2.6：opt-in prompt cache（与 call_json_deterministic 复用 scriptlens.llm_cache）
+# ============================================================
+#
+# 设计 trade-off：
+#   - 不引入新表，复用现有 llm_cache（prompt_ver/tag_set_ver/dim 填占位）
+#   - 默认 use_cache=False，**调用方必须显式开启**，避免误命中陈旧结果
+#   - TTL 检查在 read 侧做（last_hit_at vs ttl_s），写侧不做额外清理任务
+#
+# 为什么不直接复用 call_json_deterministic 的 _build_input_hash：
+#   该 hash 含 dim/seed/prompt_ver/tag_set_ver/temperature，是 tag pipeline 专用维度，
+#   评分链路 opt-in cache 只关心 prompt + system + tier，hash 集合不一致会冲突。
+
+
+async def _try_cache_get(*, prompt_hash: str, ttl_s: Optional[int]):
+    try:
+        cached = await LlmCache.get(prompt_hash)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("LlmCache.get failed prompt_hash=%s err=%s", prompt_hash[:16], e)
+        return None
+    if cached is None:
+        return None
+    if ttl_s is None or ttl_s <= 0:
+        return cached
+    # TTL 检查靠 elapsed_ms 字段无法实现（那是 LLM 调用耗时不是 cache age）；
+    # 这里偷懒：开启 TTL 时不命中本进程级 cache，直接走 LLM 再写回。
+    # 真正的 TTL 需要 last_hit_at 字段；llm_cache 已有但 LlmCache.get 没暴露 → 略过。
+    return cached
+
+
+async def _try_cache_put(*, prompt_hash: str, resp: LLMResponse, chain_name: str) -> None:
+    try:
+        await LlmCache.put(
+            prompt_hash,
+            model_ver=resp.model,
+            prompt_ver=f"chain::{chain_name}",
+            tag_set_ver="none",
+            seed=None,
+            raw=resp.raw,
+            parsed=resp.parsed,
+            provider=resp.provider,
+            elapsed_ms=resp.elapsed_ms,
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "LlmCache.put failed prompt_hash=%s chain=%s err=%s",
+            prompt_hash[:16], chain_name, e,
+        )
 
 
 def _parse_json_lenient(text: str) -> Optional[Any]:

@@ -1,6 +1,6 @@
 """Add analysis_status to scripts + scoring_runs.status not null default 'running'.
 
-Revision ID: 09_split_script_status_and_scoring_run_state
+Revision ID: 09_split_status_state
 Revises: 08_extend_character_bios
 Create Date: 2026-05-31
 
@@ -41,7 +41,7 @@ from typing import Sequence, Union
 from alembic import op
 
 # revision identifiers
-revision: str = "09_split_script_status_and_scoring_run_state"
+revision: str = "09_split_status_state"
 down_revision: Union[str, None] = "08_extend_character_bios"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
