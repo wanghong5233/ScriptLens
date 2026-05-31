@@ -1,10 +1,20 @@
 """MONETIZATION 变现力维度。
 
 signals:
-- paywall_cliffhanger_strength    rule
-- post_paywall_payoff_density     rule
-- episode_end_hook_grade          rule
-- paid_arc_twist_pacing           rule
+- paywall_cliffhanger_strength    rule（付费点关键词匹配）
+- post_paywall_payoff_density     rule（付费首 N 集爽点密度）
+- episode_end_hook_grade          rule（集末钩子覆盖率）
+- paid_arc_twist_pacing           rule（付费段反转节奏）
+- paywall_hook_quality            llm_judge（付费拐点钩子叙述强度，质量维度）
+
+设计要点（v4 评分准确度强化）：
+- 历史 MONETIZATION 维度 LLM judge 占比 = 0%，所有信号都是关键词 + 计数
+  组合，对"情境钩子"无能为力（如付费拐点处主角被推进手术室、妻子在外哭泣，
+  无"反转/危机"等词但用户必然付费）。
+- 新增 `paywall_hook_quality` LLM judge，给 LLM 看付费拐点集末全文 + 付费
+  首集首场预览，独立判读"用户是否愿意付费续看"。
+- 业内对照：抖音 / 快手 / ReelShort 付费转化 SOP、G-Eval、字节 WebConf
+  2026 短剧质量评测 §4.2。
 """
 
 from __future__ import annotations
@@ -26,6 +36,11 @@ from service.scoring.framework import (
     ScoringContext,
     SignalResult,
     SignalSource,
+)
+from service.scoring.llm_judge import judge_with_schema
+from service.scoring.prompts.monetization_paywall_hook import (
+    PaywallHookQualityPayload,
+    build_prompt as build_paywall_hook_prompt,
 )
 from service.scoring.rubric_loader import (
     DimensionConfig,
@@ -58,6 +73,10 @@ async def score_dimension(
         signals.append(_signal_end_hook(ctx, sig_by_key["episode_end_hook_grade"]))
     if "paid_arc_twist_pacing" in sig_by_key:
         signals.append(_signal_paid_twist_pacing(ctx, sig_by_key["paid_arc_twist_pacing"]))
+    if "paywall_hook_quality" in sig_by_key:
+        signals.append(
+            await _signal_paywall_hook_quality(ctx, sig_by_key["paywall_hook_quality"])
+        )
 
     score, tier = aggregate_dimension_score(signals, dim_cfg, tier_cuts)
 
@@ -271,6 +290,90 @@ def _signal_paid_twist_pacing(ctx: ScoringContext, cfg: SignalConfig) -> SignalR
         raw_value=raw,
         evidence_ref_ids=[r.scene_id for r in paid_twists[:3]],
         detail=detail,
+    )
+
+
+# ============================================================
+# signal: paywall_hook_quality (LLM judge)
+# ============================================================
+
+
+async def _signal_paywall_hook_quality(
+    ctx: ScoringContext,
+    cfg: SignalConfig,
+) -> SignalResult:
+    if ctx.llm_caller is None:
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason="未注入 llm_caller，跳过 LLM judge",
+        )
+    if not ctx.has_scenes() or ctx.total_episodes <= 0:
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason="scenes/total_episodes 缺失",
+        )
+
+    paywall_ep = _resolve_paywall_episode(ctx, cfg)
+    eps_map = scenes_by_episode(ctx.scenes)
+    target_scenes = eps_map.get(paywall_ep)
+    if not target_scenes:
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason=f"无第 {paywall_ep} 集场景",
+        )
+
+    last_scene = target_scenes[-1]
+    excerpt_chars = required_param(cfg, "scene_excerpt_chars", int)
+    paywall_text = (last_scene.text or "")[-excerpt_chars:]
+
+    # 付费首集首场（可选预览）
+    next_scenes = eps_map.get(paywall_ep + 1) or []
+    next_scene_excerpt = ""
+    if next_scenes:
+        next_first = next_scenes[0]
+        next_scene_excerpt = (next_first.text or "")[:excerpt_chars]
+
+    system_msg, user_prompt = build_paywall_hook_prompt(
+        paywall_episode=paywall_ep,
+        paywall_scene_excerpt=paywall_text,
+        next_scene_excerpt=next_scene_excerpt,
+    )
+
+    result = await judge_with_schema(
+        caller=ctx.llm_caller,
+        prompt=user_prompt,
+        schema=PaywallHookQualityPayload,
+        system_message=system_msg,
+        chain_name="scoring.monetization.paywall_hook",
+    )
+
+    if not result.success or not isinstance(result.parsed, PaywallHookQualityPayload):
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason=result.error or "LLM judge 失败",
+        )
+
+    payload = result.parsed
+    raw = payload.hook_strength
+    # curiosity_gap 或 emotional_stakes 缺失 → 降一档
+    if not payload.creates_curiosity_gap:
+        raw = min(raw, cfg.tier_anchor.mid_high)
+    if not payload.emotional_stakes_clear:
+        raw = min(raw, cfg.tier_anchor.mid_high)
+
+    score, tier = map_signal_raw_to_score(raw, cfg)
+    return make_signal(
+        key=cfg.key,
+        source=SignalSource.LLM_JUDGE,
+        score=score,
+        tier=tier,
+        raw_value=raw,
+        evidence_ref_ids=[last_scene.id],
+        detail=f"第 {paywall_ep} 集付费拐点：{payload.rationale}",
     )
 
 

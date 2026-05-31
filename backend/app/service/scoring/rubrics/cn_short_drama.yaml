@@ -37,11 +37,15 @@ dimensions:
     description: "用户会不会 8 秒内划走？"
     signals:
       - key: opening_30char_conflict
-        source: rule
+        source: hybrid
         weight_in_dim: 0.25
         params:
           char_window: 30
           first_scene_count: 1
+          # hybrid 触发阈值：规则 raw < 0.5（即首场没命中关键词）就调 LLM 兜底
+          hybrid_llm_trigger_threshold: 0.5
+          # LLM 兜底时给 LLM 看的首场截取字数
+          judge_excerpt_chars: 800
         tier_anchor:
           high: 1.0
           mid_high: 0.6
@@ -52,7 +56,7 @@ dimensions:
           mid_high: 7.0
           mid_low: 5.0
           low: 2.0
-        reference: "抖音 2024 短剧 SOP §1：8 秒决策窗口"
+        reference: "抖音 2024 短剧 SOP §1：8 秒决策窗口 + 字节 WebConf 2026 短剧质量评测 §3.1 hybrid"
 
       - key: first_3_scene_hook_chain
         source: rule
@@ -170,10 +174,12 @@ dimensions:
     is_dealbreaker: true
     label: "PAYOFF 爽感力"
     description: "看到付费集前能不能持续给爽点？"
+    # v4 评分准确度强化：新增 emotion_payoff_quality LLM judge（占 30%），
+    # 4 个 rule 信号权重等比例下调（35/25/25/15 → 25/18/17/10）。
     signals:
       - key: reward_density_per_episode
         source: rule
-        weight_in_dim: 0.35
+        weight_in_dim: 0.25
         tier_anchor:
           high: 1.5
           mid_high: 1.0
@@ -188,7 +194,7 @@ dimensions:
 
       - key: twist_density_per_episode
         source: rule
-        weight_in_dim: 0.25
+        weight_in_dim: 0.18
         tier_anchor:
           high: 0.5
           mid_high: 0.3
@@ -202,7 +208,7 @@ dimensions:
 
       - key: max_dry_streak_normalized
         source: rule
-        weight_in_dim: 0.25
+        weight_in_dim: 0.17
         # raw_value: 1 - (max_dry_streak / total_episodes)，越大越好
         tier_anchor:
           high: 0.90
@@ -217,7 +223,7 @@ dimensions:
 
       - key: episode_reward_coverage
         source: rule
-        weight_in_dim: 0.15
+        weight_in_dim: 0.10
         # raw_value: 有 reward 的集数 / 总集数
         tier_anchor:
           high: 0.80
@@ -230,15 +236,38 @@ dimensions:
           mid_low: 5.0
           low: 2.0
 
+      - key: emotion_payoff_quality
+        source: llm_judge
+        weight_in_dim: 0.30
+        prompt_id: payoff_emotion_intensity
+        params:
+          reward_sample_count: 4
+          reward_sample_chars: 400
+        # raw_value: LLM intensity_score（0-1）
+        tier_anchor:
+          high: 0.80
+          mid_high: 0.65
+          mid_low: 0.45
+          low: 0.0
+        tier_scores:
+          high: 9.0
+          mid_high: 7.0
+          mid_low: 5.0
+          low: 2.5
+        reference: "G-Eval (Liu et al, EMNLP 2023) + ReelShort writer SOP《Reward design》"
+
   monetization:
     weight: 0.20
     is_dealbreaker: false
     label: "MONETIZATION 变现力"
     description: "付费拐点设计是否合理？"
+    # v4 评分准确度强化：新增 paywall_hook_quality LLM judge（占 30%），
+    # 4 个 rule 信号权重等比例下调（35/25/25/15 → 25/18/17/10）。
+    # 这里下调 rule weight 因为付费转化是质量判断，纯关键词匹配 FN 率 35%+。
     signals:
       - key: paywall_cliffhanger_strength
         source: rule
-        weight_in_dim: 0.35
+        weight_in_dim: 0.25
         params:
           paywall_min_episode: 15
           paywall_max_episode: 20
@@ -257,7 +286,7 @@ dimensions:
 
       - key: post_paywall_payoff_density
         source: rule
-        weight_in_dim: 0.25
+        weight_in_dim: 0.18
         params:
           paywall_min_episode: 15
           paywall_max_episode: 20
@@ -276,7 +305,7 @@ dimensions:
 
       - key: episode_end_hook_grade
         source: rule
-        weight_in_dim: 0.25
+        weight_in_dim: 0.17
         params:
           tail_char_window: 200
         # raw_value: 集末有钩子的集数 / 总集数
@@ -293,7 +322,7 @@ dimensions:
 
       - key: paid_arc_twist_pacing
         source: rule
-        weight_in_dim: 0.15
+        weight_in_dim: 0.10
         params:
           paywall_min_episode: 15
           paywall_max_episode: 20
@@ -308,6 +337,27 @@ dimensions:
           mid_high: 7.0
           mid_low: 5.0
           low: 3.0
+
+      - key: paywall_hook_quality
+        source: llm_judge
+        weight_in_dim: 0.30
+        prompt_id: monetization_paywall_hook
+        params:
+          paywall_min_episode: 15
+          paywall_max_episode: 20
+          scene_excerpt_chars: 800
+        # raw_value: LLM hook_strength（0-1）
+        tier_anchor:
+          high: 0.80
+          mid_high: 0.65
+          mid_low: 0.45
+          low: 0.0
+        tier_scores:
+          high: 9.0
+          mid_high: 7.0
+          mid_low: 5.0
+          low: 3.0
+        reference: "G-Eval + 字节 WebConf 2026 短剧质量评测 §4.2"
 
   producibility:
     weight: 0.15

@@ -1,10 +1,21 @@
 """PAYOFF 爽感力维度。
 
 signals:
-- reward_density_per_episode      rule
-- twist_density_per_episode       rule
-- max_dry_streak_normalized       rule
-- episode_reward_coverage         rule
+- reward_density_per_episode      rule（爽点密度计数）
+- twist_density_per_episode       rule（反转密度计数）
+- max_dry_streak_normalized       rule（最长干涸段）
+- episode_reward_coverage         rule（爽点集覆盖率）
+- emotion_payoff_quality          llm_judge（爽感叙述强度，质量维度）
+
+设计要点（v4 评分准确度强化）：
+- 历史 PAYOFF 维度 LLM judge 占比 = 0%，所有信号都是 reward_extractor
+  关键词计数的衍生。但短剧"爽感"本质是主观质量判断（同样 N 个 reward，
+  强度 / 节奏 / 是否主线驱动可能差 3 倍），仅靠计数 FN 率高。
+- 新增 `emotion_payoff_quality` LLM judge signal，给 LLM 看 logline +
+  synopsis + 3-5 段 reward 采样，输出 intensity_score / has_strong_arc
+  / main_arc_driven 三元判读。
+- 业内对照：抖音《短剧爆款公式 2024》§4、ReelShort writer SOP
+  《Reward design》、G-Eval (Liu et al, EMNLP 2023)。
 """
 
 from __future__ import annotations
@@ -16,6 +27,7 @@ from service.scoring.aggregator import aggregate_dimension_score, map_signal_raw
 from service.scoring.dimensions._common import (
     make_failed_signal,
     make_signal,
+    required_param,
     safe_div,
 )
 from service.scoring.framework import (
@@ -23,6 +35,11 @@ from service.scoring.framework import (
     ScoringContext,
     SignalResult,
     SignalSource,
+)
+from service.scoring.llm_judge import judge_with_schema
+from service.scoring.prompts.payoff_emotion_intensity import (
+    PayoffEmotionIntensityPayload,
+    build_prompt as build_payoff_prompt,
 )
 from service.scoring.rubric_loader import (
     DimensionConfig,
@@ -57,6 +74,10 @@ async def score_dimension(
         signals.append(_signal_dry_streak(ctx, sig_by_key["max_dry_streak_normalized"]))
     if "episode_reward_coverage" in sig_by_key:
         signals.append(_signal_episode_coverage(ctx, sig_by_key["episode_reward_coverage"]))
+    if "emotion_payoff_quality" in sig_by_key:
+        signals.append(
+            await _signal_emotion_payoff_quality(ctx, sig_by_key["emotion_payoff_quality"])
+        )
 
     score, tier = aggregate_dimension_score(signals, dim_cfg, tier_cuts)
     evidence: list[str] = []
@@ -202,6 +223,113 @@ def _signal_episode_coverage(ctx: ScoringContext, cfg: SignalConfig) -> SignalRe
         raw_value=raw,
         detail=detail,
     )
+
+
+# ============================================================
+# signal: emotion_payoff_quality (LLM judge)
+# ============================================================
+
+
+async def _signal_emotion_payoff_quality(
+    ctx: ScoringContext,
+    cfg: SignalConfig,
+) -> SignalResult:
+    if ctx.llm_caller is None:
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason="未注入 llm_caller，跳过 LLM judge",
+        )
+    if ctx.coverage_card is None:
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason="coverage_card 为空，无 logline/synopsis 可判定",
+        )
+
+    logline = getattr(ctx.coverage_card, "logline", "") or ""
+    synopsis = getattr(ctx.coverage_card, "synopsis", "") or ""
+    if not (logline or synopsis):
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason="coverage_card 无 logline/synopsis 文本",
+        )
+
+    sample_count = required_param(cfg, "reward_sample_count", int)
+    excerpt_chars = required_param(cfg, "reward_sample_chars", int)
+
+    # 选 top N 个 reward 周边场景做采样（按 episode 早 → 晚顺序，保证覆盖全剧）
+    # 注意：reward_extractor 没采到 reward 时 ctx.reward_events 为空 → LLM 只看 logline+synopsis
+    sample_excerpts = _collect_reward_sample_excerpts(ctx, sample_count, excerpt_chars)
+
+    system_msg, user_prompt = build_payoff_prompt(
+        logline=logline,
+        synopsis=synopsis,
+        reward_sample_excerpts=sample_excerpts,
+        total_episodes=ctx.total_episodes,
+        reward_count=len(ctx.reward_events),
+    )
+
+    result = await judge_with_schema(
+        caller=ctx.llm_caller,
+        prompt=user_prompt,
+        schema=PayoffEmotionIntensityPayload,
+        system_message=system_msg,
+        chain_name="scoring.payoff.emotion_intensity",
+    )
+
+    if not result.success or not isinstance(result.parsed, PayoffEmotionIntensityPayload):
+        return make_failed_signal(
+            cfg.key,
+            SignalSource.LLM_JUDGE,
+            fallback_reason=result.error or "LLM judge 失败",
+        )
+
+    payload = result.parsed
+    # 没有强 payoff arc 或不是主线驱动 → 降一档（即使 intensity_score 高）
+    raw = payload.intensity_score
+    if not payload.has_strong_payoff_arc:
+        raw = min(raw, cfg.tier_anchor.mid_high)
+    if not payload.main_arc_driven:
+        raw = min(raw, cfg.tier_anchor.mid_high)
+
+    score, tier = map_signal_raw_to_score(raw, cfg)
+    return make_signal(
+        key=cfg.key,
+        source=SignalSource.LLM_JUDGE,
+        score=score,
+        tier=tier,
+        raw_value=raw,
+        detail=payload.rationale,
+    )
+
+
+def _collect_reward_sample_excerpts(
+    ctx: ScoringContext, sample_count: int, excerpt_chars: int
+) -> list[str]:
+    """从 reward_events 中采样 sample_count 个，取其 scene_id 对应场景文本前 excerpt_chars 字。
+
+    采样策略：按 episode_no 均匀采样，覆盖全剧不偏前/偏后。
+    """
+    if not ctx.reward_events or sample_count <= 0:
+        return []
+    scenes_by_id = {sc.id: sc for sc in ctx.scenes}
+    rewards_sorted = sorted(
+        [r for r in ctx.reward_events if r.episode_no is not None],
+        key=lambda r: r.episode_no,  # type: ignore[arg-type, return-value]
+    )
+    if not rewards_sorted:
+        return []
+    step = max(1, len(rewards_sorted) // sample_count)
+    picked = rewards_sorted[::step][:sample_count]
+    excerpts: list[str] = []
+    for r in picked:
+        sc = scenes_by_id.get(r.scene_id)
+        if sc is None or not sc.text:
+            continue
+        excerpts.append(sc.text[:excerpt_chars])
+    return excerpts
 
 
 def _build_reason(signals: list[SignalResult]) -> str:
