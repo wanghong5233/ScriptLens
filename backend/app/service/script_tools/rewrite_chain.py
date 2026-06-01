@@ -26,6 +26,16 @@ from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
 from service.script_tools.llm_caller import LlmCaller, ModelTier, ScoreLLMError, TokenBudget
+from service.script_tools.prompt_loader import (
+    PromptNotFoundError,
+    known_dimension_keys,
+    load_execute_dimension_guidance,
+    load_execute_system,
+    load_plan_critic,
+    load_plan_dimension_guidance,
+    load_plan_output_contract,
+    load_plan_system,
+)
 from utils.database import engine as default_engine
 
 logger = logging.getLogger(__name__)
@@ -324,6 +334,29 @@ async def propose_plan(
         overall_summary = (
             f"基于本次改进建议生成 {len(plan_steps)} 个改写步骤；"
             "优先解决最影响投资决策评分的场次。"
+        )
+
+    # critic 二阶段：用同模型不同 prompt 过滤模板话术 + 重写 rationale。
+    # 即使 critic 失败也不影响主流程 — 退回 planner 原始 plan。
+    critic_summary, plan_steps = await _critique_plan_steps(
+        plan_steps=plan_steps,
+        overall_summary=overall_summary,
+        script_overview=script_overview,
+        improvement_brief=improvement_brief,
+        diagnostic_brief=diagnostic_brief,
+        script_id=script_id,
+        caller=caller,
+        engine=engine,
+    )
+    if critic_summary:
+        overall_summary = critic_summary
+
+    if not plan_steps:
+        # critic 把所有 step 都判不合格 — 视为"planner 出的是垃圾"，让前端
+        # 看到失败而不是空 plan，agent 会重试 propose_plan。
+        raise ScoreLLMError(
+            "propose_plan: critic dropped all steps as template-only / "
+            "protagonist-violating; LLM should retry with stronger constraints"
         )
 
     return RewritePlan(
@@ -762,23 +795,9 @@ def _load_latest_verdict_snapshot(
 # ============================================================
 
 
-_PLAN_SYSTEM_MESSAGE = (
-    "你是中文 AI 漫剧（短剧）投资决策助理，面向抖音/快手等竖屏短视频投放场景。"
-    "你的任务是基于五维投资决策评分（hook/抓人力、archetype/模板力、"
-    "payoff/兑现力、monetization/变现力、producibility/可生成力）和用户点击的"
-    "具体改进建议，从剧本场次清单里选出最该改写的若干场，输出严格 JSON 的 plan。"
-    "\n\n"
-    "【短剧改写第一性原理 — 写 plan 之前必须默念三遍】\n"
-    "1. **主线和主角动机不可压缩**：男一/女一/反派是票房与 LoRA 训练成本摊薄的核心，"
-    "他们的同框、对手戏、关键转折就是这部剧本身。任何'让主角让位'、'去掉主角'、"
-    "'减少主角互动'的建议都是错误改写方向，必须 reject。\n"
-    "2. **producibility（可生成力）的真实含义不是减角色总数**：AI 漫剧的成本敏感点是"
-    "「次要角色 LoRA 训练摊薄不下来」、「换景频次过高」、「群戏（>5 人同框）渲染贵」、"
-    "「无台词工具人浪费 token」。所以减的是配角/龙套/工具人，**不是主角**。\n"
-    "3. **rationale 必须给出本场具体证据**：禁止使用「多个跨集复现角色」、「增加了制作"
-    "复杂度」、「压低复杂度」这类**没有指向具体角色或具体冲突**的模板话术。每条 rationale"
-    "必须能让读者从字面读出「这一场到底要改谁的什么戏」。模板化文案会被下游 critic 退回。"
-)
+# _PLAN_SYSTEM_MESSAGE 已经迁出到 prompts/script_studio/plan/_system.zh.md，
+# 通过 prompt_loader.load_plan_system() 按需加载。模块顶层不再保留字符串字面量，
+# 避免"改 prompt 必须改 Python"的反模式。
 
 
 def _build_plan_prompt(
@@ -798,7 +817,7 @@ def _build_plan_prompt(
     """
 
     sections: list[str] = []
-    sections.append(_PLAN_SYSTEM_MESSAGE)
+    sections.append(load_plan_system())
     sections.append("【剧本概要】")
     sections.append(_truncate(script_overview, _PLAN_OVERVIEW_MAX_CHARS))
 
@@ -820,12 +839,68 @@ def _build_plan_prompt(
     sections.append("【场次清单】（按集/场次顺序，scene_id 是唯一标识，必须原样引用）")
     sections.append(_format_scene_catalog(scene_catalog))
 
+    # 维度专属方法论：根据 improvement_brief 的主维度（用户点哪条建议就 lock 哪维）
+    # 注入对应 by_dimension/*.zh.md。dimension_brief 路径有则用，否则回退到
+    # dimension_keys[0]。这样 LLM 拿到 hook 维度建议时，会同时看到 hook 的判定
+    # 准则 + 修复方法论 + few-shot，不再裸喂"目标维度=hook"。
+    primary_dim = _pick_primary_dimension(
+        improvement_brief=improvement_brief,
+        diagnostic_brief=diagnostic_brief,
+        dimension_keys=dimension_keys,
+    )
+    if primary_dim:
+        try:
+            dim_md = load_plan_dimension_guidance(primary_dim)
+        except PromptNotFoundError:
+            # 不在已知 5 维内（极少数旧 evaluation 数据可能漏值）— skip 而非崩。
+            logger.warning(
+                "plan dimension guidance missing dim_key=%s; falling back to generic prompt",
+                primary_dim,
+            )
+        else:
+            sections.append("")
+            sections.append(dim_md)
+
     sections.append("")
     sections.append(_format_dimension_requirement(dimension_keys))
 
     sections.append("")
     sections.append(_format_output_contract(max_steps=max_steps))
     return "\n".join(sections)
+
+
+def _pick_primary_dimension(
+    *,
+    improvement_brief: Optional[Mapping[str, Any]],
+    diagnostic_brief: Optional[Mapping[str, Any]],
+    dimension_keys: List[str],
+) -> Optional[str]:
+    """挑出本次 plan 的主维度 — 仅用于加载维度专属方法论。
+
+    优先级：
+    1. improvement_brief.dimension_key（用户点击的具体建议 — 最强信号）
+    2. diagnostic_brief.dimension_key 或 diagnostic_brief.primary_dimension
+    3. dimension_keys[0]（API 调用方手动指定）
+
+    返回值必须是 ``known_dimension_keys()`` 之一才有意义；不在白名单内的返回
+    None，让上游 fallback 到无维度专属方法论的旧路径。
+    """
+    candidates: list[Any] = []
+    if improvement_brief:
+        candidates.append(improvement_brief.get("dimension_key"))
+    if diagnostic_brief:
+        candidates.append(diagnostic_brief.get("dimension_key"))
+        candidates.append(diagnostic_brief.get("primary_dimension"))
+    candidates.extend(dimension_keys)
+
+    valid = set(known_dimension_keys())
+    for raw in candidates:
+        if not raw:
+            continue
+        key = str(raw).strip().lower()
+        if key in valid:
+            return key
+    return None
 
 
 def _format_verdict_snapshot(snapshot: Mapping[str, Any]) -> str:
@@ -893,6 +968,170 @@ def _format_diagnostic_brief(brief: Mapping[str, Any]) -> str:
     return "\n".join(lines)
 
 
+async def _critique_plan_steps(
+    *,
+    plan_steps: List["PlanStep"],
+    overall_summary: str,
+    script_overview: str,
+    improvement_brief: Optional[Mapping[str, Any]],
+    diagnostic_brief: Optional[Mapping[str, Any]],
+    script_id: str,
+    caller: LlmCaller,
+    engine: Engine,
+) -> tuple[str, List["PlanStep"]]:
+    """plan-side 二阶段 critic：同模型不同 prompt 做自审。
+
+    任务（详见 prompts/script_studio/critic/plan_critic.zh.md）：
+    1. 模板话术零容忍 — 没有具体角色名 / 具体冲突的 rationale 直接打不合格
+    2. expected_changes 涉及删除 protagonist/antagonist → 不合格
+    3. 仅有"简化/减少/提升"之类笼统动词 → 不合格
+    4. 可救活的 step 由 critic 改写 rationale/expected_changes 后保留
+    5. 无法救活的 step 进 steps_dropped + 原因
+
+    Best-effort：critic LLM 调用失败 / JSON 不合法 / 返回空 → 退回原 plan_steps，
+    记 warning 但不抛 — 不让 critic 故障吃掉 planner 的合理输出。
+
+    Returns
+    -------
+    (new_overall_summary, new_plan_steps)
+        如果 critic 没动 summary，new_overall_summary 返回 ""。
+        new_plan_steps 是审核后的最终 step 列表（可能为空，由调用方决定是否
+        当作 ScoreLLMError 抛）。
+    """
+    if not plan_steps:
+        return "", plan_steps
+
+    # 主角 / 反派名单：critic 拿来做硬校验。
+    # 任何 DB 异常（fake script_id 测试 / schema drift / 表缺失）都不应该
+    # 让 critic 整条链路崩 — 降级为空名单，critic 仍能审 rationale 模板话术。
+    try:
+        role_map = _load_character_role_map(script_id=script_id, engine=engine)
+    except Exception as exc:  # noqa: BLE001 — best-effort fallback
+        logger.warning(
+            "critique_plan: _load_character_role_map failed script=%s err=%s — "
+            "using empty role map",
+            script_id,
+            exc,
+        )
+        role_map = {}
+    protagonists = sorted({name for name, role in role_map.items() if role == "protagonist"})
+    antagonists = sorted({name for name, role in role_map.items() if role == "antagonist"})
+
+    if improvement_brief:
+        improvement_brief_text = _format_improvement_brief(improvement_brief)
+    elif diagnostic_brief:
+        improvement_brief_text = _format_diagnostic_brief(diagnostic_brief)
+    else:
+        improvement_brief_text = "（本次为按维度直接出 plan，无 improvement_brief）"
+
+    plan_json_payload = {
+        "overall_summary": overall_summary,
+        "steps": [
+            {
+                "scene_id": step.scene_id,
+                "target_dimensions": list(step.target_dimensions),
+                "rationale": step.rationale,
+                "expected_changes": step.expected_changes,
+            }
+            for step in plan_steps
+        ],
+    }
+    plan_json_text = json.dumps(plan_json_payload, ensure_ascii=False, indent=2)
+
+    critic_prompt = load_plan_critic(
+        script_overview=_truncate(script_overview, _PLAN_OVERVIEW_MAX_CHARS),
+        improvement_brief_text=improvement_brief_text,
+        character_protagonist_block=" / ".join(protagonists) if protagonists else "（暂无明确主角标注）",
+        character_antagonist_block=" / ".join(antagonists) if antagonists else "（暂无明确反派标注）",
+        plan_json=plan_json_text,
+    )
+
+    try:
+        resp = await caller.call_json(
+            critic_prompt,
+            tier=ModelTier.PRIMARY,
+            temperature=0.2,
+            max_tokens=TokenBudget.REWRITE_EXCERPT,
+            chain_name="rewrite_plan_critic",
+        )
+    except ScoreLLMError as exc:
+        logger.warning(
+            "critique_plan LLM call failed script=%s err=%s — fallback to planner output",
+            script_id,
+            exc,
+        )
+        return "", plan_steps
+
+    parsed = resp.parsed
+    if not isinstance(parsed, dict):
+        logger.warning(
+            "critique_plan returned non-dict (type=%s) — fallback",
+            type(parsed).__name__,
+        )
+        return "", plan_steps
+
+    # critic 必须显式提供 steps_kept 字段（即使空）— 缺字段说明 LLM 跑偏写成
+    # 了 planner 格式（"steps": [...]）而不是 critic 格式，这种情况下信任
+    # planner 原始输出，不让 critic 误杀全部 step。
+    if "steps_kept" not in parsed or not isinstance(parsed.get("steps_kept"), list):
+        logger.warning(
+            "critique_plan: missing or non-list steps_kept (got keys=%s) — "
+            "fallback to planner output",
+            list(parsed.keys()),
+        )
+        return "", plan_steps
+
+    raw_kept = parsed.get("steps_kept") or []
+    raw_dropped = parsed.get("steps_dropped") or []
+    new_summary = str(parsed.get("overall_summary") or "").strip()
+
+    # 把 critic 输出映射回 PlanStep。scene_id 必须能在原 plan_steps 里找到，
+    # 否则视为 critic 幻觉，drop 这条。
+    step_by_scene = {step.scene_id: step for step in plan_steps}
+    new_steps: list["PlanStep"] = []
+    for raw in raw_kept:
+        if not isinstance(raw, dict):
+            continue
+        sid = str(raw.get("scene_id") or "").strip()
+        original = step_by_scene.get(sid)
+        if original is None:
+            logger.warning(
+                "critique_plan kept-step with unknown scene_id=%s (script=%s) — drop",
+                sid or "<empty>",
+                script_id,
+            )
+            continue
+        rationale = _truncate(str(raw.get("rationale") or original.rationale).strip(), 200)
+        expected_changes = _truncate(
+            str(raw.get("expected_changes") or original.expected_changes).strip(),
+            240,
+        )
+        # target_dimensions 不允许 critic 改 — 维度是 planner 选的
+        new_steps.append(
+            PlanStep(
+                scene_id=original.scene_id,
+                scene_label=original.scene_label,
+                episode_no=original.episode_no,
+                scene_no=original.scene_no,
+                target_dimensions=list(original.target_dimensions),
+                rationale=rationale,
+                expected_changes=expected_changes,
+                current_excerpt=original.current_excerpt,
+            )
+        )
+
+    dropped_count = len([d for d in raw_dropped if isinstance(d, dict)])
+    logger.info(
+        "critique_plan script=%s kept=%d dropped=%d original=%d",
+        script_id,
+        len(new_steps),
+        dropped_count,
+        len(plan_steps),
+    )
+
+    return new_summary, new_steps
+
+
 def _format_character_buckets(by_role: Mapping[str, Sequence[str]]) -> str:
     """渲染单场角色按 role 分桶后的可读字符串。
 
@@ -957,10 +1196,54 @@ def _format_scene_catalog(catalog: List[Dict[str, Any]]) -> str:
         by_role = sc.get("characters_by_role") or {}
         chars_str = _format_character_buckets(by_role) if isinstance(by_role, Mapping) else ""
         chars_tag = f" [{chars_str}]" if chars_str else ""
-        digest = str(sc.get("digest") or "").strip()
+        # brief_json 优先：评分阶段（或将来的 _ensure_scene_briefs）已经预消化了
+        # 「场内冲突 / 主角行为 / 配角行为 / 可压缩点」结构化信息，比 110 字 digest
+        # 末截裸文本对 LLM 友好得多。NULL 就 fallback。
+        body = _format_scene_brief(sc.get("brief_json")) or str(sc.get("digest") or "").strip()
         prefix = "★ " if sc.get("is_priority") else "- "
-        rows.append(f"{prefix}[{' | '.join(head_bits)}]{chars_tag} {digest}")
+        rows.append(f"{prefix}[{' | '.join(head_bits)}]{chars_tag} {body}")
     return "\n".join(rows)
+
+
+def _format_scene_brief(brief: Any) -> str:
+    """把 ``scenes.brief_json`` 渲染成单行 LLM 友好的简介。
+
+    schema（与 _ensure_scene_briefs 输出对齐，由后续 commit 落地）:
+
+    ::
+
+        {{
+          "conflict": "<= 30 字，场内核心冲突一句话",
+          "protagonist_actions": ["<主角A 做了 X>"],
+          "supporting_actions": ["<配角 X 做了 Y>"],
+          "removable_characters": ["<可删配角名>"],
+          "scene_function": "<推进主线|铺垫|过渡|高潮|闲笔>",
+        }}
+
+    现阶段 brief_json 都是 NULL（生成器还没接入），函数返回 ""，调用方 fallback
+    到 digest。先在 schema 层面让 catalog 读取就绪，下游 plan/execute prompt
+    无需再改一次。
+    """
+    if not isinstance(brief, Mapping):
+        return ""
+    parts: list[str] = []
+    conflict = str(brief.get("conflict") or "").strip()
+    if conflict:
+        parts.append(f"【冲突】{conflict}")
+    func = str(brief.get("scene_function") or "").strip()
+    if func:
+        parts.append(f"【功能】{func}")
+    protagonist_actions = brief.get("protagonist_actions")
+    if isinstance(protagonist_actions, list) and protagonist_actions:
+        head = "；".join(str(a).strip() for a in protagonist_actions[:2] if str(a).strip())
+        if head:
+            parts.append(f"【主线动作】{head}")
+    removable = brief.get("removable_characters")
+    if isinstance(removable, list) and removable:
+        names = "、".join(str(r).strip() for r in removable if str(r).strip())
+        if names:
+            parts.append(f"【可压缩】{names}")
+    return " ".join(parts) if parts else ""
 
 
 def _format_dimension_requirement(dim_keys: List[str]) -> str:
@@ -975,40 +1258,24 @@ def _format_dimension_requirement(dim_keys: List[str]) -> str:
 
 
 def _format_output_contract(*, max_steps: int) -> str:
-    return (
-        "【输出契约】严格 JSON，schema：\n"
-        "{\n"
-        '  "overall_summary": "≤ 100 字，本计划要解决什么、预期把哪类信号补齐",\n'
-        '  "steps": [\n'
-        "    {\n"
-        '      "scene_id": "<必须来自上面场次清单的 scene_id，不允许编造>",\n'
-        '      "target_dimensions": ["<维度键，1-3 个，例如 producibility / hook>"],\n'
-        '      "rationale": "≤ 120 字：必须点出本场具体哪个角色/哪个冲突触发了短板，'
-        '禁止泛化为「多个跨集复现角色」「制作复杂度」这类无具体指向的模板话术",\n'
-        '      "expected_changes": "≤ 150 字：必须给出具体可执行的改动 — 例如「把第三段陆斯言'
-        '的台词改为画外音」「合并邢醒到第14场，本场只保留姜栀枝独白」；禁止笼统说「简化」「减少」"\n'
-        "    }\n"
-        "  ]\n"
-        "}\n\n"
-        "约束：\n"
-        f"1. steps 数量 1~{max_steps} 条，按优先级降序排列；若全剧确无可改场次，allow steps=[]。\n"
-        "2. scene_id 必须原样取自场次清单；不要拼接、不要截断、不要发明。\n"
-        "3. 优先解决最影响投资决策评分的场次（最贴近本次建议/诊断信号的几场）。\n"
-        "4. rationale 与 expected_changes 都用中文，不要复述场次清单原文，提炼后给指令。\n"
-        "5. **不允许针对主角（protagonist）的存在本身提出删除/压缩建议**：主角同框、对手戏、"
-        "情感线是短剧主线，是 LoRA 成本摊薄的核心。producibility 类建议只能落在配角/龙套/"
-        "无台词工具人/换景/群戏密度上。如果某场角色全是主角，应该跳过这场而不是硬选。\n"
-        "6. **rationale 模板话术零容忍**：以下短语在 rationale 中出现一次就算 step 失败 — "
-        "「多个跨集复现角色」「增加了制作复杂度」「降低复杂度」「一致性负担」「LoRA 复用」"
-        "（除非紧跟具体角色名 + 具体出场分析）。要求每条 rationale 至少包含一个本场具体角色名"
-        "或具体冲突描述。\n"
-        "7. 输出必须是合法 JSON 对象，不要包裹 ```json 代码块，不要附加任何解释文本。"
-    )
+    """渲染 plan 阶段 output contract 段。
+
+    实际内容由 ``prompts/script_studio/plan/_output_contract.zh.md`` 维护；
+    本函数仅做参数注入。保留函数签名以避免外部 caller 改动。
+    """
+    return load_plan_output_contract(max_steps=max_steps)
 
 
-_EXECUTE_PROMPT = """你是中文短剧资深编剧。请基于整剧上下文对目标场进行改写。
-
-【整剧概要】
+# execute prompt 模板。
+#
+# 关键设计：system_message 和 dimension_guidance 是 markdown 文件加载出来的，里面
+# 可能含 `{...}` 字面（比如 JSON 例子）。如果把它们和 scene_text 一起塞进 .format()，
+# loader 输出里的 `{` 会被当作占位符触发 KeyError。
+#
+# 解法：模板里**不**把 system_message / dimension_guidance 作为占位符；先 .format()
+# 注入"业务变量"，再用普通字符串拼接把 system_message / dimension_guidance
+# 加在前面。这样 loader 输出永远不被二次解析。
+_EXECUTE_PROMPT_TEMPLATE = """【整剧概要】
 {script_overview}
 
 【人物表】
@@ -1030,24 +1297,10 @@ _EXECUTE_PROMPT = """你是中文短剧资深编剧。请基于整剧上下文�
 【改写动作指令】
 {expected_changes}
 
-约束：
-1. 只输出目标场的新文本，不改前后场。
-2. 保持角色、世界观、核心事件连续性，不得引入新主线。
-3. 字数与原文尽量同量级（允许上下浮动约 30%）。
-4. 多维同时优化时优先保证主线推进与角色动机清晰。
-5. **不允许删除标记为"主角"或"反派"的角色**：他们的同框/对手戏/情感线是短剧主线
-   骨架，是 LoRA 训练成本摊薄的核心。如果 plan 的 expected_changes 看起来要求
-   去掉主角/反派，应当**仅压缩他们的台词或换景**，而不是把他们从场内移除；如果
-   完全无法在不删主角的前提下完成 plan 指令，直接保留原文 + 在 rationale 里说明
-   "本场无法在保留主线下执行该 plan，已保留原文"。
-6. **可压缩的对象只有配角/龙套/无台词工具人**：删多余的功能性角色（只为见证或
-   报信而存在）、合并群戏到独白、把次要角色的台词改成画外音/字幕 — 这些是
-   producibility 改写的合规手段。
-
 输出严格 JSON：
 {{
   "rewritten_text": "<改写后的整段场景文本>",
-  "rationale": "<≤150字，说明主要改动及提分原因>"
+  "rationale": "<= 150 字，说明主要改动及提分原因>"
 }}"""
 
 
@@ -1081,7 +1334,22 @@ async def execute_plan_step(
     target_dims_text = " + ".join(
         f"{dim}（{_INVESTMENT_DIM_LABELS_ZH.get(dim, dim)}）" for dim in dims
     )
-    prompt = _EXECUTE_PROMPT.format(
+
+    # 维度专属方法论：execute 阶段按 target_dimensions[0] 注入。如果调用方传了
+    # 多维，只用主维（避免把 5 份方法论塞进 single-scene rewrite 撑爆 prompt）。
+    primary_dim = dims[0] if dims else None
+    dimension_guidance = ""
+    if primary_dim:
+        try:
+            dimension_guidance = load_execute_dimension_guidance(primary_dim)
+        except PromptNotFoundError:
+            # 不在已知 5 维内：execute 仍能跑（只是没有维度专属指令）—— 不抛。
+            logger.warning(
+                "execute dimension guidance missing dim_key=%s; using generic prompt",
+                primary_dim,
+            )
+
+    business_block = _EXECUTE_PROMPT_TEMPLATE.format(
         script_overview=ctx["script_overview"],
         characters_block=ctx["characters_block"],
         prev_scenes_block=ctx["prev_scenes_block"],
@@ -1091,6 +1359,15 @@ async def execute_plan_step(
         target_dimensions_text=target_dims_text,
         expected_changes=expected_changes,
     )
+    # 拼接顺序：system message → dimension guidance → business block。
+    # 不走 .format，避免 markdown 中的 `{...}` 字面被二次解析。
+    prompt_parts = [load_execute_system()]
+    if dimension_guidance:
+        prompt_parts.append(dimension_guidance)
+    else:
+        prompt_parts.append("（本次改写未匹配到维度专属方法论。）")
+    prompt_parts.append(business_block)
+    prompt = "\n\n".join(prompt_parts)
 
     caller = caller or LlmCaller()
     try:

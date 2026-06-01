@@ -298,3 +298,181 @@ def test_execute_plan_step_rejects_legacy_dimensions() -> None:
             )
 
     asyncio.run(_run())
+
+
+def test_plan_prompt_includes_dimension_guidance_and_first_principles(
+    monkeypatch,
+) -> None:
+    """C 档：plan prompt 必须按 dimension_key 注入维度专属方法论 md + 第一性原理。
+
+    回归点：dimension_key=producibility 时，prompt 应当包含纠正"减角色"误读的
+    维度方法论文案（来自 prompts/script_studio/plan/by_dimension/producibility.zh.md）
+    以及禁止删主角的硬约束。
+    """
+    from service.script_tools import rewrite_chain as chain
+
+    fake_catalog = [
+        {
+            "scene_id": "scene-aaa",
+            "episode_no": 1,
+            "scene_no": "1",
+            "scene_label": "群戏",
+            "characters_raw": ["主A", "配B", "龙套C"],
+            "characters_by_role": {
+                "protagonist": ["主A"],
+                "antagonist": [],
+                "support": ["配B"],
+                "minor": ["龙套C"],
+            },
+            "brief_json": None,
+            "digest": "群戏场。",
+        }
+    ]
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "短剧概要。")
+    monkeypatch.setattr(chain, "_load_latest_verdict_snapshot", lambda **_k: None)
+    monkeypatch.setattr(chain, "_load_scene_catalog", lambda **_k: fake_catalog)
+
+    captured: dict[str, str] = {}
+    call_count = {"n": 0}
+
+    planner_response = LLMResponse(
+        raw="{}",
+        parsed={
+            "overall_summary": "压缩 producibility 短板",
+            "steps": [
+                {
+                    "scene_id": "scene-aaa",
+                    "target_dimensions": ["producibility"],
+                    "rationale": "本场配角配B和龙套C同框",
+                    "expected_changes": "合并配B/龙套C",
+                }
+            ],
+        },
+        provider="openai",
+        model="gpt-test",
+        elapsed_ms=42,
+    )
+    critic_response = LLMResponse(
+        raw="{}",
+        parsed={
+            "overall_summary": "压缩 producibility 短板",
+            "steps_kept": [
+                {
+                    "scene_id": "scene-aaa",
+                    "target_dimensions": ["producibility"],
+                    "rationale": "本场配角配B和龙套C同框",
+                    "expected_changes": "合并配B/龙套C",
+                    "critic_action": "kept",
+                }
+            ],
+            "steps_dropped": [],
+        },
+        provider="openai",
+        model="gpt-test",
+        elapsed_ms=42,
+    )
+
+    class _StagedCaller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                captured["planner_prompt"] = prompt
+                return planner_response
+            captured["critic_prompt"] = prompt
+            return critic_response
+
+    async def _run():
+        plan = await propose_plan(
+            script_id="script-fp",
+            improvement_brief={
+                "title": "压缩 producibility 短板",
+                "rationale": "群戏密度高",
+                "dimension_key": "producibility",
+                "dimension_label": "可生成力",
+                "signal_key": "group_density",
+                "evidence_ref_ids": [],
+            },
+            caller=_StagedCaller(),
+        )
+        assert plan.steps and plan.steps[0].scene_id == "scene-aaa"
+        body = captured["planner_prompt"]
+        # 第一性原理硬约束
+        assert "短剧改写第一性原理" in body
+        assert "主角必须复用" in body or "主角的高频出现" in body
+        # producibility 维度专属方法论（md 加载）
+        assert "## 维度：producibility" in body
+        assert "Bad rationale" in body  # 维度 md 含 few-shot
+        # 输出契约里禁止主角删除规则
+        assert "主角 / 反派禁止删除" in body
+        # critic 阶段也调了
+        assert "critic_prompt" in captured
+        assert "你是中文 AI 漫剧" in captured["critic_prompt"]
+        assert "scene-aaa" in captured["critic_prompt"]
+
+    asyncio.run(_run())
+
+
+def test_critique_plan_fallback_when_critic_returns_planner_shape(monkeypatch) -> None:
+    """C 档：critic LLM 跑偏返回 planner 格式时，propose_plan 必须 fallback 到
+    planner 原始输出，而不是误把所有 step 当作 dropped。"""
+    from service.script_tools import rewrite_chain as chain
+
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "短剧。")
+    monkeypatch.setattr(chain, "_load_latest_verdict_snapshot", lambda **_k: None)
+    monkeypatch.setattr(
+        chain,
+        "_load_scene_catalog",
+        lambda **_k: [
+            {
+                "scene_id": "scene-x",
+                "episode_no": 1,
+                "scene_no": "1",
+                "scene_label": "场",
+                "characters_raw": ["主A"],
+                "characters_by_role": {
+                    "protagonist": ["主A"],
+                    "antagonist": [],
+                    "support": [],
+                    "minor": [],
+                },
+                "brief_json": None,
+                "digest": "x",
+            }
+        ],
+    )
+
+    # planner 和 critic 都返回 planner-shape JSON — critic 必须 fallback
+    same_response = LLMResponse(
+        raw="{}",
+        parsed={
+            "overall_summary": "planner 输出",
+            "steps": [
+                {
+                    "scene_id": "scene-x",
+                    "target_dimensions": ["hook"],
+                    "rationale": "主A 开场没冲突",
+                    "expected_changes": "把第 1 行台词改为强冲突",
+                }
+            ],
+        },
+        provider="openai",
+        model="gpt-test",
+        elapsed_ms=10,
+    )
+
+    class _AlwaysPlannerShape:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = prompt, kwargs
+            return same_response
+
+    async def _run():
+        plan = await propose_plan(
+            script_id="script-fb",
+            dimension_keys=["hook"],
+            caller=_AlwaysPlannerShape(),
+        )
+        assert plan.steps and plan.steps[0].scene_id == "scene-x"
+        assert "主A 开场没冲突" in plan.steps[0].rationale
+
+    asyncio.run(_run())
