@@ -509,7 +509,7 @@ def _load_drama_tags(*, script_id: str, engine: Engine) -> list[dict[str, Any]]:
         conf_raw = row.get("confidence")
         try:
             confidence = float(conf_raw) if conf_raw is not None else 0.0
-            except (TypeError, ValueError):
+        except (TypeError, ValueError):
             confidence = 0.0
         out.append({"key": "drama_tags", "value": value, "confidence": round(confidence, 4)})
     return out
@@ -1760,9 +1760,9 @@ def _load_baseline_dimension(*, script_id: str, dimension: str, engine: Engine) 
             return empty
         for item in dims:
             if not isinstance(item, dict):
-            continue
+                continue
             if str(item.get("key") or "").strip() != dimension:
-            continue
+                continue
             return {
                 "score": item.get("score"),
                 "tier": item.get("tier"),
@@ -1918,10 +1918,10 @@ def _insert_scoring_run_running(
     """
     now = datetime.utcnow()
     try:
-    with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
                     INSERT INTO scriptlens.scoring_runs (
                         id, script_id, rubric_version, tag_set_ver, input_hash,
                         genre_scope, episode_count, plot_unit_count,
@@ -1935,9 +1935,9 @@ def _insert_scoring_run_running(
                         'running', NULL, :created_at
                     )
                     ON CONFLICT (id) DO NOTHING
-                """
-            ),
-            {
+                    """
+                ),
+                {
                     "id": run_id,
                     "script_id": script_id,
                     "rubric_version": _SCORE_VER,
