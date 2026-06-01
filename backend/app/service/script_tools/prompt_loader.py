@@ -125,6 +125,15 @@ def load_plan_critic(**context: Any) -> str:
     return load_prompt("critic", "plan_critic.zh.md", **context)
 
 
+def load_scene_brief_prompt(**context: Any) -> str:
+    """读 scene_brief 生成 prompt（rewrite_chain._ensure_scene_briefs 用）。
+
+    需要的 context 变量见 ``prompts/script_studio/brief/scene_brief.zh.md``：
+    episode_no / scene_no / scene_label / characters_block / scene_text。
+    """
+    return load_prompt("brief", "scene_brief.zh.md", **context)
+
+
 def known_dimension_keys() -> tuple[str, ...]:
     """返回当前模板系统支持的维度 key 元组（与 plan/by_dimension/*.zh.md 同步）。"""
     return ("hook", "archetype", "payoff", "monetization", "producibility")

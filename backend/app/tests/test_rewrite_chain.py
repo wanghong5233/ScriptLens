@@ -4,6 +4,7 @@ import pytest
 
 from service.script_tools.llm_caller import LLMResponse, ScoreLLMError
 from service.script_tools.rewrite_chain import (
+    SceneBrief,
     execute_plan_step,
     propose_plan,
 )
@@ -474,5 +475,281 @@ def test_critique_plan_fallback_when_critic_returns_planner_shape(monkeypatch) -
         )
         assert plan.steps and plan.steps[0].scene_id == "scene-x"
         assert "主A 开场没冲突" in plan.steps[0].rationale
+
+    asyncio.run(_run())
+
+
+# ============================================================
+# C1c: scene_brief 生成器单测
+# ============================================================
+
+
+def test_scene_brief_pydantic_coerces_loose_llm_outputs() -> None:
+    """SceneBrief schema 必须对 LLM 常见格式偏差做容错：
+
+    - scene_function/group_density 缺失或写成"中"/"高"等中文，回退到合法枚举
+    - protagonist_actions 吐成 scalar string，自动转单元素 list
+    - removable_characters 吐 None，转空 list
+    """
+    b = SceneBrief.model_validate(
+        {
+            "conflict": "妈拒绝我相亲",
+            "scene_function": None,
+            "group_density": "高",
+            "protagonist_actions": "我 摔了门",
+            "supporting_actions": [],
+            "removable_characters": None,
+        }
+    )
+    assert b.scene_function == "过渡"
+    assert b.group_density == "high"
+    assert b.protagonist_actions == ["我 摔了门"]
+    assert b.supporting_actions == []
+    assert b.removable_characters == []
+
+
+def test_generate_single_brief_success_returns_brief(monkeypatch) -> None:
+    """_generate_single_brief：LLM 返回合法 SceneBrief 时直接落 pydantic 模型。"""
+    from service.script_tools import rewrite_chain as chain
+
+    captured: dict[str, str] = {}
+
+    class _FakeCaller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            captured["prompt"] = prompt
+            return LLMResponse(
+                raw="{}",
+                parsed=SceneBrief(
+                    conflict="妈拒绝我相亲",
+                    scene_function="推进主线",
+                    protagonist_actions=["我 反驳妈"],
+                    supporting_actions=["妈 摔筷子"],
+                    removable_characters=[],
+                    group_density="low",
+                ),
+                provider="openai",
+                model="gpt-test",
+                elapsed_ms=20,
+            )
+
+    async def _run():
+        brief = await chain._generate_single_brief(
+            scene_row={
+                "id": "scene-1",
+                "episode_no": 1,
+                "scene_no": "1",
+                "scene_label": "厨房早餐",
+                "characters": ["我", "妈"],
+                "text": "妈把饭碗摔了。\n我：我不去相亲。",
+            },
+            role_map={"我": "protagonist", "妈": "support"},
+            caller=_FakeCaller(),
+        )
+        assert isinstance(brief, SceneBrief)
+        assert brief.conflict == "妈拒绝我相亲"
+        assert brief.scene_function == "推进主线"
+        # prompt 应当带上角色分桶和原文
+        body = captured["prompt"]
+        assert "我" in body and "妈" in body
+        assert "厨房早餐" in body
+        assert "我不去相亲" in body
+
+    asyncio.run(_run())
+
+
+def test_generate_single_brief_llm_error_returns_none(monkeypatch) -> None:
+    """LLM 抛 ScoreLLMError / Timeout / 任意异常时，函数静默返回 None
+    （best-effort 设计，不破坏主流程）。
+    """
+    from service.script_tools import rewrite_chain as chain
+
+    class _FailingCaller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = prompt, kwargs
+            raise ScoreLLMError("provider-down")
+
+    async def _run():
+        brief = await chain._generate_single_brief(
+            scene_row={
+                "id": "scene-1",
+                "episode_no": 1,
+                "scene_no": "1",
+                "scene_label": "x",
+                "characters": ["我"],
+                "text": "原文。",
+            },
+            role_map={},
+            caller=_FailingCaller(),
+        )
+        assert brief is None
+
+    asyncio.run(_run())
+
+
+def test_propose_plan_invokes_ensure_scene_briefs_for_priority(monkeypatch) -> None:
+    """C1c：propose_plan 在解析 improvement_brief 拿到 priority_scene_ids 后，
+    必须调 _ensure_scene_briefs(priority_ids) 做预热（best-effort，失败也不影响主路径）。
+    """
+    from service.script_tools import rewrite_chain as chain
+
+    fake_catalog = [
+        {
+            "scene_id": "scene-prio",
+            "episode_no": 1,
+            "scene_no": "1",
+            "scene_label": "厨房早餐",
+            "characters_raw": ["我", "妈"],
+            "characters_by_role": {
+                "protagonist": ["我"],
+                "antagonist": [],
+                "support": ["妈"],
+                "minor": [],
+            },
+            "brief_json": None,
+            "digest": "x",
+        }
+    ]
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "短剧。")
+    monkeypatch.setattr(chain, "_load_latest_verdict_snapshot", lambda **_k: None)
+    monkeypatch.setattr(chain, "_load_scene_catalog", lambda **_k: fake_catalog)
+
+    ensure_calls: list[list[str]] = []
+
+    async def _fake_ensure(scene_ids, **kwargs):  # noqa: ANN001
+        _ = kwargs
+        ensure_calls.append(list(scene_ids))
+        return 0  # 0 个新写入 — 不触发 catalog 重新加载
+
+    monkeypatch.setattr(chain, "_ensure_scene_briefs", _fake_ensure)
+
+    class _Caller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = prompt, kwargs
+            return LLMResponse(
+                raw="{}",
+                parsed={
+                    "overall_summary": "x",
+                    "steps_kept": [
+                        {
+                            "scene_id": "scene-prio",
+                            "target_dimensions": ["hook"],
+                            "rationale": "本场开场没有强钩子",
+                            "expected_changes": "增加 3 秒强冲突镜头",
+                            "critic_action": "kept",
+                        }
+                    ],
+                    "steps_dropped": [],
+                    "steps": [
+                        {
+                            "scene_id": "scene-prio",
+                            "target_dimensions": ["hook"],
+                            "rationale": "本场开场没有强钩子",
+                            "expected_changes": "增加 3 秒强冲突镜头",
+                        }
+                    ],
+                },
+                provider="openai",
+                model="gpt-test",
+                elapsed_ms=15,
+            )
+
+    async def _run():
+        plan = await propose_plan(
+            script_id="script-bf",
+            improvement_brief={
+                "title": "hook 短板",
+                "rationale": "x",
+                "dimension_key": "hook",
+                "dimension_label": "抓人力",
+                "evidence_ref_ids": ["scene-prio"],
+            },
+            caller=_Caller(),
+        )
+        assert plan.steps
+        # ensure 必须被调用过一次，传入的就是 evidence_ref_ids
+        assert ensure_calls, "_ensure_scene_briefs was not invoked"
+        assert "scene-prio" in ensure_calls[0]
+
+    asyncio.run(_run())
+
+
+def test_propose_plan_continues_when_ensure_briefs_fails(monkeypatch) -> None:
+    """C1c best-effort：_ensure_scene_briefs 抛异常时 propose_plan 必须继续走完
+    plan/critic，不能把 brief 故障传染到主路径。
+    """
+    from service.script_tools import rewrite_chain as chain
+
+    fake_catalog = [
+        {
+            "scene_id": "scene-x",
+            "episode_no": 1,
+            "scene_no": "1",
+            "scene_label": "x",
+            "characters_raw": ["我"],
+            "characters_by_role": {
+                "protagonist": ["我"],
+                "antagonist": [],
+                "support": [],
+                "minor": [],
+            },
+            "brief_json": None,
+            "digest": "x",
+        }
+    ]
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "短剧。")
+    monkeypatch.setattr(chain, "_load_latest_verdict_snapshot", lambda **_k: None)
+    monkeypatch.setattr(chain, "_load_scene_catalog", lambda **_k: fake_catalog)
+
+    async def _boom(*_a, **_k):
+        raise RuntimeError("brief storage offline")
+
+    monkeypatch.setattr(chain, "_ensure_scene_briefs", _boom)
+
+    class _Caller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = prompt, kwargs
+            return LLMResponse(
+                raw="{}",
+                parsed={
+                    "overall_summary": "fallback ok",
+                    "steps_kept": [
+                        {
+                            "scene_id": "scene-x",
+                            "target_dimensions": ["hook"],
+                            "rationale": "本场开场没有强钩子",
+                            "expected_changes": "增加 3 秒强冲突镜头",
+                            "critic_action": "kept",
+                        }
+                    ],
+                    "steps_dropped": [],
+                    "steps": [
+                        {
+                            "scene_id": "scene-x",
+                            "target_dimensions": ["hook"],
+                            "rationale": "本场开场没有强钩子",
+                            "expected_changes": "增加 3 秒强冲突镜头",
+                        }
+                    ],
+                },
+                provider="openai",
+                model="gpt-test",
+                elapsed_ms=10,
+            )
+
+    async def _run():
+        plan = await propose_plan(
+            script_id="script-ge",
+            improvement_brief={
+                "title": "hook 短板",
+                "rationale": "x",
+                "dimension_key": "hook",
+                "dimension_label": "抓人力",
+                "evidence_ref_ids": ["scene-x"],
+            },
+            caller=_Caller(),
+        )
+        assert plan.steps  # plan 必须照常返回
+        assert plan.steps[0].scene_id == "scene-x"
 
     asyncio.run(_run())

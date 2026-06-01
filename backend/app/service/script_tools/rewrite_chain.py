@@ -16,6 +16,7 @@ LLM 工作流：剧本概要 + 评分快照 + 场次清单 + 改进/诊断上下
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from dataclasses import dataclass, field
@@ -35,6 +36,7 @@ from service.script_tools.prompt_loader import (
     load_plan_dimension_guidance,
     load_plan_output_contract,
     load_plan_system,
+    load_scene_brief_prompt,
 )
 from utils.database import engine as default_engine
 
@@ -73,6 +75,24 @@ _PLAN_SCENE_DIGEST_CHARS = 110  # 每场摘要长度（单字），太长会撑�
 _PLAN_MAX_SCENES_IN_PROMPT = 120  # 场次清单上限；100 场剧本全塞、120+ 场剧本按优先级裁剪
 _PLAN_OVERVIEW_MAX_CHARS = 600  # 整剧概要最大长度
 _PLAN_TEMPERATURE = 0.3
+
+# scene_brief 生成参数（C1c）
+#
+# brief 是给 plan/execute LLM 看的预消化简介，落库到 scriptlens.scenes.brief_json。
+# 生成时单场调用 1 次 LLM，写库后下次直接复用，直到原文被改写（execute_plan_step
+# 改写后置 NULL）才重新生成。
+#
+# - _BRIEF_SCENE_TEXT_CHARS: 喂给 LLM 看的原文截断（单场）。1500 字够覆盖 90% 短剧
+#   单场长度；超过的尾部信息在 brief 里通常体现不出来。
+# - _BRIEF_PARALLELISM: ensure 时的最大并发；qwen-max 提供商一般支持 5-8 并发不限速。
+#   选 4 保守，单次 plan 触发 ≤ 4 个 brief 也能在 ~6s 内完工。
+# - _BRIEF_TIMEOUT_S: 单 brief 调用超时。生成失败留 NULL，下次 plan 再尝试。
+# - _BRIEF_MAX_PER_PLAN: 单次 propose_plan 触发的 brief 上限 —— 只补 priority 场。
+#   非 priority 的场让用户慢慢访问 / 评分阶段批跑时补齐。
+_BRIEF_SCENE_TEXT_CHARS = 1500
+_BRIEF_PARALLELISM = 4
+_BRIEF_TIMEOUT_S = 25.0
+_BRIEF_MAX_PER_PLAN = 6
 
 
 # ============================================================
@@ -117,6 +137,62 @@ class _LlmPlanResponse(BaseModel):
 
     overall_summary: str = Field(..., min_length=1, max_length=400)
     steps: List[_LlmPlanStep] = Field(default_factory=list, max_length=_MAX_PLAN_STEPS)
+
+
+class SceneBrief(BaseModel):
+    """单场结构化简介 — 落库到 ``scriptlens.scenes.brief_json``。
+
+    生成逻辑见 ``_ensure_scene_briefs``；展示逻辑见 ``_format_scene_brief``。
+    plan / execute / critic 都读这同一份 brief，避免每条链路自己再解析原文。
+
+    LLM 生成时强约束 schema（``LlmCaller.call_json(validate_with=SceneBrief)``），
+    格式错的输出会自动被 caller 重试。
+    """
+
+    conflict: str = Field(..., min_length=1, max_length=80)
+    scene_function: str = Field(..., min_length=1, max_length=20)
+    protagonist_actions: List[str] = Field(default_factory=list, max_length=5)
+    supporting_actions: List[str] = Field(default_factory=list, max_length=5)
+    removable_characters: List[str] = Field(default_factory=list, max_length=10)
+    group_density: str = Field(default="mid", max_length=10)
+
+    @field_validator("scene_function", mode="before")
+    @classmethod
+    def _coerce_scene_function(cls, v: Any) -> str:
+        if v is None:
+            return "过渡"
+        return str(v).strip() or "过渡"
+
+    @field_validator("group_density", mode="before")
+    @classmethod
+    def _coerce_group_density(cls, v: Any) -> str:
+        if v is None:
+            return "mid"
+        # LLM 偶尔写"中"或"mid_high"，做一次容错收窄到 high/mid/low
+        s = str(v).strip().lower()
+        if s in {"high", "高"}:
+            return "high"
+        if s in {"low", "低"}:
+            return "low"
+        return "mid"
+
+    @field_validator(
+        "protagonist_actions",
+        "supporting_actions",
+        "removable_characters",
+        mode="before",
+    )
+    @classmethod
+    def _coerce_str_list(cls, v: Any) -> List[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            # LLM 偶尔吐 scalar 而非 list — 转单元素列表
+            cleaned = v.strip()
+            return [cleaned] if cleaned else []
+        if isinstance(v, list):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return []
 
 
 @dataclass
@@ -245,6 +321,34 @@ async def propose_plan(
         len(priority_scene_ids),
         dim_keys,
     )
+
+    # 对 priority 场（评分判定的短板证据场）做 brief 预热：让 plan LLM 看到的
+    # 是「【冲突】xxx 【可压缩】yyy」这种结构化预消化，而不是 110 字 digest 末截。
+    # 一次最多生成 _BRIEF_MAX_PER_PLAN 个（≈ top_improvements top-5 量级），
+    # 控制 plan 主路径延迟在 LLM 单次响应 ~5-8s 内。
+    # ensure 失败完全降级到 digest 路径，不影响主流程。
+    if priority_scene_ids:
+        try:
+            written = await _ensure_scene_briefs(
+                priority_scene_ids,
+                script_id=script_id,
+                caller=caller,
+                engine=engine,
+            )
+            if written > 0:
+                # 重新加载 catalog 才能让 _format_scene_catalog 看到新写入的 brief_json
+                scene_catalog = _load_scene_catalog(
+                    script_id=script_id,
+                    engine=engine,
+                    priority_scene_ids=priority_scene_ids,
+                )
+        except Exception as exc:  # noqa: BLE001 — ensure 是 best-effort
+            logger.warning(
+                "propose_plan _ensure_scene_briefs failed script=%s err=%s — "
+                "falling back to digest-only catalog",
+                script_id,
+                exc,
+            )
 
     prompt = _build_plan_prompt(
         script_overview=script_overview,
@@ -966,6 +1070,242 @@ def _format_diagnostic_brief(brief: Mapping[str, Any]) -> str:
             tag = f"（{dim_label}）" if dim_label else ""
             lines.append(f"  {idx}. {title}{tag}")
     return "\n".join(lines)
+
+
+async def _generate_single_brief(
+    *,
+    scene_row: Mapping[str, Any],
+    role_map: Mapping[str, str],
+    caller: LlmCaller,
+) -> Optional[SceneBrief]:
+    """对单场调 LLM 生成 SceneBrief。失败返回 None（不抛）。
+
+    内部 try/except 包住所有异常 — best-effort 设计：scene_brief 是 plan/execute
+    的预消化缓存，缺失了下游会 fallback 到 110 字 digest，不能让 brief 故障吃掉
+    主流程。
+    """
+    scene_id = str(scene_row.get("id") or "").strip()
+    if not scene_id:
+        return None
+    raw_text = str(scene_row.get("text") or "")
+    scene_text = raw_text[:_BRIEF_SCENE_TEXT_CHARS].strip()
+    if not scene_text:
+        return None
+
+    raw_chars = scene_row.get("characters") or []
+    if not isinstance(raw_chars, (list, tuple)):
+        raw_chars = []
+    chars_list = [str(c).strip() for c in raw_chars if str(c).strip()]
+    by_role = _bucket_characters_by_role(chars_list, role_map)
+    characters_block = _format_character_buckets(by_role) or "（本场无明确角色标注）"
+
+    prompt = load_scene_brief_prompt(
+        episode_no=str(scene_row.get("episode_no") or "—"),
+        scene_no=str(scene_row.get("scene_no") or "—"),
+        scene_label=str(scene_row.get("scene_label") or "—"),
+        characters_block=characters_block,
+        scene_text=scene_text,
+    )
+
+    try:
+        resp = await asyncio.wait_for(
+            caller.call_json(
+                prompt,
+                tier=ModelTier.PRIMARY,
+                temperature=0.2,
+                max_tokens=TokenBudget.REWRITE_EXCERPT,
+                validate_with=SceneBrief,
+                chain_name="scene_brief",
+            ),
+            timeout=_BRIEF_TIMEOUT_S,
+        )
+    except (ScoreLLMError, asyncio.TimeoutError) as exc:
+        logger.warning(
+            "scene_brief LLM failed scene_id=%s err=%s — leaving brief_json NULL",
+            scene_id,
+            exc,
+        )
+        return None
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "scene_brief unexpected error scene_id=%s err=%s — leaving NULL",
+            scene_id,
+            exc,
+        )
+        return None
+
+    parsed = resp.parsed
+    if isinstance(parsed, SceneBrief):
+        return parsed
+    if isinstance(parsed, dict):
+        try:
+            return SceneBrief.model_validate(parsed)
+        except Exception as exc:  # noqa: BLE001 — pydantic ValidationError 太宽容
+            logger.warning(
+                "scene_brief pydantic re-validate failed scene_id=%s err=%s",
+                scene_id,
+                exc,
+            )
+            return None
+    logger.warning(
+        "scene_brief unexpected parsed type=%s scene_id=%s",
+        type(parsed).__name__,
+        scene_id,
+    )
+    return None
+
+
+async def _ensure_scene_briefs(
+    scene_ids: Sequence[str],
+    *,
+    script_id: str,
+    caller: LlmCaller,
+    engine: Engine,
+    role_map: Optional[Mapping[str, str]] = None,
+    max_briefs: int = _BRIEF_MAX_PER_PLAN,
+    parallelism: int = _BRIEF_PARALLELISM,
+) -> int:
+    """对 ``scene_ids`` 中 ``brief_json`` 仍为 NULL 的场，并发调 LLM 生成 brief
+    并 UPDATE 写库。
+
+    设计：
+    - 只补 NULL；已有 brief 的场跳过（execute_plan_step 改写后会主动置 NULL）
+    - max_briefs 上限保护 plan 主路径延迟：一次最多生成 N 个 brief
+      （priority 场通常 ≤ 6，跟评分时的 top_improvements top-5 evidence 同量级）
+    - 并发：asyncio.Semaphore(parallelism) 限流，避免触发上游 provider 限速
+    - 失败：单场失败留 NULL，不影响其它场；整批失败也只是降级回 digest，
+      不抛错给 propose_plan 主路径
+
+    Returns
+    -------
+    int
+        本次成功写入 brief 的场数（用于日志统计 / 测试断言）。
+    """
+    if not scene_ids:
+        return 0
+
+    if role_map is None:
+        try:
+            role_map = _load_character_role_map(script_id=script_id, engine=engine)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "_ensure_scene_briefs role_map load failed script=%s err=%s — "
+                "using empty role map",
+                script_id,
+                exc,
+            )
+            role_map = {}
+
+    # 取 NULL brief 的场原文 + 元数据
+    distinct_ids = list({sid for sid in scene_ids if sid})
+    if not distinct_ids:
+        return 0
+    with engine.connect() as conn:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id::text AS id, episode_no, scene_no, scene_label,
+                       characters, text, brief_json
+                FROM scriptlens.scenes
+                WHERE script_id = :sid AND id::text = ANY(:ids)
+                """
+            ),
+            {"sid": script_id, "ids": distinct_ids},
+        ).mappings().all()
+
+    pending = [dict(r) for r in rows if r.get("brief_json") is None]
+    if not pending:
+        return 0
+
+    # 截到 max_briefs，priority 排序由调用方负责（scene_ids 进来时已经按
+    # priority 排过了，distinct_ids 不保证顺序，但实际 priority 场数量本身就 ≤ 6）
+    pending = pending[:max_briefs]
+
+    sem = asyncio.Semaphore(parallelism)
+
+    async def _gen_with_sem(scene_row: dict) -> tuple[str, Optional[SceneBrief]]:
+        async with sem:
+            brief = await _generate_single_brief(
+                scene_row=scene_row,
+                role_map=role_map,
+                caller=caller,
+            )
+        return str(scene_row.get("id") or ""), brief
+
+    results = await asyncio.gather(
+        *[_gen_with_sem(row) for row in pending],
+        return_exceptions=False,
+    )
+
+    written = 0
+    with engine.begin() as conn:
+        for sid, brief in results:
+            if not sid or brief is None:
+                continue
+            payload = brief.model_dump()
+            try:
+                conn.execute(
+                    text(
+                        """
+                        UPDATE scriptlens.scenes
+                        SET brief_json = CAST(:payload AS JSONB)
+                        WHERE id::text = :sid AND script_id = :script_id
+                        """
+                    ),
+                    {
+                        "payload": json.dumps(payload, ensure_ascii=False),
+                        "sid": sid,
+                        "script_id": script_id,
+                    },
+                )
+                written += 1
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "_ensure_scene_briefs UPDATE failed scene=%s err=%s",
+                    sid,
+                    exc,
+                )
+
+    logger.info(
+        "_ensure_scene_briefs script=%s requested=%d pending=%d written=%d",
+        script_id,
+        len(distinct_ids),
+        len(pending),
+        written,
+    )
+    return written
+
+
+def _invalidate_scene_brief(
+    *,
+    script_id: str,
+    scene_id: str,
+    engine: Engine,
+) -> None:
+    """把单场 brief_json 置 NULL — execute_plan_step 写完新原文后立刻调用，
+    让下一次 plan 拉清单时触发 _ensure_scene_briefs 重新生成。
+
+    幂等 + 不抛 — DB 层失败只是 brief 仍是旧值，下次 plan 也只是看到陈旧 brief，
+    不会破坏改写主流程。
+    """
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE scriptlens.scenes
+                    SET brief_json = NULL
+                    WHERE id::text = :sid AND script_id = :script_id
+                    """
+                ),
+                {"sid": scene_id, "script_id": script_id},
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "_invalidate_scene_brief failed scene=%s err=%s — brief may be stale",
+            scene_id,
+            exc,
+        )
 
 
 async def _critique_plan_steps(
