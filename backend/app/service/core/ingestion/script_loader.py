@@ -22,6 +22,18 @@ class UnsupportedScriptFormatError(ValueError):
     """文件后缀不被支持时抛出。"""
 
 
+class ScannedPdfError(ValueError):
+    """PDF 是扫描件（图片）/ 没有可提取文本时抛出。
+
+    上游会把 .args[0] 直接当作 user-facing failure_reason 落 scripts 表，
+    所以这条消息必须是给"非工程"用户看的中文 + actionable。
+    """
+
+
+class EmptyScriptError(ValueError):
+    """非扫描件但解析后无任何段落（损坏 / 加密 / 空文档）时抛出。"""
+
+
 def load_script_paragraphs(path: Path) -> List[str]:
     suffix = path.suffix.lower()
     if suffix == ".docx":
@@ -67,16 +79,41 @@ def _load_pdf(path: Path) -> List[str]:
         tools.mupdf_display_warnings(False)
 
     out: List[str] = []
+    total_pages = 0
+    pages_with_images = 0
     pdf = fitz.open(str(path))
     try:
         for page in pdf:
+            total_pages += 1
             text = page.get_text("text") or ""
             for line in text.splitlines():
                 line = line.strip()
                 if line:
                     out.append(line)
+            # 用 page.get_images() 而不是 page.images（pypdf 风格）；fitz 这个方法
+            # 返回当前页引用的图片 xref 列表，是判断扫描件最直接的信号。
+            try:
+                if page.get_images(full=False):
+                    pages_with_images += 1
+            except Exception:
+                # 损坏页只忽略，不影响其余页统计
+                pass
     finally:
         pdf.close()
+
+    if not out:
+        # 0 文本：决定是"扫描件"还是"空/损坏 PDF"。扫描件的判定阈值：≥80% 的页
+        # 有图片资源 —— 文本型 PDF 偶尔嵌一两张配图不会触发；25/25 全图必定触发。
+        if total_pages > 0 and pages_with_images >= total_pages * 0.8:
+            raise ScannedPdfError(
+                "上传的 PDF 是扫描件（每页都是图片），无法直接提取剧本文字。"
+                "请将剧本另存为 .docx / .txt / .md 后重新上传；"
+                "或先用 OCR 工具（ABBYY / Adobe Acrobat / 白描）把扫描件转成可复制文本后再上传。"
+            )
+        raise EmptyScriptError(
+            "PDF 解析后没有任何文字（可能是空文档、加密文档或文件损坏）。"
+            "请确认文件可在阅读器中正常显示文字后再重新上传。"
+        )
     return out
 
 

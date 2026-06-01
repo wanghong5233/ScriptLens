@@ -30,7 +30,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, List, Optional
 
-from service.core.ingestion.script_loader import load_script_paragraphs
+from service.core.ingestion.script_loader import (
+    EmptyScriptError,
+    ScannedPdfError,
+    load_script_paragraphs,
+)
 from service.core.ingestion.script_pgvector_writer import (
     ScriptPgVectorWriter,
     WrittenScene,
@@ -174,7 +178,12 @@ class ScriptIngestionService:
                 scenes=seg.scenes,
             )
         except Exception as e:
-            reason = f"{type(e).__name__}: {e}"
+            # 把"用户能看懂的错"（扫描件 / 空文档 / 未知格式）原样落 failure_reason；
+            # 其它内部异常加 type 前缀，便于运维查日志，但不再泄露 uuid 文件名。
+            if isinstance(e, (ScannedPdfError, EmptyScriptError)):
+                reason = str(e)
+            else:
+                reason = f"{type(e).__name__}: {e}"
             logger.exception("run_ingestion failed script_id=%s reason=%s", script_id, reason)
             try:
                 self.writer.mark_failed(script_id, reason)
@@ -213,14 +222,23 @@ class ScriptIngestionService:
             progress_cb("loading", {"file": str(file_path)})
         paragraphs = load_script_paragraphs(file_path)
         if not paragraphs:
-            raise ValueError(f"剧本解析后段落为空：{file_path.name}")
+            # PDF 已在 _load_pdf 内细化为 ScannedPdfError / EmptyScriptError；
+            # 这里覆盖 docx / txt / md 的空文档分支，文案对用户友好，且不再泄露 uuid 文件名。
+            raise EmptyScriptError(
+                "上传的剧本解析后没有任何文字内容（可能是空文档或文件损坏），请确认文件内容后重新上传。"
+            )
         logger.info("ingest.loaded paragraphs=%s file=%s", len(paragraphs), file_path.name)
 
         if progress_cb:
             progress_cb("segmenting", {"paragraphs": len(paragraphs)})
         seg: SegmentResult = segment_script(paragraphs)
         if not seg.scenes:
-            raise ValueError(f"剧本切分后无场景：{file_path.name}")
+            # 段落非空但切不出场景 —— 通常是格式严重不符（缺集号/场号头）。
+            # 不暴露 uuid，给可操作建议。
+            raise EmptyScriptError(
+                "已读取剧本文字，但无法切分出有效场景；"
+                "请确认剧本是否包含集号 / 场号标记（如「第1集」「1-1」「场1」等）后再重新上传。"
+            )
         logger.info(
             "ingest.segmented scenes=%s eps=%s fallback=%s file=%s",
             seg.total_scenes,
