@@ -9,15 +9,14 @@ react_system: |
 
   ## 工具能力契约
 
-  - `score_dimension_tool`：单维度评分复核（story/character/concept/emotion/pacing/compliance）。
+  - `score_dimension_tool`：投资决策单维度评分复核（hook/archetype/payoff/monetization/producibility）。
   - `locate_scenes_tool`：按自然语言定位相关场景，返回 scene_id 与片段。
   - `extract_characters_tool`：抽取人物清单与出场频次。
   - `read_scene_tool`：读取单场原文（scene_id 或 ScriptVFS 路径）。
   - `rewrite_selection_scene_tool`：改写选区并写回数据库（支持“改成英语/润色/局部重写”）。
   - `propose_full_script_plan_tool`：生成全剧改写计划（只出 plan，不改文本）。
   - `rewrite_scene_tool`：改写单场并写回数据库（scene_id/file_path + target_dimensions）。
-  - `propose_rewrite_tool`：单场改写兼容工具（不写库，返回建议 diff）。
-  - `propose_dimension_rewrite_tool`：旧协议兼容别名，内部转发到三件套。
+  - `propose_rewrite_tool`：单场改写建议（不写库，返回建议 diff），用于 chat 内单场轻量改写。
   - `web_search_tool`：联网搜索外部信息，引用结论需附来源。
   - `reply_to_user_tool`：对用户输出最终答复。
 
@@ -34,11 +33,26 @@ react_system: |
     - 建议流程：`score_dimension_tool` → `reply_to_user_tool`。
 
   - `kind = "fulltext_rewrite"`
-    - 输入重点：dimensions（必），mode（plan/execute），plan_steps（execute 推荐携带）。
-    - mode=`plan`：调用 `propose_full_script_plan_tool`。
-    - mode=`execute`：对 plan_steps 逐场调用 `rewrite_scene_tool`；若缺 plan_steps，先补一次 plan。
-    - 兼容：也可调用 `propose_dimension_rewrite_tool`（旧入口）。
-    - 选场原则：不要用固定“每维 N 场”。必须基于低分维度的缺口信号（evidence + diagnostics）来解释“为什么改这几场”。
+    - 输入重点：mode（plan/execute），plan_steps（execute 推荐携带）。
+      改写目标可以由以下任一字段提供：
+      * `improvement`：单条改进建议上下文，由"按此条改稿"按钮触发。字段：
+        title / rationale / dimension_key / dimension_label / signal_key /
+        signal_label / evidence_ref_ids。
+      * `diagnostic`：整剧诊断上下文，由"按本次诊断改稿"按钮触发。字段：
+        verdict_label / verdict_reason / investment_score / top_improvements。
+      * `dimensions`：目标维度键列表（hook=抓人力、archetype=模板力、
+        payoff=兑现力、monetization=变现力、producibility=可生成力）。
+      上面三者至少一个非空即可启动 plan；空数组的 dimensions 不算非空。
+    - mode=`plan`：调用 `propose_full_script_plan_tool`，**把 TASK_META 里
+      非空的 improvement / diagnostic / dimensions 原封不动透传过去**。
+      如果 TASK_META 只有 improvement，调用形如：
+        `{ "improvement": { ...原样照抄... } }`
+      工具内部会让模型基于剧本概要 + 评分快照 + 场次清单自主选场。
+      你不需要自己挑场次，也不需要把 improvement 拆解成 dimensions 再传。
+    - mode=`execute`：对 plan_steps 逐场调用 `rewrite_scene_tool`；若缺
+      plan_steps，先补一次 plan。
+    - 选场原则：不要用固定"每维 N 场"。让工具内部 LLM 基于 improvement /
+      diagnostic 上下文做选场决策；不要在 prompt 里"自己想"该选哪些场。
 
   - `kind = "rescore"`
     - 输入重点：dimensions（必）。

@@ -1045,7 +1045,16 @@ class LaTeXEditAgent(BaseAgent):
         state.llm_options = self._extract_llm_options(options)
         state.operation_id = self._build_operation_id()
         operation_ref = self._build_operation_ref(state.operation_id)
-        state.trace_id = get_trace_id()
+        # trace_id 接入：context var 在 chat router 启动 _runner 时大概率没被 set
+        # （历史代码定义了 set_trace_id 但从未调用），导致结构化日志里 trace_id=None。
+        # 这里若 context var 没值，自己生成一个 uuid 并写回 context var，确保后续
+        # `get_trace_id()` 调用点（如 guardrail 日志）都拿到同一 id。
+        from ..utils.trace import set_trace_id
+        current_trace = get_trace_id()
+        if not current_trace:
+            current_trace = uuid.uuid4().hex
+            set_trace_id(current_trace)
+        state.trace_id = current_trace
         context_payload = dict(context) if context else {}
         if knowledge_base_id is not None:
             context_payload.setdefault("knowledge_base_id", knowledge_base_id)
@@ -2002,6 +2011,27 @@ class LaTeXEditAgent(BaseAgent):
                 self._push_tool_insight(
                     state,
                     f"{action.tool_name} 失败：{self._truncate_text(str(tool_result.error or 'unknown error'), max_len=180)}",
+                )
+                # 关键观测点：tool 返回 success=False 之前是「静默」的——只往 insight
+                # 里塞一条提示，docker logs 看不到任何信号。propose_full_script_plan_tool
+                # 的 same_tool_convergence 守护故障即是因为这一段无 log，排障花了 30 分钟
+                # 才找到 v4 → v3 协议断层。统一在这里 warn 出来。
+                _failed_params_keys = (
+                    sorted(list((action.parameters or {}).keys()))
+                    if isinstance(action.parameters, dict)
+                    else []
+                )
+                logger.warning(
+                    "agent_tool_failure trace_id=%s intent=%s tool=%s "
+                    "consecutive_failures=%d/%d param_keys=%s error=%s summary=%s",
+                    getattr(state, "trace_id", None) or get_trace_id(),
+                    state.intent_type.value if state.intent_type else "unknown",
+                    action.tool_name,
+                    state.consecutive_tool_failures,
+                    self._loop_limits.consecutive_tool_failures_threshold,
+                    _failed_params_keys,
+                    self._truncate_text(str(tool_result.error or ""), max_len=200),
+                    self._truncate_text(str(tool_result.summary or ""), max_len=120),
                 )
             
             # 根据计划推进进度

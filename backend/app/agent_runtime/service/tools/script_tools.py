@@ -780,49 +780,6 @@ def _scene_title(s: Dict[str, Any]) -> str:
 # 5. ReadScene / ProposeFullScriptPlan / RewriteScene（改写三件套）
 # ============================================================
 
-_REWRITE_DIMENSIONS = ("story", "character", "concept", "emotion", "pacing", "dialogue")
-
-
-def _normalize_rewrite_dimensions(raw_dimensions: Any) -> List[str]:
-    out: List[str] = []
-    if not isinstance(raw_dimensions, list):
-        return out
-    for dim in raw_dimensions:
-        key = str(dim or "").strip()
-        if key in _REWRITE_DIMENSIONS and key not in out:
-            out.append(key)
-    return out
-
-
-def _normalize_plan_steps(
-    raw_steps: Any,
-    *,
-    allowed_dimensions: Optional[List[str]] = None,
-) -> List[Dict[str, Any]]:
-    if not isinstance(raw_steps, list):
-        return []
-    allowed = set(allowed_dimensions or list(_REWRITE_DIMENSIONS))
-    steps: List[Dict[str, Any]] = []
-    for raw in raw_steps:
-        if not isinstance(raw, dict):
-            continue
-        scene_id = str(raw.get("scene_id") or "").strip()
-        if not scene_id:
-            continue
-        step_dims = _normalize_rewrite_dimensions(raw.get("target_dimensions"))
-        step_dims = [dim for dim in step_dims if dim in allowed]
-        if not step_dims:
-            continue
-        steps.append(
-            {
-                "scene_id": scene_id,
-                "target_dimensions": step_dims,
-                "expected_changes": str(raw.get("expected_changes") or "").strip(),
-            }
-        )
-    return steps
-
-
 def _load_scene_meta(*, scene_id: str, expected_script_id: str) -> Dict[str, Any]:
     from utils.database import engine
 
@@ -1337,16 +1294,123 @@ class RewriteSelectionSceneTool(BaseTool):
         )
 
 
+_INVESTMENT_DIM_KEYS = ("hook", "archetype", "payoff", "monetization", "producibility")
+
+
+def _normalize_investment_dim_keys(raw: Any) -> List[str]:
+    """归一投资决策维度键列表（兼容 None / 单字符串 / list）。"""
+
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        candidates: List[str] = [raw]
+    elif isinstance(raw, (list, tuple)):
+        candidates = [str(item) for item in raw]
+    else:
+        return []
+    out: List[str] = []
+    for item in candidates:
+        key = str(item or "").strip().lower()
+        if key in _INVESTMENT_DIM_KEYS and key not in out:
+            out.append(key)
+    return out
+
+
+def _coerce_improvement_brief(raw: Any) -> Optional[Dict[str, Any]]:
+    """把前端透传过来的 improvement 字段（来自 TASK_META）打成 dict 给 LLM。
+
+    白名单字段：title / rationale / dimension_key / dimension_label /
+    signal_key / signal_label / evidence_ref_ids。其余字段一律丢弃避免污染。
+    """
+
+    if not isinstance(raw, dict):
+        return None
+    title = str(raw.get("title") or "").strip()
+    rationale = str(raw.get("rationale") or "").strip()
+    if not title and not rationale:
+        return None
+    evidence_ids = raw.get("evidence_ref_ids") or []
+    if not isinstance(evidence_ids, list):
+        evidence_ids = []
+    return {
+        "title": title,
+        "rationale": rationale,
+        "dimension_key": str(raw.get("dimension_key") or "").strip() or None,
+        "dimension_label": str(raw.get("dimension_label") or "").strip() or None,
+        "signal_key": str(raw.get("signal_key") or "").strip() or None,
+        "signal_label": str(raw.get("signal_label") or "").strip() or None,
+        "evidence_ref_ids": [str(eid) for eid in evidence_ids if str(eid).strip()],
+    }
+
+
+def _coerce_diagnostic_brief(raw: Any) -> Optional[Dict[str, Any]]:
+    """把前端透传过来的 diagnostic 字段打成 dict。
+
+    白名单字段：verdict_label / verdict_reason / investment_score /
+    top_improvements（每条仅保留 title / dimension_label / rationale）。
+    """
+
+    if not isinstance(raw, dict):
+        return None
+    verdict_label = str(raw.get("verdict_label") or "").strip()
+    verdict_reason = str(raw.get("verdict_reason") or "").strip()
+    investment_score = raw.get("investment_score")
+    if isinstance(investment_score, str):
+        try:
+            investment_score = float(investment_score)
+        except ValueError:
+            investment_score = None
+    tops_raw = raw.get("top_improvements") or []
+    tops: List[Dict[str, Any]] = []
+    if isinstance(tops_raw, list):
+        for it in tops_raw[:5]:
+            if not isinstance(it, dict):
+                continue
+            tops.append(
+                {
+                    "title": str(it.get("title") or "").strip(),
+                    "dimension_label": str(it.get("dimension_label") or "").strip() or None,
+                    "rationale": str(it.get("rationale") or "").strip(),
+                }
+            )
+    if not (verdict_label or verdict_reason or investment_score is not None or tops):
+        return None
+    return {
+        "verdict_label": verdict_label or None,
+        "verdict_reason": verdict_reason or None,
+        "investment_score": investment_score,
+        "top_improvements": tops,
+    }
+
+
 class ProposeFullScriptPlanTool(BaseTool):
-    """生成全剧维度改写计划（只出 plan，不写库）。"""
+    """生成全剧改写计划（只出 plan，不写库）。
+
+    LLM 视角的契约由 :py:attr:`description` 和 :py:attr:`parameters_schema`
+    决定，不会读到本 docstring。本 docstring 只面向后端维护者，说明 tool
+    内部如何把 LLM 给的参数映射到 ``service.script_tools.rewrite_chain.propose_plan``。
+
+    路由协议（execute 内部）：
+      * ``improvement`` 或 ``diagnostic`` 任一非空 → 走 LLM-first 路径，
+        由 propose_plan 内部 LLM 选场；
+      * 仅 ``dimensions`` 非空 → 默认走 LLM-first，把维度作为 hint；
+      * 全空 → 直接 ToolResult(success=False)，并 logger.warning。
+
+    向后兼容：propose_plan Python 签名仍接受老调用方的六维 ``dimensions``
+    字符串集（legacy CLI / 测试），通过 enum 值判定自动 fallback。
+    """
 
     def __init__(self) -> None:
         super().__init__(
             name="propose_full_script_plan_tool",
             description=(
-                "基于维度子集生成全剧改写计划（plan tree）。"
-                "输出 rewrite_plan（steps 含 scene_id/target_dimensions/rationale/expected_changes），"
-                "不会改写场景文本。"
+                "根据剧本投资决策评分的改进建议或整体诊断，结合剧本概要 + "
+                "全部场次清单，由模型自主选出 1~12 场写出改写计划，返回 "
+                "rewrite_plan（含 scene_id/target_dimensions/rationale/"
+                "expected_changes）。不会修改任何场景文本。"
+                "推荐用法：当用户点击「按此条改稿」时把 TASK_META 里的 "
+                "improvement 原样传入；点击「按本次诊断改稿」时把 diagnostic "
+                "原样传入；二者都没有时再用 dimensions 作为目标维度提示。"
             ),
         )
         self.parameters_schema = {
@@ -1356,32 +1420,68 @@ class ProposeFullScriptPlanTool(BaseTool):
                     "type": "array",
                     "items": {
                         "type": "string",
-                        "enum": list(_REWRITE_DIMENSIONS),
+                        "enum": list(_INVESTMENT_DIM_KEYS),
                     },
-                    "description": "目标维度（1-5 个）",
+                    "description": (
+                        "目标维度（投资决策评分的五维，可选）。可选值："
+                        "hook=抓人力、archetype=模板力、payoff=兑现力、"
+                        "monetization=变现力、producibility=可生成力。"
+                        "传 1~3 个即可；通常不必填，improvement/diagnostic "
+                        "已经隐含目标维度。"
+                    ),
+                },
+                "improvement": {
+                    "type": "object",
+                    "description": (
+                        "单条改进建议上下文（来自 TASK_META.improvement，原样透传）。"
+                        "字段：title / rationale / dimension_key / dimension_label / "
+                        "signal_key / signal_label / evidence_ref_ids。"
+                    ),
+                },
+                "diagnostic": {
+                    "type": "object",
+                    "description": (
+                        "整剧诊断上下文（来自 TASK_META.diagnostic，原样透传）。"
+                        "字段：verdict_label / verdict_reason / investment_score / "
+                        "top_improvements[{title, dimension_label, rationale}]。"
+                    ),
                 },
                 "max_steps": {
                     "type": "integer",
-                    "description": "计划最大场次数（默认 12）",
+                    "description": "计划最大场次数（默认 12，上限 30）。",
                     "default": 12,
                 },
                 "script_id": {
                     "type": "string",
-                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本。",
                 },
             },
-            "required": ["dimensions"],
+            # required 不强制——dimensions/improvement/diagnostic 任一非空即可。
+            "required": [],
         }
 
     async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
         params = parameters or {}
-        dims = _normalize_rewrite_dimensions(params.get("dimensions"))
-        if not dims:
+        dim_keys = _normalize_investment_dim_keys(params.get("dimensions"))
+        improvement = _coerce_improvement_brief(params.get("improvement"))
+        diagnostic = _coerce_diagnostic_brief(params.get("diagnostic"))
+
+        if not (dim_keys or improvement or diagnostic):
+            # 语义级校验：必须给出至少一个改写驱动信号，否则 LLM 拿不到目标。
+            logger.warning(
+                "propose_full_script_plan_tool missing input: params_keys=%s",
+                sorted(list(params.keys())),
+            )
             return ToolResult(
                 success=False,
-                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing/dialogue",
-                summary="缺 dimensions",
+                error=(
+                    "缺少改写目标输入：dimensions / improvement / diagnostic "
+                    "至少需要一个非空。点击「按此条改稿」请透传 improvement，"
+                    "点击「按本次诊断改稿」请透传 diagnostic。"
+                ),
+                summary="缺少改写目标输入",
             )
+
         try:
             script_id = _resolve_script_id(agent_state, params)
         except ValueError as exc:
@@ -1400,40 +1500,55 @@ class ProposeFullScriptPlanTool(BaseTool):
         max_steps = max(1, min(max_steps_raw, 30))
 
         from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
-        from service.script_tools.rewrite_chain import propose_plan, select_target_scenes
+        from service.script_tools.rewrite_chain import propose_plan
 
         caller = LlmCaller()
         try:
-            scenes = await asyncio.to_thread(
-                select_target_scenes,
-                script_id=script_id,
-                dimensions=dims,
-                max_scenes=max_steps,
-            )
             plan = await propose_plan(
                 script_id=script_id,
-                dimensions=dims,
-                scenes=scenes,
+                dimension_keys=dim_keys or None,
+                improvement_brief=improvement,
+                diagnostic_brief=diagnostic,
+                max_steps=max_steps,
                 caller=caller,
             )
         except ValueError as exc:
+            logger.warning(
+                "propose_full_script_plan_tool input error script=%s dimensions=%s err=%s",
+                script_id,
+                dim_keys,
+                exc,
+            )
             return ToolResult(success=False, error=str(exc), summary="plan 参数错误")
         except ScoreLLMError as exc:
-            logger.warning("propose_full_script_plan_tool failed: %s", exc)
+            logger.warning(
+                "propose_full_script_plan_tool LLM failed script=%s dimensions=%s err=%s",
+                script_id,
+                dim_keys,
+                exc,
+            )
             return ToolResult(success=False, error=f"LLM error: {exc}", summary="plan LLM 失败")
 
         plan_dict = plan.to_dict()
         step_count = len(plan_dict.get("steps") or [])
-        summary = (
-            "全剧改写计划：当前维度无明显短板场"
-            if step_count == 0
-            else f"全剧改写计划完成：共 {step_count} 场（dims={'/'.join(dims)}）"
-        )
+        # summary 用业务可读标签：优先 improvement.dimension_label，其次维度键。
+        dim_summary_bits: list[str] = []
+        if improvement and improvement.get("dimension_label"):
+            dim_summary_bits.append(str(improvement["dimension_label"]))
+        if dim_keys:
+            dim_summary_bits.append("/".join(dim_keys))
+        dim_summary = "+".join(dim_summary_bits) if dim_summary_bits else "—"
+        if step_count == 0:
+            summary = f"全剧改写计划：未发现需改写场次（{dim_summary}）"
+        else:
+            summary = f"全剧改写计划完成：共 {step_count} 场（{dim_summary}）"
         return ToolResult(
             success=True,
             data={
                 "mode": "plan",
-                "dimensions": dims,
+                "dimensions": dim_keys,
+                "improvement": improvement,
+                "diagnostic": diagnostic,
                 "rewrite_plan": plan_dict,
                 "script_id": script_id,
             },
@@ -1464,8 +1579,15 @@ class RewriteSceneTool(BaseTool):
                 },
                 "target_dimensions": {
                     "type": "array",
-                    "items": {"type": "string", "enum": list(_REWRITE_DIMENSIONS)},
-                    "description": "本场改写目标维度（1-5）",
+                    "items": {
+                        "type": "string",
+                        "enum": list(_INVESTMENT_DIM_KEYS),
+                    },
+                    "description": (
+                        "本场改写目标维度（1-3 个）。可选值："
+                        "hook=抓人力、archetype=模板力、payoff=兑现力、"
+                        "monetization=变现力、producibility=可生成力。"
+                    ),
                 },
                 "expected_changes": {
                     "type": "string",
@@ -1481,11 +1603,14 @@ class RewriteSceneTool(BaseTool):
 
     async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
         params = parameters or {}
-        dims = _normalize_rewrite_dimensions(params.get("target_dimensions"))
+        dims = _normalize_investment_dim_keys(params.get("target_dimensions"))
         if not dims:
             return ToolResult(
                 success=False,
-                error="target_dimensions must be a non-empty subset of story/character/concept/emotion/pacing/dialogue",
+                error=(
+                    "target_dimensions must be a non-empty subset of "
+                    "hook/archetype/payoff/monetization/producibility"
+                ),
                 summary="缺 target_dimensions",
             )
 
@@ -1611,172 +1736,6 @@ class RewriteSceneTool(BaseTool):
             summary=(
                 f"改写完成：{scene_path}（dims={'/'.join(result.target_dimensions)}）"
                 f" {len(result.original_text)}→{len(result.rewritten_text)} 字"
-            ),
-        )
-
-
-class PropDimensionRewriteTool(BaseTool):
-    """兼容旧入口：propose_dimension_rewrite_tool 转发到改写三件套。"""
-
-    def __init__(self) -> None:
-        super().__init__(
-            name="propose_dimension_rewrite_tool",
-            description=(
-                "兼容旧入口。内部转发到 read_scene_tool / propose_full_script_plan_tool / rewrite_scene_tool。"
-                "建议新会话直接使用三件套。"
-            ),
-        )
-        self.parameters_schema = {
-            "type": "object",
-            "properties": {
-                "mode": {"type": "string", "enum": ["plan", "execute"]},
-                "dimensions": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": list(_REWRITE_DIMENSIONS)},
-                },
-                "plan_steps": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "scene_id": {"type": "string"},
-                            "target_dimensions": {
-                                "type": "array",
-                                "items": {"type": "string"},
-                            },
-                            "expected_changes": {"type": "string"},
-                        },
-                        "required": ["scene_id", "target_dimensions"],
-                    },
-                },
-                "script_id": {"type": "string"},
-            },
-            "required": ["mode", "dimensions"],
-        }
-        self._plan_tool = ProposeFullScriptPlanTool()
-        self._rewrite_tool = RewriteSceneTool()
-
-    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
-        params = parameters or {}
-        mode = str(params.get("mode") or "").strip().lower()
-        if mode not in {"plan", "execute"}:
-            return ToolResult(
-                success=False,
-                error=f"mode must be 'plan' or 'execute', got {mode!r}",
-                summary="非法 mode",
-            )
-        dims = _normalize_rewrite_dimensions(params.get("dimensions"))
-        if not dims:
-            return ToolResult(
-                success=False,
-                error="dimensions must be a non-empty subset of story/character/concept/emotion/pacing/dialogue",
-                summary="缺 dimensions",
-            )
-
-        if mode == "plan":
-            return await self._plan_tool.execute(
-                agent_state,
-                {
-                    "dimensions": dims,
-                    "script_id": params.get("script_id"),
-                    "max_steps": params.get("max_steps"),
-                },
-            )
-
-        plan_steps = _normalize_plan_steps(
-            params.get("plan_steps"),
-            allowed_dimensions=dims,
-        )
-        if not plan_steps:
-            plan_result = await self._plan_tool.execute(
-                agent_state,
-                {
-                    "dimensions": dims,
-                    "script_id": params.get("script_id"),
-                },
-            )
-            if not plan_result.success:
-                return ToolResult(
-                    success=False,
-                    error=plan_result.error or "fallback plan failed",
-                    summary="兜底 plan 失败",
-                )
-            plan_dict = (
-                (plan_result.data or {}).get("rewrite_plan")
-                if isinstance(plan_result.data, dict)
-                else {}
-            ) or {}
-            plan_steps = _normalize_plan_steps(
-                plan_dict.get("steps"),
-                allowed_dimensions=dims,
-            )
-
-        if not plan_steps:
-            return ToolResult(
-                success=False,
-                error="execute 阶段没有可改写的场（plan_steps 为空）",
-                summary="无可改写场",
-            )
-
-        executed: List[Dict[str, Any]] = []
-        failed: List[Dict[str, Any]] = []
-        for step in plan_steps:
-            rewrite_result = await self._rewrite_tool.execute(
-                agent_state,
-                {
-                    "scene_id": step["scene_id"],
-                    "target_dimensions": step["target_dimensions"],
-                    "expected_changes": step.get("expected_changes") or "",
-                    "script_id": params.get("script_id"),
-                },
-            )
-            if not rewrite_result.success:
-                failed.append(
-                    {
-                        "scene_id": step["scene_id"],
-                        "error": rewrite_result.error or "rewrite failed",
-                    }
-                )
-                continue
-            payload = rewrite_result.data if isinstance(rewrite_result.data, dict) else {}
-            executed.append(
-                {
-                    "scene_id": payload.get("scene_id") or step["scene_id"],
-                    "scene_label": payload.get("scene_label"),
-                    "target_dimensions": payload.get("target_dimensions") or step["target_dimensions"],
-                    "rationale": payload.get("rationale"),
-                    "file_path": payload.get("file_path"),
-                    "original_chars": payload.get("original_chars"),
-                    "rewritten_chars": payload.get("rewritten_chars"),
-                }
-            )
-
-        ok = len(executed)
-        bad = len(failed)
-        if ok == 0:
-            return ToolResult(
-                success=False,
-                error=f"全部 {bad} 场改写均失败",
-                data={
-                    "mode": "execute",
-                    "dimensions": dims,
-                    "executed_scenes": [],
-                    "failed_scenes": failed,
-                },
-                summary="全剧改写失败",
-            )
-        return ToolResult(
-            success=True,
-            data={
-                "mode": "execute",
-                "dimensions": dims,
-                "executed_scenes": executed,
-                "failed_scenes": failed,
-            },
-            summary=(
-                f"改写完成：成功 {ok} 场"
-                + (f" / 失败 {bad} 场" if bad else "")
-                + f"（dims={'/'.join(dims)}）"
             ),
         )
 

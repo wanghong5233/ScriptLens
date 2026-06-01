@@ -2883,6 +2883,29 @@ const LatexEditorPage = () => {
    *
    * 协议详见 docs/03-system-mental-model.md §6 §7。
    */
+  /**
+   * 「点 CTA = 新开 thread」的本地状态重置（Cursor / ChatGPT custom GPT /
+   * Linear AI 行业惯例）：清气泡 + workspaceConfig.session_id=null +
+   * 后台 bind(null)。调用后 handleSend → ensureScriptLensSessionId 看到
+   * sessionId=null 会自动 createSession，所以这条 CTA 一定落在一个干净的
+   * 新 thread 里，agent ReAct 不会被旧聊天历史污染。
+   */
+  const resetToNewChatSession = useCallback(() => {
+    const workspaceId = docStudioState.workspaceId
+    if (!workspaceId) return
+    const currentConfig = docStudioState.workspaceConfig || {}
+    docStudioActions.setChatMessages([])
+    docStudioActions.setWorkspaceConfig({
+      ...currentConfig,
+      session_id: null,
+      sessionId: null,
+    })
+    void bindWorkspaceSession(
+      { workspaceId, sessionId: null },
+      { loading: false, errorToast: false },
+    ).catch(() => {})
+  }, [])
+
   const dispatchAgentTask = useCallback(
     async (task: AgentTask, options: { autoSubmit?: boolean } = {}) => {
       const workspaceId = docStudioState.workspaceId
@@ -2904,6 +2927,19 @@ const LatexEditorPage = () => {
       }
 
       setRightTab('chat')
+
+      // 「从分析报告发起的全剧改写」类 CTA = 新开 thread。
+      // 评估 tab 「按此条改稿」与底部「按本次诊断改稿」都走 fulltext_rewrite/plan;
+      // 语义上是「围绕这条建议/诊断开一段独立对话」,不应追加到当前 thread。
+      // 与「+ 新建对话」按钮共享 resetToNewChatSession,保证两入口语义一致。
+      if (
+        options.autoSubmit &&
+        task.kind === 'fulltext_rewrite' &&
+        task.mode === 'plan'
+      ) {
+        resetToNewChatSession()
+      }
+
       const promptText = buildPromptFromTask(task)
 
       // fe_rescore_hook：fulltext_rewrite execute 派发的同时记下待评分维度，
@@ -2969,7 +3005,7 @@ const LatexEditorPage = () => {
       // eslint-disable-next-line no-console
       console.warn('[ScriptLens] dispatchAgentTask: editor not ready after 12 retries')
     },
-    [openFile, setRightTab, setPrompt, traceEvidence],
+    [openFile, setRightTab, setPrompt, traceEvidence, resetToNewChatSession],
   )
 
   // 把最新一份 dispatchAgentTask 注入 ref，供 closeDiffModal 等"先定义后调用"

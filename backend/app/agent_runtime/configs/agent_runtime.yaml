@@ -17,16 +17,15 @@
 
 default:
   tool_budgets:
-    # ScriptLens 11 个工具的默认 per-session 上限
-    score_dimension_tool: 6              # 六维 + compliance；rescore 闭环至少跑 1 次
+    # ScriptLens 工具的默认 per-session 上限
+    score_dimension_tool: 6              # 投资决策五维；rescore 闭环至少跑 1 次
     locate_scenes_tool: 6                # 多场景定位允许多次但有上限
     extract_characters_tool: 1           # 全剧人物 1 次足矣
     read_scene_tool: 8                   # 单会话多次读取局部场景
     rewrite_selection_scene_tool: 8      # 选区级改写（翻译/润色/局部重写）
     propose_full_script_plan_tool: 4     # 计划生成 + 失败重试 + 用户追问微调
     rewrite_scene_tool: 12               # execute 阶段逐场改写
-    propose_rewrite_tool: 3              # 单场临时改写兜底
-    propose_dimension_rewrite_tool: 2    # 兼容旧入口
+    propose_rewrite_tool: 3              # 单场轻量改写（chat 内 diff 建议）
     web_search_tool: 3                   # reuse-matrix §5.1 规定上限
     reply_to_user_tool: 1                # ReAct 强制收尾
 
@@ -63,7 +62,6 @@ intents:
       - locate_scenes_tool
       - read_scene_tool
       - propose_rewrite_tool
-      - propose_dimension_rewrite_tool
       - reply_to_user_tool
 
   # 用户要求改写（单场或全剧）

@@ -7,7 +7,6 @@ from .tools.response_tools import ReplyToUserTool
 from .tools.script_tools import (
     ExtractCharactersTool,
     LocateScenesTool,
-    PropDimensionRewriteTool,
     ProposeFullScriptPlanTool,
     ProposeRewriteTool,
     ReadSceneTool,
@@ -31,8 +30,6 @@ def create_tool_registry() -> ToolRegistry:
     registry.register(RewriteSelectionSceneTool())
     registry.register(ProposeFullScriptPlanTool())
     registry.register(RewriteSceneTool())
-    # 兼容旧工具名：内部会转发到改写三件套。
-    registry.register(PropDimensionRewriteTool())
     registry.register(ProposeRewriteTool())
 
     registry.register(WebSearchTool())

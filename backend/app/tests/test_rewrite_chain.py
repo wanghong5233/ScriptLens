@@ -1,54 +1,238 @@
 import asyncio
 
-from service.script_tools.llm_caller import LLMResponse
+import pytest
+
+from service.script_tools.llm_caller import LLMResponse, ScoreLLMError
 from service.script_tools.rewrite_chain import (
-    _extract_scene_ids,
     execute_plan_step,
     propose_plan,
 )
 
 
-def test_extract_scene_ids_from_mixed_evidence() -> None:
-    refs = [
-        {"scene_id": "s1"},
-        {"anchor": {"scene_id": "s2"}},
-        {"id": "scene:s3"},
-        "s4",
-    ]
-    assert _extract_scene_ids(refs) == ["s1", "s2", "s3", "s4"]
+def test_propose_plan_llm_first_with_improvement_brief(monkeypatch) -> None:
+    """improvement 路径：传 improvement_brief 时 LLM 主导选场。
 
+    覆盖回归点：propose_plan 在 dimension_keys / improvement_brief 任一非空时
+    不再抛 ValueError；LLM 返回的 scene_id 经过存在性校验后才进入 plan。
+    """
 
-def test_propose_plan_from_action_candidates() -> None:
-    scenes = [
+    from service.script_tools import rewrite_chain as chain
+
+    fake_catalog = [
         {
-            "scene_id": "s1",
-            "scene_label": "宴会冲突",
+            "scene_id": "scene-aaa",
             "episode_no": 1,
             "scene_no": "1",
-            "text": "原文",
-            "matched_dimensions": ["story", "dialogue"],
-            "dim_reasons": {"story": "主线因果断裂", "dialogue": "对白重复"},
-            "expected_changes": ["压缩解释对白", "补转折触发条件"],
-        }
+            "scene_label": "早餐桌冲突",
+            "characters": "妈/爸/姐/弟/我",
+            "digest": "5 角色同时在场，争吵打断。",
+        },
+        {
+            "scene_id": "scene-bbb",
+            "episode_no": 1,
+            "scene_no": "2",
+            "scene_label": "走廊独白",
+            "characters": "我",
+            "digest": "独白推动情绪。",
+        },
     ]
+
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "一段都市复仇短剧概要。")
+    monkeypatch.setattr(
+        chain,
+        "_load_latest_verdict_snapshot",
+        lambda **_k: {
+            "investment_score": 6.2,
+            "verdict_label": "PASS_PROVISIONAL",
+            "verdict_reason": "钩子在线但人物动机偏弱。",
+            "top_improvements": [
+                {"title": "压缩同框人数", "dimension_label": "可生成力"},
+            ],
+        },
+    )
+    monkeypatch.setattr(chain, "_load_scene_catalog", lambda **_k: fake_catalog)
+
+    seen_prompt: dict[str, str] = {}
+
+    class _FakeCaller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = kwargs
+            seen_prompt["body"] = prompt
+            return LLMResponse(
+                raw="{}",
+                parsed={
+                    "overall_summary": "把同框 5 角色场拆成 2 角色焦点场，降低制作复杂度。",
+                    "steps": [
+                        {
+                            "scene_id": "scene-aaa",
+                            "target_dimensions": ["producibility"],
+                            "rationale": "5 角色同框，AI 视频多角色一致性短板。",
+                            "expected_changes": "拆成两组对话，主线只保留 2 个角色出场。",
+                        }
+                    ],
+                },
+                provider="openai",
+                model="gpt-test",
+                elapsed_ms=42,
+            )
 
     async def _run():
         plan = await propose_plan(
-            script_id="script-1",
-            dimensions=["story", "dialogue"],
-            scenes=scenes,
+            script_id="script-9",
+            dimension_keys=["producibility"],
+            improvement_brief={
+                "title": "压缩单场同时在场角色数",
+                "rationale": "避免单场 5+ 角色同时在场（AI 视频多角色一致性短板）。",
+                "dimension_key": "producibility",
+                "dimension_label": "可生成力",
+                "signal_key": "concurrent_characters",
+                "signal_label": "单场同框人数可控",
+                "evidence_ref_ids": [],
+            },
+            caller=_FakeCaller(),
         )
-        assert plan.steps
-        step = plan.steps[0]
-        assert step.scene_id == "s1"
-        assert "story" in step.target_dimensions
-        assert "dialogue" in step.target_dimensions
-        assert "压缩解释对白" in step.expected_changes
+        assert plan.steps and plan.steps[0].scene_id == "scene-aaa"
+        assert "producibility" in plan.steps[0].target_dimensions
+        assert "压缩同框" in (plan.overall_summary or "") or "降低制作" in (
+            plan.overall_summary or ""
+        )
+        body = seen_prompt.get("body", "")
+        assert "压缩单场同时在场角色数" in body
+        assert "scene-aaa" in body
+        assert "producibility" in body or "可生成力" in body
 
     asyncio.run(_run())
 
 
-def test_execute_plan_step_uses_action_expected_changes(monkeypatch) -> None:
+def test_propose_plan_llm_coerces_scalar_target_dimensions(monkeypatch) -> None:
+    """LLM 把 target_dimensions 吐成 scalar 字符串时，schema 应自动转 list。
+
+    回归点：line 'Input should be a valid list ... input_value=\\'producibility\\''
+    曾在生产链路阻断 propose_plan 全部 step。
+    """
+
+    from service.script_tools import rewrite_chain as chain
+
+    fake_catalog = [
+        {
+            "scene_id": "scene-xyz",
+            "episode_no": 1,
+            "scene_no": "1",
+            "scene_label": "母女对峙",
+            "characters": "妈/我",
+            "digest": "母女对峙",
+        }
+    ]
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "短剧概要。")
+    monkeypatch.setattr(chain, "_load_latest_verdict_snapshot", lambda **_k: None)
+    monkeypatch.setattr(chain, "_load_scene_catalog", lambda **_k: fake_catalog)
+
+    class _FakeCaller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = prompt, kwargs
+            return LLMResponse(
+                raw="{}",
+                parsed={
+                    "overall_summary": "前 3 场补全钩子链。",
+                    "steps": [
+                        {
+                            "scene_id": "scene-xyz",
+                            "target_dimensions": "producibility",  # scalar，不是 list
+                            "rationale": "5 角色同框，建议拆。",
+                            "expected_changes": "拆成两组对话。",
+                        }
+                    ],
+                },
+                provider="openai",
+                model="gpt-test",
+                elapsed_ms=15,
+            )
+
+    async def _run():
+        plan = await propose_plan(
+            script_id="s-1",
+            improvement_brief={
+                "title": "压缩同框人数",
+                "rationale": "AI 视频多角色一致性短板。",
+                "dimension_key": "producibility",
+                "dimension_label": "可生成力",
+            },
+            caller=_FakeCaller(),
+        )
+        assert plan.steps and plan.steps[0].target_dimensions == ["producibility"]
+
+    asyncio.run(_run())
+
+
+def test_propose_plan_llm_first_rejects_hallucinated_scene_ids(monkeypatch) -> None:
+    """LLM 返回不存在的 scene_id 时整 plan 视为失败（避免幻觉 plan 流到前端）。"""
+
+    from service.script_tools import rewrite_chain as chain
+
+    fake_catalog = [
+        {
+            "scene_id": "scene-real",
+            "episode_no": 1,
+            "scene_no": "1",
+            "scene_label": "厨房早餐",
+            "characters": "妈/我",
+            "digest": "母女早餐对话。",
+        }
+    ]
+    monkeypatch.setattr(chain, "_load_script_overview", lambda *_a, **_k: "短剧概要。")
+    monkeypatch.setattr(chain, "_load_latest_verdict_snapshot", lambda **_k: None)
+    monkeypatch.setattr(chain, "_load_scene_catalog", lambda **_k: fake_catalog)
+
+    class _FakeCaller:
+        async def call_json(self, prompt: str, **kwargs):  # noqa: ANN003
+            _ = prompt, kwargs
+            return LLMResponse(
+                raw="{}",
+                parsed={
+                    "overall_summary": "幻觉 plan。",
+                    "steps": [
+                        {
+                            "scene_id": "scene-FAKE",  # 不在 catalog 里
+                            "target_dimensions": ["hook"],
+                            "rationale": "瞎想。",
+                            "expected_changes": "也瞎想。",
+                        }
+                    ],
+                },
+                provider="openai",
+                model="gpt-test",
+                elapsed_ms=20,
+            )
+
+    async def _run():
+        with pytest.raises(ScoreLLMError, match="no valid steps"):
+            await propose_plan(
+                script_id="script-9",
+                improvement_brief={
+                    "title": "x",
+                    "rationale": "y",
+                    "dimension_key": "hook",
+                    "dimension_label": "抓人力",
+                },
+                caller=_FakeCaller(),
+            )
+
+    asyncio.run(_run())
+
+
+def test_propose_plan_no_driver_raises_value_error() -> None:
+    """dimension_keys / improvement_brief / diagnostic_brief 全空 → 立即报错。"""
+
+    async def _run():
+        with pytest.raises(ValueError, match="propose_plan"):
+            await propose_plan(script_id="s1")
+
+    asyncio.run(_run())
+
+
+def test_execute_plan_step_invokes_llm_with_investment_dims(monkeypatch) -> None:
+    """execute_plan_step 只接受投资决策五维键，prompt 内能拿到 expected_changes。"""
+
     from service.script_tools import rewrite_chain as chain
 
     fake_ctx = {
@@ -65,7 +249,6 @@ def test_execute_plan_step_uses_action_expected_changes(monkeypatch) -> None:
     }
 
     monkeypatch.setattr(chain, "_load_rewrite_context", lambda *args, **kwargs: fake_ctx)
-    monkeypatch.setattr(chain, "_load_scene_expected_changes", lambda *args, **kwargs: "压缩对白并补动作反馈")
 
     class _FakeCaller:
         def __init__(self) -> None:
@@ -88,13 +271,30 @@ def test_execute_plan_step_uses_action_expected_changes(monkeypatch) -> None:
         result = await execute_plan_step(
             script_id="script-1",
             scene_id="s1",
-            target_dimensions=["story", "dialogue"],
-            expected_changes="",
+            target_dimensions=["hook", "payoff"],
+            expected_changes="开篇 3 秒抛出反向悬念，结尾兑现承诺。",
             caller=fake,
         )
         assert result.scene_id == "s1"
         assert result.rewritten_text == "改写后文本"
-        assert result.target_dimensions == ["story", "dialogue"]
-        assert fake.prompts and "压缩对白并补动作反馈" in fake.prompts[0]
+        assert result.target_dimensions == ["hook", "payoff"]
+        prompt = fake.prompts[0]
+        assert "开篇 3 秒抛出反向悬念" in prompt
+        assert "hook" in prompt and "payoff" in prompt
+
+    asyncio.run(_run())
+
+
+def test_execute_plan_step_rejects_legacy_dimensions() -> None:
+    """老 v3 维度键（story / character / ...）必须被拒收，强制走五维。"""
+
+    async def _run():
+        with pytest.raises(ValueError, match="target_dimensions"):
+            await execute_plan_step(
+                script_id="script-1",
+                scene_id="s1",
+                target_dimensions=["story", "dialogue"],
+                expected_changes="x",
+            )
 
     asyncio.run(_run())
