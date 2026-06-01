@@ -32,14 +32,12 @@ from ..script_vfs import ScriptVFS, ScriptVFSError
 logger = logging.getLogger(__name__)
 
 
-# Wave C-2 (2026-05-31)：v3 6 维（story/character/concept/emotion/pacing/dialogue）
-# 已整体替换为 v4 5 维「投资决策」 + COMPLIANCE 独立 gate。维度概念**不正交映射**，
-# v3 dim_key 会被 service.score_one_dimension 显式拒绝（ValueError）。
-# 详见 docs/2026-05-31-投资决策评分框架-v4.md。
+# 投资决策五维 + COMPLIANCE 独立 gate（详见 docs/2026-05-31-投资决策评分框架.md）。
+# 这是唯一被 service.score_one_dimension 接受的 dim_key 枚举，其它字符串会被显式拒绝。
 _DIMENSIONS = (
     "hook",  # 抓人力：开场冲突 / 首集结尾留钩 / 第 1 分钟出诱因
     "archetype",  # 模板力：题材原型识别 + 角色原型清晰 + 模板内微差异
-    "payoff",  # 爽感力：每集爽点密度 + 反转密度 + 没有塌陷段
+    "payoff",  # 兑现力：每集爽点密度 + 反转密度 + 没有塌陷段
     "monetization",  # 变现力：付费章 cliffhanger + 付费后爽点 + 集尾留钩
     "producibility",  # 可生成力：场数 / 同框人数 / 特殊场景 / 外景比
     "compliance",  # 合规：独立 gate，high_risk 一票否决
@@ -1396,21 +1394,28 @@ class ProposeFullScriptPlanTool(BaseTool):
       * 仅 ``dimensions`` 非空 → 默认走 LLM-first，把维度作为 hint；
       * 全空 → 直接 ToolResult(success=False)，并 logger.warning。
 
-    向后兼容：propose_plan Python 签名仍接受老调用方的六维 ``dimensions``
-    字符串集（legacy CLI / 测试），通过 enum 值判定自动 fallback。
+    收尾约束：成功返回后 ``data["next_action"] = "reply_to_user_tool"``，
+    并在 ``summary`` 里显式提示 LLM 下一步必须 reply。这是为了让 LLM 在
+    ReAct 主循环里看到 tool result 时收到「任务完成」信号，避免误判“计划
+    还需迭代”而反复调本工具，触发 same_tool_convergence。
     """
 
     def __init__(self) -> None:
         super().__init__(
             name="propose_full_script_plan_tool",
             description=(
-                "根据剧本投资决策评分的改进建议或整体诊断，结合剧本概要 + "
-                "全部场次清单，由模型自主选出 1~12 场写出改写计划，返回 "
-                "rewrite_plan（含 scene_id/target_dimensions/rationale/"
-                "expected_changes）。不会修改任何场景文本。"
-                "推荐用法：当用户点击「按此条改稿」时把 TASK_META 里的 "
-                "improvement 原样传入；点击「按本次诊断改稿」时把 diagnostic "
-                "原样传入；二者都没有时再用 dimensions 作为目标维度提示。"
+                "生成全剧改写计划（只出 plan，不改文本）。返回 rewrite_plan，"
+                "其中每一步含 scene_id / target_dimensions / rationale / "
+                "expected_changes。\n"
+                "调用规则（重要）：必须从 TASK_META 透传至少一个改写目标，"
+                "否则工具会立刻报「缺少改写目标输入」失败：\n"
+                "1) 若 TASK_META.improvement 非空（来自「按此条改稿」按钮），"
+                "调用形如 `{\"improvement\": { ...原样照抄 TASK_META.improvement ... }}`，"
+                "**必须**包含 improvement 字段，不要拆解、不要省略、不要替换成 dimensions；\n"
+                "2) 若 TASK_META.diagnostic 非空（来自「按本次诊断改稿」按钮），"
+                "调用形如 `{\"diagnostic\": { ...原样照抄 TASK_META.diagnostic ... }}`；\n"
+                "3) 仅当上述两者都没有时，才退化到 `{\"dimensions\": [\"hook\", ...]}`。\n"
+                "空对象 `{}` 是非法调用，会直接失败。"
             ),
         )
         self.parameters_schema = {
@@ -1538,10 +1543,22 @@ class ProposeFullScriptPlanTool(BaseTool):
         if dim_keys:
             dim_summary_bits.append("/".join(dim_keys))
         dim_summary = "+".join(dim_summary_bits) if dim_summary_bits else "—"
+        # 把"下一步必须 reply"的指令直接绑在 summary 里——LLM 在 ReAct
+        # observation 里看到的 tool 反馈就是这段，明确强信号优于隐含约定。
+        next_action_hint = (
+            "下一步必须立即调用 reply_to_user_tool 把本计划展示给用户；"
+            "不要再次调用 propose_full_script_plan_tool。"
+        )
         if step_count == 0:
-            summary = f"全剧改写计划：未发现需改写场次（{dim_summary}）"
+            summary = (
+                f"全剧改写计划：未发现需改写场次（{dim_summary}）。"
+                f"{next_action_hint}"
+            )
         else:
-            summary = f"全剧改写计划完成：共 {step_count} 场（{dim_summary}）"
+            summary = (
+                f"全剧改写计划完成：共 {step_count} 场（{dim_summary}）。"
+                f"{next_action_hint}"
+            )
         return ToolResult(
             success=True,
             data={
@@ -1551,6 +1568,12 @@ class ProposeFullScriptPlanTool(BaseTool):
                 "diagnostic": diagnostic,
                 "rewrite_plan": plan_dict,
                 "script_id": script_id,
+                # 强信号：让 LLM 在 ReAct observation 里一眼看到下一步收尾动作。
+                "next_action": "reply_to_user_tool",
+                "next_action_reason": (
+                    "plan 已生成，前端 RewritePlanCard 会基于 reply_to_user_tool "
+                    "的内容渲染出可勾选的「执行选中」按钮，不需要再迭代 plan。"
+                ),
             },
             summary=summary,
         )
@@ -1569,6 +1592,19 @@ class RewriteSceneTool(BaseTool):
                 "供后续统一 diff 生成。"
             ),
         )
+
+    def convergence_key(self, parameters: Dict[str, Any]) -> str:
+        """Multi-scene rewrites legitimately call this tool N times in a row.
+
+        Identity here is the scene the model targets, not the dims/expected text
+        (which we want to allow varying without resetting the guard either).
+        Without this override, asking the agent to rewrite 5 scenes trips the
+        same-tool-convergence guard at scene 4 and silently aborts the batch.
+        """
+        params = parameters or {}
+        scene_id = str(params.get("scene_id") or "").strip()
+        file_path = str(params.get("file_path") or "").strip()
+        return scene_id or file_path or "rewrite_scene_tool:unknown"
         self.parameters_schema = {
             "type": "object",
             "properties": {
@@ -1765,3 +1801,342 @@ def _persist_scene_text(
             raise ValueError(
                 f"persist failed: scene {scene_id} not found in script {expected_script_id}"
             )
+
+
+# ============================================================
+# ParallelRewriteScenesTool ——「按选中 N 场改写」批量并发实现
+# ============================================================
+#
+# 决策来源：docs/2026-06-01-parallel-rewrite-scenes-decision.md（路线 B）。
+# 关键事实：
+#   - 每场 LLM 改写互不依赖（独立 prompt：整剧概要 + 该场前后 2 场摘要 + 该场原文）
+#   - LLM 决策这一层的 prompt 体积是 O(N=scene 数量 × ~50 bytes)，几乎不变
+#   - 工具内 asyncio.gather 把 N 路 LLM 改写并行起来，总耗时 ≈ 单场耗时（受 _MAX_PARALLEL_REWRITES 上限）
+#   - state/DB 写入串行收尾，避免并发改 modified_files / valtio-style 容器撕裂
+
+# 默认并发上限。LLM provider（DashScope qwen-max）的 QPS 限制和 token bucket 都
+# 是按账号粒度算的，5 路同时跑通常安全；> 5 用 Semaphore 排队不报错。
+# 升级前需要在 docs/2026-06-01-parallel-rewrite-scenes-decision.md §5 评估。
+_MAX_PARALLEL_REWRITES = 5
+
+
+class ParallelRewriteScenesTool(BaseTool):
+    """批量并发改写 N 场。
+
+    LLM 一次 tool_call 派发全部场次；工具内对每条 scene 单独走 execute_plan_step
+    （改写 prompt 与单场调用一字不差），用 asyncio.Semaphore + gather 控制并发。
+
+    返回 ToolResult.data:
+        successes: [{scene_id, file_path, target_dimensions, operation_id, ...}]
+        errors:    [{scene_id, error}]
+        count:     int  # 输入场次总数
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            name="parallel_rewrite_scenes_tool",
+            description=(
+                "批量并发改写 N 场（execute 阶段一次性派发选中的全部场次）。"
+                "每场 LLM 改写互不依赖，工具内并发执行，总耗时 ≈ 单场耗时。"
+                "**N ≥ 2 时必须用本工具**，禁止逐场调 rewrite_scene_tool。"
+                "单场 / 失败场重试 才用 rewrite_scene_tool。"
+            ),
+        )
+        self.parameters_schema = {
+            "type": "object",
+            "properties": {
+                "scenes": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "scene_id": {"type": "string", "description": "目标场 UUID"},
+                            "file_path": {
+                                "type": "string",
+                                "description": "ScriptVFS 路径，如 scenes/E03-S005.txt（与 scene_id 二选一）",
+                            },
+                            "target_dimensions": {
+                                "type": "array",
+                                "items": {"type": "string", "enum": list(_INVESTMENT_DIM_KEYS)},
+                                "description": (
+                                    "本场改写目标维度（1-3 个）。可选值："
+                                    "hook=抓人力、archetype=模板力、payoff=兑现力、"
+                                    "monetization=变现力、producibility=可生成力。"
+                                ),
+                            },
+                            "expected_changes": {
+                                "type": "string",
+                                "description": "本场预期改写方向（可选）",
+                            },
+                        },
+                        "required": ["target_dimensions"],
+                    },
+                },
+                "script_id": {
+                    "type": "string",
+                    "description": "剧本 UUID；缺省时使用当前会话绑定剧本",
+                },
+            },
+            "required": ["scenes"],
+        }
+
+    def convergence_key(self, parameters: Dict[str, Any]) -> str:
+        """指纹 = 排序后的 scene_id 集合。
+
+        不同的选场组合 → 不同指纹 → 不会被 same_tool_convergence 误伤；
+        反过来 LLM 真的连续两次用同一组 scene 调本工具（异常循环）仍能截停。
+        """
+        scenes = (parameters or {}).get("scenes") or []
+        ids = sorted(str((s or {}).get("scene_id") or "").strip() for s in scenes)
+        return ",".join(ids)
+
+    async def execute(self, agent_state: Any, parameters: Dict[str, Any]) -> ToolResult:
+        params = parameters or {}
+        raw_scenes = params.get("scenes")
+        if not isinstance(raw_scenes, list) or not raw_scenes:
+            return ToolResult(
+                success=False,
+                error="scenes must be a non-empty array",
+                summary="缺 scenes",
+            )
+
+        try:
+            script_id = _resolve_script_id(agent_state, params)
+        except ValueError as exc:
+            return ToolResult(success=False, error=str(exc), summary="剧本作用域不一致")
+        if not script_id:
+            return _missing_script_id()
+
+        try:
+            vfs = ScriptVFS(script_id=script_id)
+        except ScriptVFSError as exc:
+            return ToolResult(success=False, error=str(exc), summary="ScriptVFS 初始化失败")
+
+        # === 阶段 1：参数归一化 + scene_id 解析（同步，避免并发查 DB 撕） ===
+        # 每个槽位预先解析出 (scene_id, scene_path, dims, expected_changes)；
+        # 任何一条不合法直接进 errors[]，但不阻塞其它合法槽位。
+        prepared: List[Dict[str, Any]] = []
+        early_errors: List[Dict[str, Any]] = []
+        for idx, raw in enumerate(raw_scenes):
+            if not isinstance(raw, dict):
+                early_errors.append({"index": idx, "error": "scene entry must be an object"})
+                continue
+            dims = _normalize_investment_dim_keys(raw.get("target_dimensions"))
+            if not dims:
+                early_errors.append(
+                    {
+                        "index": idx,
+                        "scene_id": str(raw.get("scene_id") or ""),
+                        "error": "target_dimensions must be a non-empty subset of investment dims",
+                    }
+                )
+                continue
+            raw_sid = str(raw.get("scene_id") or "").strip()
+            raw_fp = str(raw.get("file_path") or "").strip()
+            if not raw_sid and not raw_fp:
+                early_errors.append(
+                    {"index": idx, "error": "either scene_id or file_path is required"}
+                )
+                continue
+            try:
+                if raw_sid and raw_fp:
+                    sid_from_path = vfs.resolve_scene_id(raw_fp)
+                    if sid_from_path != raw_sid:
+                        early_errors.append(
+                            {
+                                "index": idx,
+                                "scene_id": raw_sid,
+                                "error": "scene_id does not match file_path in current script scope",
+                            }
+                        )
+                        continue
+                    scene_id = raw_sid
+                    scene_path = vfs.resolve_file_path(scene_id)
+                elif raw_sid:
+                    scene_id = raw_sid
+                    scene_path = vfs.resolve_file_path(scene_id)
+                else:
+                    scene_id = vfs.resolve_scene_id(raw_fp)
+                    scene_path = vfs.coerce_file_path(raw_fp)
+            except ScriptVFSError as exc:
+                early_errors.append(
+                    {
+                        "index": idx,
+                        "scene_id": raw_sid,
+                        "error": f"resolve failed: {exc}",
+                    }
+                )
+                continue
+
+            prepared.append(
+                {
+                    "index": idx,
+                    "scene_id": scene_id,
+                    "scene_path": scene_path,
+                    "target_dimensions": dims,
+                    "expected_changes": str(raw.get("expected_changes") or "").strip(),
+                }
+            )
+
+        if not prepared:
+            return ToolResult(
+                success=False,
+                error="no valid scenes to rewrite",
+                data={"errors": early_errors, "successes": [], "count": len(raw_scenes)},
+                summary=f"全部 {len(raw_scenes)} 场参数无效",
+            )
+
+        # === 阶段 2：并发 LLM 改写（execute_plan_step 不写库，纯改写） ===
+        from service.script_tools.llm_caller import LlmCaller, ScoreLLMError
+        from service.script_tools.rewrite_chain import execute_plan_step
+
+        caller = LlmCaller()
+        sem = asyncio.Semaphore(_MAX_PARALLEL_REWRITES)
+
+        async def _one(slot: Dict[str, Any]):
+            async with sem:
+                return await execute_plan_step(
+                    script_id=script_id,
+                    scene_id=slot["scene_id"],
+                    target_dimensions=slot["target_dimensions"],
+                    expected_changes=slot["expected_changes"]
+                    or "按目标维度修复弱项并提升可读性。",
+                    caller=caller,
+                )
+
+        logger.info(
+            "parallel_rewrite_scenes_tool dispatching script=%s scenes=%d concurrency=%d",
+            script_id,
+            len(prepared),
+            min(len(prepared), _MAX_PARALLEL_REWRITES),
+        )
+        gather_results = await asyncio.gather(
+            *(_one(slot) for slot in prepared), return_exceptions=True
+        )
+
+        # === 阶段 3：串行 apply（persist + record_op + agent_state mutate） ===
+        # 串行的原因：modified_files / original_file_contents 是 plain dict/set，
+        # 多协程并发写会出现 lost update；DB UPDATE 本身有行锁但 record_rewrite_op
+        # 内部还有读-改-写循环，并发也不安全。串行收尾的代价只是 N 个轻量 DB 写，
+        # 不影响 LLM 阶段的并发收益。
+        successes: List[Dict[str, Any]] = []
+        run_errors: List[Dict[str, Any]] = list(early_errors)
+        user_id = _coerce_optional_int(getattr(agent_state, "user_id", None))
+
+        for slot, res in zip(prepared, gather_results):
+            scene_id = slot["scene_id"]
+            scene_path = slot["scene_path"]
+            if isinstance(res, ScoreLLMError):
+                logger.warning(
+                    "parallel_rewrite_scenes_tool LLM failed scene=%s err=%s", scene_id, res
+                )
+                run_errors.append(
+                    {"index": slot["index"], "scene_id": scene_id, "error": f"LLM error: {res}"}
+                )
+                continue
+            if isinstance(res, ValueError):
+                run_errors.append(
+                    {"index": slot["index"], "scene_id": scene_id, "error": str(res)}
+                )
+                continue
+            if isinstance(res, Exception):
+                logger.exception(
+                    "parallel_rewrite_scenes_tool unexpected error scene=%s", scene_id
+                )
+                run_errors.append(
+                    {
+                        "index": slot["index"],
+                        "scene_id": scene_id,
+                        "error": f"{type(res).__name__}: {res}",
+                    }
+                )
+                continue
+
+            result = res  # RewriteResult
+            try:
+                _persist_scene_text(
+                    scene_id=scene_id,
+                    new_text=result.rewritten_text,
+                    expected_script_id=script_id,
+                )
+            except ValueError as exc:
+                run_errors.append(
+                    {
+                        "index": slot["index"],
+                        "scene_id": scene_id,
+                        "error": f"persist failed: {exc}",
+                    }
+                )
+                continue
+
+            operation_ref: Optional[str] = None
+            if user_id is None:
+                logger.warning(
+                    "parallel_rewrite_scenes_tool skip record_rewrite_op: missing user_id "
+                    "(script=%s scene=%s)",
+                    script_id,
+                    scene_id,
+                )
+            else:
+                from service import script_operation_service
+
+                try:
+                    op_record = script_operation_service.record_rewrite_op(
+                        script_id=script_id,
+                        user_id=user_id,
+                        scene_id=scene_id,
+                        target_dimension="/".join(slot["target_dimensions"])
+                        if slot["target_dimensions"]
+                        else "general",
+                        issue=slot["expected_changes"],
+                        original_text=result.original_text,
+                        rewritten_text=result.rewritten_text,
+                        rationale=result.rationale or "",
+                    )
+                    operation_ref = str(op_record.get("operation_id") or "").strip() or None
+                except script_operation_service.OperationError as exc:
+                    logger.warning(
+                        "parallel_rewrite_scenes_tool record_rewrite_op failed (non-blocking): %s",
+                        exc,
+                    )
+
+            _mutate_agent_state_for_scene(
+                agent_state=agent_state,
+                scene_path=scene_path,
+                scene_id=scene_id,
+                original_text=result.original_text,
+            )
+
+            successes.append(
+                {
+                    "scene_id": scene_id,
+                    "file_path": scene_path,
+                    "scene_label": result.scene_label,
+                    "target_dimensions": list(result.target_dimensions),
+                    "operation_id": operation_ref,
+                    "rationale": result.rationale,
+                    "original_chars": len(result.original_text),
+                    "rewritten_chars": len(result.rewritten_text),
+                }
+            )
+
+        # 部分成功也算 success=True；agent 可以基于 errors[] 决定是否单场重试。
+        # 仅当 0 场成功时 success=False。
+        ok_count = len(successes)
+        total = len(raw_scenes)
+        summary = (
+            f"并行改写 {ok_count}/{total} 场成功"
+            + (f"，{len(run_errors)} 场失败" if run_errors else "")
+        )
+        return ToolResult(
+            success=ok_count > 0,
+            data={
+                "successes": successes,
+                "errors": run_errors,
+                "count": total,
+                "concurrency": min(total, _MAX_PARALLEL_REWRITES),
+            },
+            summary=summary,
+            error=None if ok_count > 0 else "all scenes failed; see data.errors",
+        )

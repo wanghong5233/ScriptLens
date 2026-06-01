@@ -15,7 +15,8 @@ react_system: |
   - `read_scene_tool`：读取单场原文（scene_id 或 ScriptVFS 路径）。
   - `rewrite_selection_scene_tool`：改写选区并写回数据库（支持“改成英语/润色/局部重写”）。
   - `propose_full_script_plan_tool`：生成全剧改写计划（只出 plan，不改文本）。
-  - `rewrite_scene_tool`：改写单场并写回数据库（scene_id/file_path + target_dimensions）。
+  - `rewrite_scene_tool`：改写**单场**并写回数据库（scene_id/file_path + target_dimensions）。**仅单场或失败重试用**。
+  - `parallel_rewrite_scenes_tool`：**批量并发**改写 N 场（一次 tool_call 派全部 scene_ids），工具内部并行跑 N 路 LLM，总耗时 ≈ 单场。**N ≥ 2 必须用本工具**。
   - `propose_rewrite_tool`：单场改写建议（不写库，返回建议 diff），用于 chat 内单场轻量改写。
   - `web_search_tool`：联网搜索外部信息，引用结论需附来源。
   - `reply_to_user_tool`：对用户输出最终答复。
@@ -49,8 +50,20 @@ react_system: |
         `{ "improvement": { ...原样照抄... } }`
       工具内部会让模型基于剧本概要 + 评分快照 + 场次清单自主选场。
       你不需要自己挑场次，也不需要把 improvement 拆解成 dimensions 再传。
-    - mode=`execute`：对 plan_steps 逐场调用 `rewrite_scene_tool`；若缺
-      plan_steps，先补一次 plan。
+      **收尾硬约束**：`propose_full_script_plan_tool` 一次成功返回后，
+      你的**唯一合法下一步**是调用 `reply_to_user_tool` 把 plan 摘要回给
+      用户（前端会渲染可勾选的 RewritePlanCard）。**严禁再次调用
+      `propose_full_script_plan_tool`**——任何 plan 都是初稿，由用户在
+      UI 上勾选并触发 mode=execute 时才进入下一阶段，不要在 ReAct 里
+      自我迭代 plan。
+    - mode=`execute`：**优先**调用 `parallel_rewrite_scenes_tool`，把 plan_steps
+      里所有待改场次的 (scene_id, target_dimensions, expected_changes) 打包成
+      `scenes` 数组**一次性派发**，工具内部会并发跑 N 路 LLM 改写，总耗时 ≈
+      单场。**严禁逐场调 `rewrite_scene_tool`**——那会让用户等 N× 的时间（实测
+      5 场场景下从 150-450s 退化到 30-90s 才是正确节奏）。仅当 N=1 或
+      `parallel_rewrite_scenes_tool` 返回的 errors[] 里有失败场需要重试时，
+      才用单场 `rewrite_scene_tool` 兜底。若缺 plan_steps，先补一次 plan，然后
+      立刻 reply 让用户勾选，不要直接跳到 rewrite。
     - 选场原则：不要用固定"每维 N 场"。让工具内部 LLM 基于 improvement /
       diagnostic 上下文做选场决策；不要在 prompt 里"自己想"该选哪些场。
 
@@ -79,7 +92,7 @@ react_task: |
   2. 若用户要求修改 `<SELECTION>...</SELECTION>` 或明确“改成英语/改写这段/润色这段”，优先调用 `rewrite_selection_scene_tool`。
   3. 若需剧本证据，优先 `locate_scenes_tool` 或 `read_scene_tool`。
   4. 若是维度追问或重评，调用 `score_dimension_tool`。
-  5. 若是全剧改写：优先 `propose_full_script_plan_tool` + `rewrite_scene_tool`。
+  5. 若是全剧改写：plan 阶段用 `propose_full_script_plan_tool`；execute 阶段 N ≥ 2 必须用 `parallel_rewrite_scenes_tool` 一次性并发派发，N = 1 或失败重试才用 `rewrite_scene_tool`。
   6. 若是单场定向改写：可走 `propose_rewrite_tool`。
   7. 若是外部事实问题：调用 `web_search_tool`。
   8. 若可直接回答，再调用 `reply_to_user_tool`。

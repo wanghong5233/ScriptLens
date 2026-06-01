@@ -119,11 +119,45 @@ class LLMClient(LLMRuntime):
                 tool_name = function.get("name", "")
                 arguments_str = function.get("arguments", "{}")
 
+                # Qwen (and other Chinese LLMs) routinely emit Tool-Calling
+                # arguments where the JSON string value contains raw LF / CR /
+                # TAB characters (e.g. multi-line markdown stuffed into a
+                # "reply" field) instead of escaping them as \n. Strict
+                # json.loads then fails, the caller silently falls back to
+                # parameters={}, and reply_to_user_tool reports "Reply content
+                # cannot be empty" — a completely misleading error that wastes
+                # a guardrail slot (consecutive_failures=1/2 → 2/2) and shows
+                # the user a fake "回复内容不能为空" banner.
+                #
+                # Fix: parse with strict=False (RFC-compliant relaxation that
+                # accepts unescaped control chars inside strings) and only fall
+                # back to empty when both attempts fail. This keeps behaviour
+                # for well-formed payloads while letting borderline-malformed
+                # ones through.
+                parameters = None
                 try:
                     parameters = json.loads(arguments_str)
-                except json.JSONDecodeError:
-                    logger.warning("Failed to parse tool arguments: %s", arguments_str)
-                    parameters = {}
+                except json.JSONDecodeError as strict_err:
+                    try:
+                        parameters = json.loads(arguments_str, strict=False)
+                        logger.warning(
+                            "Tool arguments recovered via strict=False "
+                            "(model emitted unescaped control chars). tool=%s "
+                            "strict_err=%s",
+                            tool_name,
+                            strict_err,
+                        )
+                    except json.JSONDecodeError as lax_err:
+                        logger.warning(
+                            "Failed to parse tool arguments (both strict and "
+                            "strict=False). tool=%s strict_err=%s lax_err=%s "
+                            "arguments_str=%r",
+                            tool_name,
+                            strict_err,
+                            lax_err,
+                            arguments_str[:500],
+                        )
+                        parameters = {}
 
                 return {
                     "tool_name": tool_name,

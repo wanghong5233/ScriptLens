@@ -2900,10 +2900,12 @@ const LatexEditorPage = () => {
       session_id: null,
       sessionId: null,
     })
-    void bindWorkspaceSession(
-      { workspaceId, sessionId: null },
-      { loading: false, errorToast: false },
-    ).catch(() => {})
+    // 关键：不再 fire-and-forget bindWorkspaceSession(null)。
+    //   - 紧接着的 handleSend → ensureScriptLensSessionId 会立刻 createSession +
+    //     bind(newId)，一次性把 workspace 绑到新 session。
+    //   - 如果这里再发 bind(null) 异步飞行，会跟 bind(newId) 比赛：
+    //     bind(null) 后到 → 服务端 active session 又掉回 null，前端 UI 看到
+    //     的“新对话”凭空消失只剩老历史。
   }, [])
 
   const dispatchAgentTask = useCallback(
@@ -6703,9 +6705,17 @@ const LatexEditorPage = () => {
       message.warning('请输入指令或添加图片')
       return
     }
+    // 关键：走 valtio raw proxy 实时值，绕过 React 闭包。
+    //   dispatchAgentTask 是 useCallback，持有的 handleSend 是上一帧的版本，
+    //   handleSend 内的 snap.workspaceConfig 又是上一帧的 React state 镜像。
+    //   resetToNewChatSession 把 docStudioState.workspaceConfig.session_id 同步
+    //   置 null 后，这里如果读 snap.* 仍然是 OLD session_id —— 会直接 reuse
+    //   老 thread，导致新 CTA 消息混进老历史。
     let activeSessionId =
-      snap.workspaceConfig?.session_id ?? snap.workspaceConfig?.sessionId ?? null
-    if (!snap.workspaceConfig?.session_id && !snap.workspaceConfig?.sessionId) {
+      docStudioState.workspaceConfig?.session_id ??
+      docStudioState.workspaceConfig?.sessionId ??
+      null
+    if (!activeSessionId) {
       try {
         const { data: sessionRes } = await createSession(
           { ephemeral: true, surface: 'doc_studio' },
@@ -6720,9 +6730,15 @@ const LatexEditorPage = () => {
           { workspaceId: snap.workspaceId, sessionId },
           { loading: false, errorToast: false },
         )
-        docStudioActions.setWorkspaceConfig(detail.config)
-        activeSessionId =
-          detail?.config?.session_id ?? detail?.config?.sessionId ?? sessionId
+        const prevConfig = docStudioState.workspaceConfig || {}
+        const serverConfig = detail?.config || {}
+        docStudioActions.setWorkspaceConfig({
+          ...prevConfig,
+          ...serverConfig,
+          session_id: sessionId,
+          sessionId,
+        })
+        activeSessionId = sessionId
       } catch (e: any) {
         const detail = e?.response?.data?.detail
         const status = e?.response?.status

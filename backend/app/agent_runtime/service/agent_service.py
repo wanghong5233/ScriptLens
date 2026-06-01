@@ -1515,8 +1515,13 @@ class LaTeXEditAgent(BaseAgent):
         Returns:
             最终状态
         """
-        # 跟踪最近的工具调用，用于检测重复循环
-        recent_tool_calls = []
+        # 跟踪最近的工具调用，用于检测重复循环。
+        # 元素是 (tool_name, convergence_key) 对：仅当窗口里完全相同的对偶被填满才视为
+        # 收敛。这样像 rewrite_scene_tool 这种 "一场一调" 的批量工具可以合法连调 N 次
+        # （每次 scene_id 不同 → 指纹不同），不会被防线误伤；而 plan 工具如果真的卡死
+        # 用相同参数反复跑，仍然会被截停。指纹由 BaseTool.convergence_key 提供，工具可
+        # 以按需 override。
+        recent_tool_calls: List[tuple[str, str]] = []
         forced_action: Optional[AgentStep] = None
         iteration_limit = min(self.max_iterations, state.plan_max_iterations or self.max_iterations)
         task_completed_early = False  # 标记任务是否提前完成（通过 break）
@@ -1539,20 +1544,37 @@ class LaTeXEditAgent(BaseAgent):
             if should_cancel and should_cancel():
                 raise AgentCancelledError("cancelled_by_user")
             
-            # 检测同工具收敛：连续 same_tool_convergence_count 次调同一工具，强制走 reply_to_user_tool
+            # 检测同工具收敛：连续 same_tool_convergence_count 次以 *同一参数指纹* 调
+            # 同一工具，强制走 reply_to_user_tool。
+            #
+            # 注意：判定的是 "工具名 + 参数指纹"，不是工具名。否则 rewrite_scene_tool 这
+            # 类天然要被批量调 N 次（每场一次，scene_id 不同）的工具会在第 N 次被防线
+            # 截停 —— 真实事故：用户勾选 5 场改写，第 4 场卡死，agent 自动收尾到
+            # reply_to_user_tool，前端看到 "已生成改写计划" 但实际只改了 3 场。
             if action.type == AgentStepType.ACTION and action.tool_name:
                 same_tool_n = self._loop_limits.same_tool_convergence_count
-                recent_tool_calls.append(action.tool_name)
+                tool_obj_for_key = self.tools.get_tool(action.tool_name)
+                if tool_obj_for_key is not None:
+                    try:
+                        conv_key = tool_obj_for_key.convergence_key(action.parameters or {})
+                    except Exception:  # noqa: BLE001
+                        # convergence_key 任何异常都退化成保守的整参指纹，绝不能让指纹
+                        # 抛错影响主循环。
+                        conv_key = repr(action.parameters or {})
+                else:
+                    conv_key = repr(action.parameters or {})
+                recent_tool_calls.append((action.tool_name, conv_key))
                 if len(recent_tool_calls) > same_tool_n:
                     recent_tool_calls.pop(0)
-                # 仅当窗口被填满且全是同一工具时触发；reply_to_user_tool 自身不参与收敛
+                # 仅当窗口被填满且窗口里所有对偶完全相同时触发；reply_to_user_tool 自
+                # 身不参与收敛。
                 if (
                     len(recent_tool_calls) >= same_tool_n
                     and len(set(recent_tool_calls)) == 1
                     and action.tool_name != "reply_to_user_tool"
                 ):
                     reason = (
-                        f"检测到工具 {action.tool_name} 连续 {same_tool_n} 次同名调用，已触发收敛保护"
+                        f"检测到工具 {action.tool_name} 连续 {same_tool_n} 次以相同参数调用，已触发收敛保护"
                     )
                     logger.warning(
                         "agent_guardrail kind=same_tool_convergence "
@@ -2260,6 +2282,10 @@ class LaTeXEditAgent(BaseAgent):
         modified_files = list(getattr(state, "modified_files", set()))
         warnings = [str(item) for item in (state.warnings or []) if item]
         trace_lines: List[str] = []
+        # 收尾时如果 trace 里有成功的 plan-only 工具（propose_full_script_plan_tool /
+        # propose_rewrite_tool 等），单独抽出来给 prompt 一个明确的"已完成"信号，
+        # 避免 LLM 因为 modified_files=空就误判成"任务受阻"。
+        plan_only_success: Optional[str] = None
         for step in state.execution_history[-10:]:
             if step.type == AgentStepType.RESULT:
                 result = step.result or {}
@@ -2268,6 +2294,11 @@ class LaTeXEditAgent(BaseAgent):
                 if len(summary) > 120:
                     summary = f"{summary[:120]}..."
                 trace_lines.append(f"- {step.tool_name or 'tool'} [{status}] {summary}")
+                if status == "ok" and step.tool_name in {
+                    "propose_full_script_plan_tool",
+                    "propose_rewrite_tool",
+                }:
+                    plan_only_success = summary or step.tool_name
             elif step.type == AgentStepType.ERROR:
                 summary = str((step.result or {}).get("error") or step.content or "").replace("\n", " ").strip()
                 if len(summary) > 120:
@@ -2277,6 +2308,16 @@ class LaTeXEditAgent(BaseAgent):
         modified_text = ", ".join(modified_files[:8]) if modified_files else "无"
         warning_text = "\n".join(f"- {item}" for item in warnings[-4:]) if warnings else "- 无"
 
+        # plan-only 阶段不写文件是正常态，prompt 里**显式禁止**说"未修改/阻塞"。
+        plan_hint = (
+            f"\n（关键提示：trace 显示 plan 工具已成功产出 plan：{plan_only_success}。"
+            "这是 plan 阶段，未写文件是预期行为，**禁止**输出'未修改文件'、'阻塞'、"
+            "'需要补充参数'之类的负向措辞；请直接告诉用户计划已生成，"
+            "在下方 RewritePlanCard 勾选场次并点击「执行选中」即可继续。）\n"
+            if plan_only_success
+            else ""
+        )
+
         prompt = (
             "你是 Doc Studio Agent 的收敛总结器，需要基于真实执行状态输出对用户可读的最终回复。\n"
             "请严格基于给定状态，不要编造，不要套用抱歉模板。\n\n"
@@ -2284,12 +2325,15 @@ class LaTeXEditAgent(BaseAgent):
             f"用户原始请求：{user_intent}\n"
             f"已修改文件：{modified_text}\n"
             f"最近执行轨迹：\n{trace_text}\n"
-            f"系统告警：\n{warning_text}\n\n"
+            f"系统告警：\n{warning_text}\n"
+            f"{plan_hint}\n"
             "输出要求：\n"
             "1) 如果已修改文件，先明确“修改已完成/部分完成”，并提示在 Diff 面板 Keep/Undo。\n"
-            "2) 如果未修改，说明阻塞原因和下一步最小操作。\n"
-            "3) 语气专业、简洁，最多 6 行，不输出内部推理链。\n"
-            "4) 使用中文。"
+            "2) 如果 trace 里有成功的 plan 工具（plan_only_success 提示存在），"
+            "    直接告诉用户计划已生成、请在下方勾选场次并点「执行选中」，不要说阻塞。\n"
+            "3) 只有在 trace 既没文件修改、也没成功 plan 时，才提示用户补充上下文。\n"
+            "4) 语气专业、简洁，最多 6 行，不输出内部推理链。\n"
+            "5) 使用中文。"
         )
         llm_options = dict(state.llm_options or {})
         raw_max_tokens = llm_options.get("llm_max_tokens")
@@ -2333,6 +2377,27 @@ class LaTeXEditAgent(BaseAgent):
             return (
                 f"已完成文件修改，触发了运行收敛保护（{reason}）。\n\n"
                 f"已修改文件：{modified_preview}\n"
+            )
+        # plan-only 阶段（未写文件但 plan 工具成功）：直接告诉用户去勾选执行，
+        # 不要说"未修改/阻塞"——那是 LLM 真正失败时才该出现的措辞。
+        plan_summary: Optional[str] = None
+        for step in state.execution_history[-10:]:
+            if step.type != AgentStepType.RESULT:
+                continue
+            result = step.result or {}
+            if not result.get("success"):
+                continue
+            if step.tool_name in {
+                "propose_full_script_plan_tool",
+                "propose_rewrite_tool",
+            }:
+                plan_summary = str(result.get("summary") or step.content or "").strip()
+                break
+        if plan_summary:
+            return (
+                "全剧改写计划已生成，请在下方卡片里勾选要执行的场次，"
+                "然后点击「执行选中」继续。\n\n"
+                f"计划摘要：{plan_summary}\n"
             )
         intent_line = f"原始请求：{user_intent}\n" if user_intent else ""
         return (

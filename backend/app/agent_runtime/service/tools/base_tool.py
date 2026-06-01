@@ -2,6 +2,7 @@
 工具系统基础框架
 定义工具接口和工具注册表
 """
+import json
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Optional, List
 from dataclasses import dataclass
@@ -61,6 +62,36 @@ class BaseTool(ABC):
             参数是否有效
         """
         return True
+
+    def convergence_key(self, parameters: Dict[str, Any]) -> str:
+        """
+        Compute a stable fingerprint of `parameters` used by the agent
+        same-tool-convergence guard to detect "the model is calling the same
+        tool with the same inputs in a tight loop".
+
+        Default: "" (empty string), which means the guard collapses to
+        "same tool name N times in a row" — the original, conservative
+        behavior before per-tool fingerprints existed.
+
+        Why the default is intentionally degenerate:
+        --------------------------------------------
+        We tried `json.dumps(parameters)` as the default, but real LLM loops
+        (e.g. rewrite_selection_scene_tool emitting token-level garbage and
+        the model "trying again" with a slightly-edited expected_changes
+        string) end up with different fingerprints on every iteration, so
+        the guard never fires and the run only stops on max_iterations. The
+        observed failure mode is the model burning the full iteration
+        budget while the file accumulates degenerate content.
+
+        Tools that DO legitimately get called many times with different
+        identity-bearing arguments (e.g. one call per scene_id in batch
+        rewrite) MUST override this to return only those identity fields
+        (typically scene_id / file_path). The override widens the
+        fingerprint domain so different scenes do not collide into a false
+        convergence trip.
+        """
+        del parameters  # default keeps guardrail purely tool-name-based
+        return ""
 
 
 class ToolRegistry:

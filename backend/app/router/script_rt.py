@@ -16,6 +16,7 @@ D2-4 / D2-5 / D2-6 会在此基础上加 chat / rewrite / feedback / view。
 from __future__ import annotations
 
 import asyncio
+import time
 import json
 import logging
 import os
@@ -1021,20 +1022,26 @@ async def chat_with_script(
     agent = build_chat_agent(script_id=script_id)
     queue: asyncio.Queue = asyncio.Queue()
     sentinel: Tuple[str, Dict[str, Any]] = ("__END__", {})
+    # chat_session_start 一行总览：排障的第一锚点。trace_id 此时由 agent
+    # 内部生成（agent_service._build_operation_id 之后），所以在 _runner
+    # 拿到 raw_result 后再补一条 chat_session_end 总览（包含 trace_id）。
+    chat_start_ts = time.monotonic()
     logger.info(
-        "chat: agent ready, runner about to start script_id=%s session_id=%s user_id=%s intent_chars=%d",
+        "chat_session_start script_id=%s session_id=%s user_id=%s intent_chars=%d role=%s",
         script_id,
         session_id,
         current_user.id,
         len(user_intent or ""),
+        body.role,
     )
 
     async def _progress_callback(event_type: str, payload: Dict[str, Any]) -> None:
         # 关键观测点：每个 SSE 事件落 queue 前先 debug log，便于在 docker logs
         # 里看到 agent 真实推送了哪些 event（start/step/delta/finish/result）。
         logger.debug(
-            "chat: progress event script_id=%s event=%s payload_keys=%s",
+            "chat: progress event script_id=%s session_id=%s event=%s payload_keys=%s",
             script_id,
+            session_id,
             event_type,
             list(payload.keys()) if isinstance(payload, dict) else None,
         )
@@ -1044,7 +1051,11 @@ async def chat_with_script(
         # 进入 _runner 的第一行 log。如果 docker logs 里看不到这条，说明
         # asyncio.create_task(_runner()) 创建的 task 根本没获得调度（通常是
         # client 早早 disconnect 或者上层 BFF 把 fetch 整个 abort 了）。
-        logger.info("chat: _runner started script_id=%s session_id=%s", script_id, session_id)
+        logger.info(
+            "chat: _runner started script_id=%s session_id=%s",
+            script_id,
+            session_id,
+        )
 
         async def _emit_error_events(payload: Dict[str, Any]) -> None:
             err_payload = dict(payload) if isinstance(payload, dict) else {"message": str(payload)}
@@ -1107,11 +1118,28 @@ async def chat_with_script(
                     session_id,
                 )
                 raise
+            # chat_session_end 一行总览：含 trace_id，是排障的主索引行。
+            # 用户报错时给我截图，我从 docker logs grep trace_id=<hex> 一次定位。
+            execution_history = result_payload.get("execution_history") or []
+            tools_used = [
+                step.get("tool_name")
+                for step in execution_history
+                if isinstance(step, dict)
+                and step.get("type") == "action"
+                and step.get("tool_name")
+            ]
             logger.info(
-                "chat: agent.execute finished script_id=%s success=%s intent_type=%s changes=%d file_diffs=%d operation_id=%s",
+                "chat_session_end script_id=%s session_id=%s trace_id=%s "
+                "success=%s intent_type=%s elapsed_ms=%d steps=%d tools=%s "
+                "changes=%d file_diffs=%d operation_id=%s",
                 script_id,
+                session_id,
+                result_payload.get("trace_id") or "<missing>",
                 result_payload["success"],
                 result_payload.get("intent_type"),
+                int((time.monotonic() - chat_start_ts) * 1000),
+                len(execution_history),
+                tools_used,
                 len(result_payload.get("changes") or []),
                 len(result_payload.get("file_diffs") or []),
                 result_payload.get("operation_id"),
@@ -1124,17 +1152,34 @@ async def chat_with_script(
                 result_payload,
             ))
         except AgentScriptNotFoundError as exc:
-            logger.warning("chat: script not found script_id=%s", script_id)
+            logger.warning(
+                "chat: script not found script_id=%s session_id=%s",
+                script_id,
+                session_id,
+            )
             await _emit_error_events({"message": str(exc), "type": "ScriptNotFoundError", "http_status": 404})
         except AgentScriptPermissionError as exc:
-            logger.warning("chat: permission denied script_id=%s user_id=%s", script_id, current_user.id)
+            logger.warning(
+                "chat: permission denied script_id=%s session_id=%s user_id=%s",
+                script_id,
+                session_id,
+                current_user.id,
+            )
             await _emit_error_events({"message": str(exc), "type": "ScriptPermissionError", "http_status": 403})
         except AgentScriptNotReadyError as exc:
-            logger.warning("chat: script not ready script_id=%s", script_id)
+            logger.warning(
+                "chat: script not ready script_id=%s session_id=%s",
+                script_id,
+                session_id,
+            )
             await _emit_error_events({"message": str(exc), "type": "ScriptNotReadyError", "http_status": 409})
         except Exception as exc:
             # 其他未预期异常：明确发 error 事件并写完整堆栈日志，绝不吞掉
-            logger.exception("chat agent execute failed script_id=%s", script_id)
+            logger.exception(
+                "chat agent execute failed script_id=%s session_id=%s",
+                script_id,
+                session_id,
+            )
             await _emit_error_events({
                 "message": str(exc),
                 "type": exc.__class__.__name__,
@@ -1142,7 +1187,11 @@ async def chat_with_script(
             })
         finally:
             await queue.put(sentinel)
-            logger.info("chat: _runner exited script_id=%s session_id=%s", script_id, session_id)
+            logger.info(
+                "chat: _runner exited script_id=%s session_id=%s",
+                script_id,
+                session_id,
+            )
 
     runner_task = asyncio.create_task(_runner())
 
@@ -1161,8 +1210,9 @@ async def chat_with_script(
             # 被 starlette cancel。这正是 BFF AbortSignal.timeout 击穿
             # SSE 长连接时的特征——上次 chat 测试就死在这里。
             logger.info(
-                "chat: _stream closing script_id=%s events_yielded=%d runner_done=%s",
+                "chat: _stream closing script_id=%s session_id=%s events_yielded=%d runner_done=%s",
                 script_id,
+                session_id,
                 events_yielded,
                 runner_task.done(),
             )

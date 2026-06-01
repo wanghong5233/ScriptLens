@@ -7,6 +7,7 @@ from .tools.response_tools import ReplyToUserTool
 from .tools.script_tools import (
     ExtractCharactersTool,
     LocateScenesTool,
+    ParallelRewriteScenesTool,
     ProposeFullScriptPlanTool,
     ProposeRewriteTool,
     ReadSceneTool,
@@ -30,6 +31,10 @@ def create_tool_registry() -> ToolRegistry:
     registry.register(RewriteSelectionSceneTool())
     registry.register(ProposeFullScriptPlanTool())
     registry.register(RewriteSceneTool())
+    # 多场场景的批量并发改写。LLM 决策层面一次 tool_call 全派；工具内部
+    # asyncio.gather + Semaphore(5) 并发跑 N 路 execute_plan_step（每场独立 prompt）。
+    # 决策依据：docs/2026-06-01-parallel-rewrite-scenes-decision.md。
+    registry.register(ParallelRewriteScenesTool())
     registry.register(ProposeRewriteTool())
 
     registry.register(WebSearchTool())
