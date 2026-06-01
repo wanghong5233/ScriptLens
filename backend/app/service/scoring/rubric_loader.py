@@ -206,6 +206,10 @@ class ImprovementPlannerConfig(BaseModel):
     max_actions: int = Field(gt=0, le=10)
     min_signal_score_to_recommend: float = Field(ge=0.0, le=10.0)
     expected_verdict_lift_template_cn: str
+    # v4.1 多样性约束：每维度最多挑几条 improvement。0 / 负值 = 不约束（兼容旧 YAML）。
+    # 默认 1 = 强制每条 improvement 来自不同维度，防止单一维度（典型：producibility
+    # 因为多个低分 signal）霸占全部 top N 槽位。
+    per_dimension_cap: int = Field(default=1, ge=0, le=10)
 
 
 class DimensionTierCutsConfig(BaseModel):

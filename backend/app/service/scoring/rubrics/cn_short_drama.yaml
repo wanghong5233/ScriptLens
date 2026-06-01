@@ -549,6 +549,10 @@ improvement_planner:
   # signal 提升能让 dimension tier 升 1 档时的预计 verdict lift 文案；
   # tier 升 1 档的实际定义是 aggregator 内的 tier_cuts 比较
   expected_verdict_lift_template_cn: "{from_verdict} → {to_verdict}"
+  # v4.1 多样性约束：每维度最多挑 N 条 improvement，避免单一维度（典型如
+  # producibility 因多个 signal 同时低分）霸占全部 top N 槽位。0 = 不约束。
+  # dealbreaker 维度（aggregation.dealbreaker_dims）会被 round-robin 优先各给 1 条。
+  per_dimension_cap: 1
 
 # ============================================================
 # Tier 落档（DimensionScore.tier）

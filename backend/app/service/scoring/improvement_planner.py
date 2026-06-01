@@ -133,15 +133,36 @@ def plan_improvements(
     rubric: RubricConfig,
     planner_cfg: ImprovementPlannerConfig,
 ) -> list[ImprovementAction]:
-    """返回 top N 改进建议。
+    """返回 top N 改进建议（多样性约束 + dealbreaker 优先）。
 
-    候选筛选：
+    候选筛选（不变）：
     - signal.score < cfg.min_signal_score_to_recommend
-    - signal.status ∈ {COMPUTED, DEGRADED}（FAILED 的不推改进——还不知道好坏）
-    - dim.weight * (target_score - signal.score) 作为排序权重
+    - signal.status ∈ {COMPUTED, DEGRADED}（FAILED 不推改进——还不知道好坏）
+
+    排序与挑选（**v4.1 重写**）：
+
+    旧实现把所有 signal 拉到同一 pool 按 ``dim_weight × sig_weight × gap`` 全局排序，
+    一旦某维度有大 gap 信号（如 producibility 跨集复现角色 score=3 → gap=3）就会
+    霸占全部 top N 槽位 —— 即使该维度是 ``is_dealbreaker=False``，且其它 dealbreaker
+    维度（hook / payoff）也有低分 signal 应当优先改。线上观察：评分维度 payoff 5.2
+    被 5 个 ≤6 的 signal 触发，但 top_improvements 全是 producibility，0 个 payoff。
+
+    新实现遵循业界（ReelShort 内审 SOP / 字节短剧买手 60s 决策模型）"先救命再省钱"
+    优先级：
+
+    1. **dealbreaker-first 轮询**：先给 ``rubric.aggregation.dealbreaker_dims`` 里每个
+       维度发 1 个槽位（按各维度内最高 priority 的 signal 挑），dealbreaker 维度间
+       按 dim_weight 降序，平局按 dim_key 字典序稳定排
+    2. **多样性约束**：然后剩余槽位按全局 priority 排序，但每维度最多再补
+       ``per_dimension_cap`` 条（默认 1）
+    3. ``per_dimension_cap`` 为 0 或负数时视为不约束 —— 走旧的纯 priority 排序行为
+
+    这样 max_actions=3 时，dealbreaker 维度（hook / archetype / payoff）每个最多
+    占 1 槽，producibility / monetization 等非 dealbreaker 维度最多再补 1 槽。
     """
     target = planner_cfg.min_signal_score_to_recommend
-    candidates: list[tuple[float, DimensionScore, SignalResult]] = []
+    # candidates 携带 dim_weight 用于稳定排序时打破 priority 平局
+    candidates: list[tuple[float, DimensionScore, SignalResult, float]] = []
 
     for ds in dimension_scores.values():
         dim_cfg = rubric.dimensions.get(ds.key)
@@ -153,20 +174,67 @@ def plan_improvements(
             if sig.score >= target:
                 continue
             gap = target - sig.score
-            # weight: dim_weight * signal_weight_in_dim * gap
             sig_cfg = next((sc for sc in dim_cfg.signals if sc.key == sig.key), None)
             if sig_cfg is None:
                 continue
             priority = dim_cfg.weight * sig_cfg.weight_in_dim * gap
-            candidates.append((priority, ds, sig))
+            candidates.append((priority, ds, sig, dim_cfg.weight))
 
-    candidates.sort(key=lambda kv: kv[0], reverse=True)
+    # 全局优先级降序；priority 相同时把 dealbreaker 维度（dim_weight 更大）排前面
+    candidates.sort(key=lambda kv: (kv[0], kv[3]), reverse=True)
+
+    max_actions = planner_cfg.max_actions
+    per_dim_cap = planner_cfg.per_dimension_cap
+    dealbreaker_keys = set(rubric.aggregation.dealbreaker_dims or [])
+
+    picked: list[tuple[DimensionScore, SignalResult]] = []
+    picked_dim_count: dict[str, int] = {}
+    picked_sig_keys: set[tuple[str, str]] = set()
+
+    def _try_pick(ds: DimensionScore, sig: SignalResult) -> bool:
+        key = (ds.key, sig.key)
+        if key in picked_sig_keys:
+            return False
+        if per_dim_cap > 0 and picked_dim_count.get(ds.key, 0) >= per_dim_cap:
+            return False
+        picked.append((ds, sig))
+        picked_dim_count[ds.key] = picked_dim_count.get(ds.key, 0) + 1
+        picked_sig_keys.add(key)
+        return True
+
+    # 阶段 1：dealbreaker-first —— 每个 dealbreaker 维度先发一个槽位
+    if dealbreaker_keys and per_dim_cap > 0:
+        # 按 (dim_weight desc, dim_key asc) 处理 dealbreaker，保证 hook(0.25) 在
+        # payoff(0.20)/archetype(0.20) 之前；同权 dim 间用字典序稳定
+        deal_dims_with_weight: list[tuple[float, str]] = []
+        seen_deal_dim: set[str] = set()
+        for _, ds, _sig, dim_w in candidates:
+            if ds.key in dealbreaker_keys and ds.key not in seen_deal_dim:
+                deal_dims_with_weight.append((dim_w, ds.key))
+                seen_deal_dim.add(ds.key)
+        deal_dims_with_weight.sort(key=lambda kv: (-kv[0], kv[1]))
+
+        for _, dim_key in deal_dims_with_weight:
+            if len(picked) >= max_actions:
+                break
+            # 在该维度内挑最高 priority 的 signal
+            for _, ds, sig, _ in candidates:
+                if ds.key != dim_key:
+                    continue
+                if _try_pick(ds, sig):
+                    break
+
+    # 阶段 2：填满剩余槽位，按全局 priority 排序 + 每维度 cap 约束
+    for _, ds, sig, _ in candidates:
+        if len(picked) >= max_actions:
+            break
+        _try_pick(ds, sig)
 
     out: list[ImprovementAction] = []
     expected_lift = _expected_lift_label(verdict, planner_cfg)
     rationale_max = rubric.truncation.improvement_rationale_max_chars
 
-    for _, ds, sig in candidates[: planner_cfg.max_actions]:
+    for ds, sig in picked:
         title, rationale = _TEMPLATE_BY_SIGNAL.get(
             sig.key,
             (f"提升 {ds.key} 维度信号", f"{sig.key} 评分 {sig.score:.1f}/10，需要打磨"),
