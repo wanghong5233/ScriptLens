@@ -67,6 +67,8 @@ help:
 	@echo Smoke / E2E helpers (require curl + a registered user):
 	@echo   smoke-register U=name P=pwd        - POST /api/users/register
 	@echo   smoke-login    U=name P=pwd        - POST /api/users/login (prints token)
+	@echo   verify-gateway                     - End-to-end probe of LiteLLM billing gateway
+	@echo   verify-gateway-models              - Probe /models only (skip chat call)
 	@echo ----------------------------------------
 	@echo Disk cleanup:
 	@echo   docker-prune-soft - Safe prune
@@ -222,6 +224,17 @@ smoke-login:
 		-H "Content-Type: application/json" \
 		-d "{\"username\":\"$(U)\",\"password\":\"$(P)\"}"
 	@echo
+
+# 端到端验证 billing gateway 是否真的接通：在 api 容器里读 .env.dev 里的
+# BILLING_GATEWAY_BASE_URL + BILLING_SERVICE_SECRET，发 GET /models 和一次
+# 1-token chat 请求，全程不依赖 SCRIPTLENS_BILLING_MODE，不走本地 key。
+.PHONY: verify-gateway
+verify-gateway:
+	$(DC) exec -T $(SVC_API) python -m cli.verify_billing_gateway
+
+.PHONY: verify-gateway-models
+verify-gateway-models:
+	$(DC) exec -T $(SVC_API) python -m cli.verify_billing_gateway --skip-chat
 
 
 # ==========================================================
