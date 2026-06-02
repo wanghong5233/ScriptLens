@@ -16,13 +16,15 @@ D2-4 / D2-5 / D2-6 会在此基础上加 chat / rewrite / feedback / view。
 from __future__ import annotations
 
 import asyncio
+import functools
 import time
 import json
 import logging
 import os
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Tuple
 
 from fastapi import (
     APIRouter,
@@ -31,6 +33,7 @@ from fastapi import (
     Depends,
     File,
     HTTPException,
+    Request,
     UploadFile,
     status,
 )
@@ -44,6 +47,12 @@ from agent_runtime.factory import (
     ScriptNotReadyError as AgentScriptNotReadyError,
     ScriptPermissionError as AgentScriptPermissionError,
     build_chat_agent,
+)
+from agent_runtime.billing_context import (
+    BillingContext,
+    BillingIdentity,
+    BillingMetadata,
+    use_billing,
 )
 from core.config import settings
 from models.user import User
@@ -100,6 +109,11 @@ from service.script_query_service import (
 )
 from service.script_report_service import generate_report
 from utils.database import engine as default_engine, get_db
+from utils.billing_identity import (
+    RAVENWEB_TIMESTAMP_HEADER,
+    resolve_billing_user_id,
+    validate_ravenweb_timestamp_header,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -127,6 +141,7 @@ _ALLOWED_SUFFIXES = {".docx", ".pdf", ".txt", ".md"}
 )
 async def upload_script(
     background_tasks: BackgroundTasks,
+    request: Request,
     file: UploadFile = File(...),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -201,9 +216,28 @@ async def upload_script(
             str(e),
         )
 
+    billing_user_id = resolve_billing_user_id(request, current_user)
+    timestamp_warning = validate_ravenweb_timestamp_header(request)
+    if timestamp_warning:
+        logger.warning(
+            "scriptlens service timestamp header warning path=%s reason=%s header=%s script_id=%s user_id=%s",
+            request.url.path,
+            timestamp_warning,
+            RAVENWEB_TIMESTAMP_HEADER,
+            script_id,
+            billing_user_id,
+        )
+    billing_ctx = BillingContext(
+        identity=BillingIdentity(user_id=billing_user_id),
+        metadata=BillingMetadata(
+            script_id=script_id,
+            intent="upload",
+        ),
+    )
+
     # 3. 注册 BackgroundTask 跑完整链路：ingest（切场入库）→ 自动评分报告
     #    用户上传剧本的产品语义就是「分析这个剧本」，不应让用户上传完再手动点一次。
-    background_tasks.add_task(_run_full_pipeline_task, script_id, str(storage_path))
+    background_tasks.add_task(_run_full_pipeline_task, script_id, str(storage_path), billing_ctx)
 
     return ScriptUploadResponse(
         id=script_id,
@@ -213,31 +247,51 @@ async def upload_script(
     )
 
 
-async def _run_full_pipeline_task(script_id: str, file_path_str: str) -> None:
+def _run_ingestion_with_billing(
+    billing_ctx: Optional[BillingContext],
+    script_id: str,
+    file_path: Path,
+) -> None:
+    with use_billing(billing_ctx):
+        ScriptIngestionService().run_ingestion(
+            script_id=script_id,
+            file_path=file_path,
+        )
+
+
+async def _run_full_pipeline_task(
+    script_id: str,
+    file_path_str: str,
+    billing_ctx: Optional[BillingContext] = None,
+) -> None:
     """BackgroundTask 入口：先跑 ingestion（同步、CPU/IO 重，下放线程池），
     ingestion 成功后立即接评分流水线（async / LLM 重）。
 
     任一步失败都只 log，不向上游 BackgroundTasks 抛——失败原因已写入
     scripts.failure_reason / 通过 reports 表为空让前端感知。
     """
-    loop = asyncio.get_running_loop()
-    try:
-        await loop.run_in_executor(
-            None,
-            lambda: ScriptIngestionService().run_ingestion(
-                script_id=script_id,
-                file_path=Path(file_path_str),
-            ),
-        )
-    except Exception:
-        logger.exception("background ingestion failed script_id=%s", script_id)
-        return  # ingestion 失败时 status='failed'，没必要再跑评分
+    billing_scope = use_billing(billing_ctx) if billing_ctx is not None else nullcontext()
+    with billing_scope:
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                functools.partial(
+                    _run_ingestion_with_billing,
+                    billing_ctx,
+                    script_id,
+                    Path(file_path_str),
+                ),
+            )
+        except Exception:
+            logger.exception("background ingestion failed script_id=%s", script_id)
+            return  # ingestion 失败时 status='failed'，没必要再跑评分
 
-    try:
-        await generate_report(script_id=script_id)
-        logger.info("auto reanalyze after ingestion done script_id=%s", script_id)
-    except Exception:
-        logger.exception("auto reanalyze after ingestion failed script_id=%s", script_id)
+        try:
+            await generate_report(script_id=script_id)
+            logger.info("auto reanalyze after ingestion done script_id=%s", script_id)
+        except Exception:
+            logger.exception("auto reanalyze after ingestion failed script_id=%s", script_id)
 
 
 # ============================================================
@@ -655,6 +709,7 @@ def get_script_report(
 def reanalyze_script(
     script_id: str,
     background_tasks: BackgroundTasks,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     try:
@@ -671,16 +726,39 @@ def reanalyze_script(
             "SCRIPT_NOT_READY",
             f"剧本当前 status={s_status}，需先等解析完成（status=ready）才能触发评分",
         )
-    background_tasks.add_task(_run_report_task, script_id)
+    billing_user_id = resolve_billing_user_id(request, current_user)
+    timestamp_warning = validate_ravenweb_timestamp_header(request)
+    if timestamp_warning:
+        logger.warning(
+            "scriptlens service timestamp header warning path=%s reason=%s header=%s script_id=%s user_id=%s",
+            request.url.path,
+            timestamp_warning,
+            RAVENWEB_TIMESTAMP_HEADER,
+            script_id,
+            billing_user_id,
+        )
+    billing_ctx = BillingContext(
+        identity=BillingIdentity(user_id=billing_user_id),
+        metadata=BillingMetadata(
+            script_id=script_id,
+            intent="reanalyze",
+        ),
+    )
+    background_tasks.add_task(_run_report_task, script_id, billing_ctx)
     return {"script_id": script_id, "status": "analyzing"}
 
 
-async def _run_report_task(script_id: str) -> None:
+async def _run_report_task(
+    script_id: str,
+    billing_ctx: Optional[BillingContext] = None,
+) -> None:
     """BackgroundTask 入口：跑评分流水线，全部异常吞入 log（前端通过 GET /report 看不到结果即知失败）。"""
-    try:
-        await generate_report(script_id=script_id)
-    except Exception:
-        logger.exception("background report generation failed script_id=%s", script_id)
+    billing_scope = use_billing(billing_ctx) if billing_ctx is not None else nullcontext()
+    with billing_scope:
+        try:
+            await generate_report(script_id=script_id)
+        except Exception:
+            logger.exception("background report generation failed script_id=%s", script_id)
 
 
 @router.get(
@@ -960,6 +1038,7 @@ def _persist_chat_message(
 async def chat_with_script(
     script_id: str,
     body: ScriptChatRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ):
     try:
@@ -1019,6 +1098,24 @@ async def chat_with_script(
     context_payload["script_id"] = script_id
     context_payload["role"] = body.role
     context_payload["session_id"] = session_id
+    billing_user_id = resolve_billing_user_id(request, current_user)
+    timestamp_warning = validate_ravenweb_timestamp_header(request)
+    if timestamp_warning:
+        logger.warning(
+            "scriptlens service timestamp header warning path=%s reason=%s header=%s script_id=%s user_id=%s",
+            request.url.path,
+            timestamp_warning,
+            RAVENWEB_TIMESTAMP_HEADER,
+            script_id,
+            billing_user_id,
+        )
+    billing_ctx = BillingContext(
+        identity=BillingIdentity(user_id=billing_user_id),
+        metadata=BillingMetadata(
+            script_id=script_id,
+            intent="chat",
+        ),
+    )
     agent = build_chat_agent(script_id=script_id)
     queue: asyncio.Queue = asyncio.Queue()
     sentinel: Tuple[str, Dict[str, Any]] = ("__END__", {})
@@ -1193,7 +1290,8 @@ async def chat_with_script(
                 session_id,
             )
 
-    runner_task = asyncio.create_task(_runner())
+    with use_billing(billing_ctx):
+        runner_task = asyncio.create_task(_runner())
 
     async def _stream() -> AsyncIterator[bytes]:
         events_yielded = 0
@@ -1252,6 +1350,7 @@ async def chat_with_script(
 async def rewrite_scene(
     script_id: str,
     body: RewriteRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
 ) -> RewriteResponse:
     # 校验剧本存在 + 归属
@@ -1270,19 +1369,39 @@ async def rewrite_scene(
             f"剧本当前 status={s_status}，需 ready 后才能 rewrite",
         )
 
+    billing_user_id = resolve_billing_user_id(request, current_user)
+    timestamp_warning = validate_ravenweb_timestamp_header(request)
+    if timestamp_warning:
+        logger.warning(
+            "scriptlens service timestamp header warning path=%s reason=%s header=%s script_id=%s user_id=%s",
+            request.url.path,
+            timestamp_warning,
+            RAVENWEB_TIMESTAMP_HEADER,
+            script_id,
+            billing_user_id,
+        )
+    billing_ctx = BillingContext(
+        identity=BillingIdentity(user_id=billing_user_id),
+        metadata=BillingMetadata(
+            script_id=script_id,
+            intent="rewrite",
+        ),
+    )
+
     # 直接调底层（避开 ReAct 套娃；ProposeRewriteTool.execute 是 async，内部即纯函数）
     from agent_runtime.service.tools.script_tools import ProposeRewriteTool
 
     tool = ProposeRewriteTool()
-    result = await tool.execute(
-        parameters={
-            "script_id": script_id,
-            "scene_id": body.scene_id,
-            "target_dimension": body.target_dimension,
-            "issue": body.issue,
-        },
-        agent_state=None,
-    )
+    with use_billing(billing_ctx):
+        result = await tool.execute(
+            parameters={
+                "script_id": script_id,
+                "scene_id": body.scene_id,
+                "target_dimension": body.target_dimension,
+                "issue": body.issue,
+            },
+            agent_state=None,
+        )
     if not result.success:
         _raise_api_error(
             status.HTTP_400_BAD_REQUEST,

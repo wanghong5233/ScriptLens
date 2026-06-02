@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, SecretStr
 from functools import lru_cache
 from typing import Dict, Literal, Optional
 from pydantic import model_validator
@@ -95,11 +95,37 @@ class Settings(BaseSettings):
         self.ELASTICSEARCH_URL = self.ES_URL
         return self
 
+    @model_validator(mode="after")
+    def validate_billing_settings(self) -> "Settings":
+        mode = str(self.SCRIPTLENS_BILLING_MODE or "").strip().lower()
+        if mode != "gateway":
+            return self
+
+        missing: list[str] = []
+        if not str(self.BILLING_GATEWAY_BASE_URL or "").strip():
+            missing.append("BILLING_GATEWAY_BASE_URL")
+        secret = self.BILLING_SERVICE_SECRET.get_secret_value() if self.BILLING_SERVICE_SECRET else ""
+        if not secret.strip():
+            missing.append("BILLING_SERVICE_SECRET")
+
+        if missing:
+            raise ValueError(
+                "SCRIPTLENS_BILLING_MODE=gateway requires: " + ", ".join(missing)
+            )
+        return self
+
     # DashScope / OpenAI 兼容
     DASHSCOPE_API_KEY: Optional[str] = None
     DASHSCOPE_BASE_URL: Optional[str] = "https://dashscope.aliyuncs.com/compatible-mode/v1"
     OPENAI_API_KEY: Optional[str] = None
     OPENAI_BASE_URL: Optional[str] = "https://api.openai.com/v1"
+    # Billing Gateway（内测集成：优先走公司统一 LiteLLM 网关）
+    BILLING_GATEWAY_BASE_URL: Optional[str] = None
+    BILLING_SERVICE_SECRET: Optional[SecretStr] = None
+    # gateway: 强制走网关（缺 billing context 直接失败）
+    # hybrid: 先尝试网关，缺上下文/配置时回退本地 OPENAI/DASHSCOPE（默认）
+    # local: 只走本地 OPENAI/DASHSCOPE
+    SCRIPTLENS_BILLING_MODE: Literal["gateway", "hybrid", "local"] = "hybrid"
 
     # 模型名称
     # 短剧分析对 reasoning 强度敏感，弱化模型（qwen-turbo / qwen-plus）

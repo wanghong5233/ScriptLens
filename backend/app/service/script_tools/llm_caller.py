@@ -43,6 +43,7 @@ from core.config import settings
 from service.core.llm.runtime import (
     FORBIDDEN_LLM_MODELS as _RUNTIME_FORBIDDEN,
     LLMRuntime,
+    MissingBillingContextError,
 )
 from service.script_tools.llm_cache import LlmCache
 
@@ -445,17 +446,33 @@ class LlmCaller:
         self.default_temperature = default_temperature
         self._runtime = LLMRuntime(settings_obj=settings)
         self._provider_clients: dict[str, AsyncOpenAI] = {}
-        if settings.OPENAI_API_KEY:
-            self._provider_clients["openai"] = AsyncOpenAI(
-                api_key=settings.OPENAI_API_KEY,
-                base_url=settings.OPENAI_BASE_URL,
+
+    def _resolve_provider_client(self, provider: str) -> AsyncOpenAI:
+        provider_key = str(provider or "").strip().lower()
+        llm_config = self._runtime._resolve_llm_config(  # noqa: SLF001
+            None,
+            provider_key,
+            require_billing_context=False,
+        )
+        api_key = str(llm_config.get("api_key") or "").strip()
+        if not api_key:
+            raise ScoreLLMError(
+                f"provider={provider_key} API key not configured "
+                "(OPENAI_API_KEY / DASHSCOPE_API_KEY / BILLING_SERVICE_SECRET)"
             )
-        if settings.DASHSCOPE_API_KEY:
-            # DashScope 也走 OpenAI compatible 协议
-            self._provider_clients["dashscope"] = AsyncOpenAI(
-                api_key=settings.DASHSCOPE_API_KEY,
-                base_url=settings.DASHSCOPE_BASE_URL,
-            )
+        base_url = str(llm_config.get("base_url") or "").strip()
+        key_fingerprint = hashlib.sha256(api_key.encode("utf-8")).hexdigest()[:12]
+        cache_key = f"{provider_key}::{base_url}::{key_fingerprint}"
+        cached = self._provider_clients.get(cache_key)
+        if cached is not None:
+            return cached
+        client = AsyncOpenAI(
+            api_key=api_key,
+            base_url=base_url or None,
+            timeout=settings.LLM_REQUEST_TIMEOUT,
+        )
+        self._provider_clients[cache_key] = client
+        return client
 
     async def call_json(
         self,
@@ -640,11 +657,19 @@ class LlmCaller:
         messages.append({"role": "user", "content": prompt})
         providers = self._runtime.get_provider_candidates()
         if not providers:
-            raise ScoreLLMError("未配置可用 LLM provider（OPENAI_API_KEY / DASHSCOPE_API_KEY）")
+            raise ScoreLLMError(
+                "未配置可用 LLM provider（OPENAI_API_KEY / DASHSCOPE_API_KEY / BILLING_SERVICE_SECRET）"
+            )
         logger.debug(
             "LlmCaller route trace_id=%s providers=%s tier=%s chain=%s",
             trace_id, providers, tier, chain_name,
         )
+        try:
+            request_headers = self._runtime.get_request_headers(
+                require_billing_context=True
+            )
+        except MissingBillingContextError as exc:
+            raise ScoreLLMError(str(exc)) from exc
 
         # W2.4 + W2.6：prompt-hash 既用于日志去重，也用作可选 opt-in cache key
         prompt_hash = _hash_prompt(prompt=prompt, system_message=system_message, tier=tier)
@@ -680,9 +705,10 @@ class LlmCaller:
         errors: list[str] = []
         primary = providers[0]
         for provider in providers:
-            client = self._provider_clients.get(provider)
-            if client is None:
-                errors.append(f"{provider}: API key not configured")
+            try:
+                client = self._resolve_provider_client(provider)
+            except ScoreLLMError as exc:
+                errors.append(f"{provider}: {exc}")
                 continue
 
             try:
@@ -697,6 +723,7 @@ class LlmCaller:
                     trace_id=trace_id,
                     chain_name=chain_name,
                     prompt_hash=prompt_hash,
+                    request_headers=request_headers,
                 )
                 if provider != primary:
                     logger.warning(
@@ -824,6 +851,7 @@ class LlmCaller:
         trace_id: str = "",
         chain_name: str = "unspecified",
         prompt_hash: str = "",
+        request_headers: Optional[dict[str, str]] = None,
     ) -> LLMResponse:
         """同一 provider 内按 candidate 列表逐个 model 尝试。
 
@@ -852,6 +880,7 @@ class LlmCaller:
                     trace_id=trace_id,
                     chain_name=chain_name,
                     prompt_hash=prompt_hash,
+                    request_headers=request_headers,
                 )
                 if len(tried) > 1:
                     logger.warning(
@@ -895,6 +924,7 @@ class LlmCaller:
         trace_id: str = "",
         chain_name: str = "unspecified",
         prompt_hash: str = "",
+        request_headers: Optional[dict[str, str]] = None,
     ) -> LLMResponse:
         """单次 (provider, model) 调用 + reasoning model 自适应翻倍重试。
 
@@ -922,6 +952,7 @@ class LlmCaller:
                     temperature=temperature,
                     content_budget=max_tokens,
                     seed=seed,
+                    extra_headers=request_headers,
                 )
                 break  # 成功
             except (RateLimitError, APITimeoutError, httpx.TimeoutException) as e:
@@ -982,6 +1013,7 @@ class LlmCaller:
                 temperature=temperature,
                 content_budget=doubled,
                 seed=seed,
+                extra_headers=request_headers,
             )
             choice = resp.choices[0] if resp.choices else None
             raw = (getattr(choice.message, "content", "") if choice else "") or ""
@@ -1137,6 +1169,7 @@ class LlmCaller:
         temperature: Optional[float],
         content_budget: int,
         seed: Optional[int],
+        extra_headers: Optional[dict[str, str]] = None,
     ):
         """根据 capability 表直接构造合规参数，调一次 chat.completions。
 
@@ -1169,6 +1202,8 @@ class LlmCaller:
                 params["extra_body"] = {"seed": seed}
             else:
                 params["seed"] = seed
+        if extra_headers:
+            params["extra_headers"] = extra_headers
 
         try:
             return await client.chat.completions.create(**params)
@@ -1195,6 +1230,7 @@ class LlmCaller:
                 origin_param=param,
                 origin_code=code,
                 seed=seed if cap.supports_seed else None,
+                extra_headers=extra_headers,
             )
 
     @staticmethod
@@ -1209,6 +1245,7 @@ class LlmCaller:
         origin_param: str,
         origin_code: str,
         seed: Optional[int],
+        extra_headers: Optional[dict[str, str]] = None,
     ):
         """capability 失配时的协议探测：≤3 次按「最大兼容 → 最小兼容」顺序重试。
 
@@ -1226,6 +1263,9 @@ class LlmCaller:
                 base_with_seed["extra_body"] = {"seed": seed}
             else:
                 base_with_seed["seed"] = seed
+        if extra_headers:
+            base["extra_headers"] = extra_headers
+            base_with_seed["extra_headers"] = extra_headers
         candidates = [
             {**base_with_seed, alt_token_key: effective_budget, "response_format": {"type": "json_object"}},
             {**base_with_seed, alt_token_key: effective_budget},

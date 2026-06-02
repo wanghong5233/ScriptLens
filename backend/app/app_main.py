@@ -1,10 +1,13 @@
+import asyncio
 import logging
 import time
 import uuid
 
+import httpx
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from core.config import settings
 from exceptions.base import APIException
@@ -17,6 +20,8 @@ from router import knowledgebase_rt
 from router import script_rt
 from router import session_rt
 from router import user_rt
+from utils.billing_gateway import resolve_billing_gateway_base_url
+from utils.database import engine as default_engine
 from utils.get_logger import log, request_id_var
 
 DEFAULT_ERROR_STATUS_CODE = status.HTTP_500_INTERNAL_SERVER_ERROR
@@ -54,7 +59,7 @@ for logger_name in ("httpx", "httpcore", "openai", "urllib3"):
 @app.middleware("http")
 async def dispatch(request: Request, call_next):
     request_id = str(uuid.uuid4())
-    is_health_request = request.url.path == "/health"
+    is_health_request = request.url.path.startswith("/health")
     request_id_var.set(request_id)
 
     if not is_health_request:
@@ -129,15 +134,161 @@ app.add_middleware(
 )
 
 
+def _coerce_secret(value) -> str:
+    if value is None:
+        return ""
+    if hasattr(value, "get_secret_value"):
+        try:
+            value = value.get_secret_value()
+        except Exception:
+            return ""
+    return str(value or "").strip()
+
+
+def _billing_mode() -> str:
+    mode = str(getattr(settings, "SCRIPTLENS_BILLING_MODE", "hybrid") or "hybrid").strip().lower()
+    if mode not in {"gateway", "hybrid", "local"}:
+        return "hybrid"
+    return mode
+
+
+def _base_health_payload() -> dict:
+    return {
+        "display_name": settings.SERVICE_DISPLAY_NAME,
+        "service": settings.SERVICE_NAME,
+        "uptime_secs": int(time.time() - service_started_at),
+        "version": settings.SERVICE_VERSION,
+    }
+
+
+async def _probe_db(timeout_seconds: float = 0.2) -> tuple[bool, str | None]:
+    def _run():
+        with default_engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+
+    try:
+        await asyncio.wait_for(asyncio.to_thread(_run), timeout=timeout_seconds)
+        return True, None
+    except Exception as exc:
+        return False, str(exc)
+
+
+async def _probe_billing_gateway(timeout_seconds: float = 0.5) -> tuple[bool, str | None]:
+    base_url = resolve_billing_gateway_base_url(getattr(settings, "BILLING_GATEWAY_BASE_URL", None))
+    if not base_url:
+        return False, "billing_gateway_url_missing"
+
+    headers = {}
+    service_secret = _coerce_secret(getattr(settings, "BILLING_SERVICE_SECRET", None))
+    if service_secret:
+        headers["Authorization"] = f"Bearer {service_secret}"
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_seconds) as client:
+            response = await client.head(base_url, headers=headers or None)
+        # 4xx 在这里也算上游可达（ready 重点是依赖是否存活，而非业务权限）
+        if response.status_code < 500:
+            return True, None
+        return False, f"http_{response.status_code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+async def _build_readiness_payload() -> dict:
+    mode = _billing_mode()
+    db_ok, db_error = await _probe_db()
+
+    gateway_required = mode == "gateway"
+    gateway_enabled = mode in {"gateway", "hybrid"} and bool(
+        getattr(settings, "BILLING_GATEWAY_BASE_URL", None)
+    )
+    gateway_ok = True
+    gateway_error = None
+    if gateway_enabled:
+        gateway_ok, gateway_error = await _probe_billing_gateway()
+    elif gateway_required:
+        gateway_ok = False
+        gateway_error = "billing_gateway_not_configured"
+
+    ready = db_ok and (gateway_ok if gateway_required else True)
+    status_text = "ready" if ready else "not_ready"
+    return {
+        **_base_health_payload(),
+        "billing_mode": mode,
+        "checks": {
+            "billing_gateway": {
+                "enabled": gateway_enabled,
+                "error": gateway_error,
+                "ok": gateway_ok,
+                "required": gateway_required,
+            },
+            "db": {
+                "error": db_error,
+                "ok": db_ok,
+            },
+        },
+        "status": status_text,
+    }
+
+
+@app.get("/health/live")
+async def health_live():
+    return {
+        **_base_health_payload(),
+        "status": "healthy",
+    }
+
+
+@app.get("/health/ready")
+async def health_ready():
+    payload = await _build_readiness_payload()
+    status_code = status.HTTP_200_OK if payload["status"] == "ready" else status.HTTP_503_SERVICE_UNAVAILABLE
+    return JSONResponse(status_code=status_code, content=payload)
+
+
 @app.get("/health")
 async def health_check():
-    return {
-        "status": "healthy",
-        "service": settings.SERVICE_NAME,
-        "display_name": settings.SERVICE_DISPLAY_NAME,
-        "version": settings.SERVICE_VERSION,
-        "uptime_secs": int(time.time() - service_started_at),
-    }
+    # backward-compatible alias for legacy probes
+    return await health_ready()
+
+
+@app.on_event("startup")
+async def cleanup_stale_analysis_runs() -> None:
+    """
+    Mark stale `running` analysis state as failed after process restart.
+
+    analyze/reanalyze tasks are in-process BackgroundTasks; once worker restarts,
+    stale rows cannot resume and should be surfaced as failed.
+    """
+
+    def _run_cleanup() -> int:
+        with default_engine.begin() as conn:
+            result = conn.execute(
+                text(
+                    """
+                    UPDATE scriptlens.scripts
+                    SET
+                        last_analysis_status = 'failed',
+                        failure_reason = 'process_restarted',
+                        updated_at = NOW()
+                    WHERE
+                        last_analysis_status = 'running'
+                        AND updated_at < NOW() - INTERVAL '30 minutes'
+                    """
+                )
+            )
+            return int(result.rowcount or 0)
+
+    try:
+        updated = await asyncio.to_thread(_run_cleanup)
+        if updated > 0:
+            log.warning(
+                "startup stale analysis cleanup marked failed rows=%s reason=process_restarted",
+                updated,
+            )
+    except Exception as exc:
+        # 仅告警，不阻断启动，避免因为清理任务失败导致服务不可用
+        log.error("startup stale analysis cleanup failed", exception=exc)
 
 
 @app.on_event("startup")

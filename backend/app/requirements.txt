@@ -25,6 +25,7 @@ authlib
 bcrypt
 colorlog
 loguru==0.7.3
+python-json-logger
 six
 xxhash
 chardet

@@ -23,11 +23,20 @@ agent_runtime（接入层）、service/script_tools（领域层）、service/cor
 """
 from typing import Awaitable, Callable, Dict, Any, Optional, List, Sequence
 import asyncio
+import hashlib
 import logging
 import os
 import json
 import time
 from openai import AsyncOpenAI, NotFoundError, APIError
+
+from agent_runtime.billing_context import (
+    BillingContext,
+    BillingIdentity,
+    BillingMetadata,
+    get_current_billing,
+)
+from utils.billing_gateway import resolve_billing_gateway_base_url
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +60,10 @@ class LLMRuntimeError(RuntimeError):
 
 class LLMUnavailableError(LLMRuntimeError):
     """所有候选 provider × model 都不可用（boot_check 与 generate_text 共用）。"""
+
+
+class MissingBillingContextError(LLMRuntimeError):
+    """Gateway billing mode requires request-scoped billing context."""
 
 
 class LLMJsonParseError(LLMRuntimeError):
@@ -143,7 +156,11 @@ class LLMRuntime:
                     base_url=self.base_url,
                     timeout=self.settings.LLM_REQUEST_TIMEOUT,
                 )
-                cache_key = self._build_client_cache_key(self.provider, self.base_url)
+                cache_key = self._build_client_cache_key(
+                    self.provider,
+                    self.base_url,
+                    self.api_key,
+                )
                 self._client_cache[cache_key] = self.client
                 logger.info(
                     "LLMRuntime initialized: mode=api, provider=%s, model=%s",
@@ -151,14 +168,157 @@ class LLMRuntime:
                     self.model,
                 )
 
-    def _build_client_cache_key(self, provider: str, base_url: Optional[str]) -> str:
+    def _build_client_cache_key(
+        self,
+        provider: str,
+        base_url: Optional[str],
+        api_key: Optional[str] = None,
+    ) -> str:
         """Build a cache key for provider clients."""
-
-        return f"{provider.lower()}::{str(base_url or '')}"
+        fingerprint = "nokey"
+        if api_key:
+            fingerprint = hashlib.sha256(str(api_key).encode("utf-8")).hexdigest()[:12]
+        return f"{provider.lower()}::{str(base_url or '')}::{fingerprint}"
 
     @staticmethod
     def _normalize_provider_key(provider: str) -> str:
         return str(provider or "").strip().lower()
+
+    @staticmethod
+    def _coerce_secret_value(value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if hasattr(value, "get_secret_value"):
+            try:
+                value = value.get_secret_value()
+            except Exception:
+                return None
+        text = str(value or "").strip()
+        return text or None
+
+    def _billing_mode(self) -> str:
+        mode = str(getattr(self.settings, "SCRIPTLENS_BILLING_MODE", "hybrid") or "hybrid")
+        mode = mode.strip().lower()
+        if mode not in {"gateway", "hybrid", "local"}:
+            return "hybrid"
+        return mode
+
+    def _billing_transport_credentials(self) -> tuple[Optional[str], Optional[str]]:
+        base_url = resolve_billing_gateway_base_url(
+            getattr(self.settings, "BILLING_GATEWAY_BASE_URL", None)
+        )
+        service_secret = self._coerce_secret_value(
+            getattr(self.settings, "BILLING_SERVICE_SECRET", None)
+        )
+        return service_secret, base_url
+
+    def _billing_transport_available(self) -> bool:
+        service_secret, base_url = self._billing_transport_credentials()
+        return bool(service_secret and base_url)
+
+    def _resolve_transport(
+        self,
+        provider: str,
+        *,
+        require_billing_context: bool = False,
+    ) -> tuple[Optional[str], Optional[str]]:
+        normalized = self._normalize_provider_key(provider)
+        if normalized not in {"openai", "dashscope"}:
+            raise ValueError(f"Unsupported LLM provider: {provider}")
+
+        mode = self._billing_mode()
+        if mode == "local":
+            if normalized == "openai":
+                return self.settings.OPENAI_API_KEY, self.settings.OPENAI_BASE_URL
+            return self.settings.DASHSCOPE_API_KEY, self.settings.DASHSCOPE_BASE_URL
+
+        service_secret, base_url = self._billing_transport_credentials()
+        billing_ctx = get_current_billing()
+
+        if mode == "gateway":
+            if not service_secret or not base_url:
+                raise LLMRuntimeError(
+                    "SCRIPTLENS_BILLING_MODE=gateway requires BILLING_GATEWAY_BASE_URL and "
+                    "BILLING_SERVICE_SECRET"
+                )
+            if require_billing_context and billing_ctx is None:
+                raise MissingBillingContextError(
+                    "SCRIPTLENS_BILLING_MODE=gateway requires BillingContext in request scope"
+                )
+            return service_secret, base_url
+
+        # hybrid: billing context + gateway creds 才走网关；否则回退本地 provider key
+        if billing_ctx is not None and service_secret and base_url:
+            return service_secret, base_url
+
+        if normalized == "openai":
+            return self.settings.OPENAI_API_KEY, self.settings.OPENAI_BASE_URL
+        return self.settings.DASHSCOPE_API_KEY, self.settings.DASHSCOPE_BASE_URL
+
+    def _resolve_request_headers(
+        self,
+        *,
+        require_billing_context: bool,
+        fallback_billing_user_id: Optional[str] = None,
+        fallback_intent: Optional[str] = None,
+    ) -> Dict[str, str]:
+        mode = self._billing_mode()
+        if mode == "local":
+            return {}
+        if mode == "hybrid" and not self._billing_transport_available():
+            return {}
+
+        billing = get_current_billing()
+        if billing is None and fallback_billing_user_id:
+            user_id = str(fallback_billing_user_id).strip()
+            if user_id:
+                billing = BillingContext(
+                    identity=BillingIdentity(user_id=user_id),
+                    metadata=BillingMetadata(intent=fallback_intent),
+                )
+
+        if billing is None:
+            if mode == "gateway" and require_billing_context:
+                raise MissingBillingContextError(
+                    "Gateway billing request requires BillingContext (user_id missing)"
+                )
+            return {}
+
+        user_id = str(billing.identity.user_id or "").strip()
+        if not user_id:
+            if mode == "gateway" and require_billing_context:
+                raise MissingBillingContextError(
+                    "Gateway billing request requires non-empty BillingContext.identity.user_id"
+                )
+            return {}
+
+        headers: Dict[str, str] = {
+            "X-User-Id": user_id,
+            "X-LiteLLM-User-Id": f"litellm-{user_id}",
+        }
+        metadata = billing.metadata
+        if metadata.script_id:
+            headers["X-LiteLLM-Metadata-ScriptId"] = str(metadata.script_id)
+        if metadata.intent:
+            headers["X-LiteLLM-Metadata-Intent"] = str(metadata.intent)
+        if metadata.tool_name:
+            headers["X-LiteLLM-Metadata-Tool"] = str(metadata.tool_name)
+        if metadata.trace_id:
+            headers["X-LiteLLM-Metadata-TraceId"] = str(metadata.trace_id)
+        return headers
+
+    def get_request_headers(
+        self,
+        *,
+        require_billing_context: bool = False,
+        fallback_billing_user_id: Optional[str] = None,
+        fallback_intent: Optional[str] = None,
+    ) -> Dict[str, str]:
+        return self._resolve_request_headers(
+            require_billing_context=require_billing_context,
+            fallback_billing_user_id=fallback_billing_user_id,
+            fallback_intent=fallback_intent,
+        )
 
     def _preferred_provider_from_settings(self) -> str:
         """Resolve preferred provider with SM_LLM_TYPE as source of truth."""
@@ -174,22 +334,31 @@ class LLMRuntime:
         # 无可用 key 时保留配置偏好，便于错误信息定位
         return configured or "dashscope"
 
-    def _get_provider_config(self, provider: str) -> Dict[str, Any]:
+    def _get_provider_config(
+        self,
+        provider: str,
+        *,
+        require_billing_context: bool = False,
+    ) -> Dict[str, Any]:
         """Return provider settings for the given provider."""
 
         normalized = provider.lower()
+        api_key, base_url = self._resolve_transport(
+            normalized,
+            require_billing_context=require_billing_context,
+        )
         if normalized == "dashscope":
             return {
                 "provider": "DashScope",
-                "api_key": self.settings.DASHSCOPE_API_KEY,
-                "base_url": self.settings.DASHSCOPE_BASE_URL,
+                "api_key": api_key,
+                "base_url": base_url,
                 "model": self.settings.DASHSCOPE_MODEL_NAME,
             }
         if normalized == "openai":
             return {
                 "provider": "OpenAI",
-                "api_key": self.settings.OPENAI_API_KEY,
-                "base_url": self.settings.OPENAI_BASE_URL,
+                "api_key": api_key,
+                "base_url": base_url,
                 "model": self.settings.OPENAI_MODEL_NAME,
             }
         raise ValueError(f"Unsupported LLM provider: {provider}")
@@ -306,6 +475,8 @@ class LLMRuntime:
         self,
         llm_options: Optional[Dict[str, Any]],
         provider_key: Optional[str] = None,
+        *,
+        require_billing_context: bool = False,
     ) -> Dict[str, Any]:
         """Resolve LLM config based on optional overrides."""
 
@@ -318,7 +489,10 @@ class LLMRuntime:
                 resolved_provider = self._preferred_provider_from_settings()
 
         normalized_provider = self._normalize_provider_key(resolved_provider)
-        config = self._get_provider_config(normalized_provider)
+        config = self._get_provider_config(
+            normalized_provider,
+            require_billing_context=require_billing_context,
+        )
         config["provider_key"] = normalized_provider
         model_override = (llm_options or {}).get("llm_model")
         if (
@@ -339,6 +513,17 @@ class LLMRuntime:
         return config
 
     def _get_available_providers(self) -> List[str]:
+        mode = self._billing_mode()
+        if mode == "gateway":
+            return ["dashscope", "openai"]
+
+        if (
+            mode == "hybrid"
+            and get_current_billing() is not None
+            and self._billing_transport_available()
+        ):
+            return ["dashscope", "openai"]
+
         providers: List[str] = []
         if self.settings.DASHSCOPE_API_KEY:
             providers.append("dashscope")
@@ -507,7 +692,7 @@ class LLMRuntime:
     def _get_client(self, provider: str, api_key: str, base_url: Optional[str]) -> AsyncOpenAI:
         """Get or create a client for a provider."""
 
-        cache_key = self._build_client_cache_key(provider, base_url)
+        cache_key = self._build_client_cache_key(provider, base_url, api_key)
         if self.provider == provider and self.client:
             return self.client
         cached = self._client_cache.get(cache_key)
@@ -574,7 +759,11 @@ class LLMRuntime:
             for provider_key in healthy_candidates:
                 for model_name in self._model_candidates_for_provider(llm_options, provider_key):
                     try:
-                        llm_config = self._resolve_llm_config(llm_options, provider_key)
+                        llm_config = self._resolve_llm_config(
+                            llm_options,
+                            provider_key,
+                            require_billing_context=True,
+                        )
                         llm_config["model"] = model_name
                         if primary_model is None:
                             primary_model = model_name
@@ -664,6 +853,7 @@ class LLMRuntime:
         if not api_key:
             raise ValueError("LLM API key not configured")
         client = self._get_client(provider, api_key, base_url)
+        request_headers = self._resolve_request_headers(require_billing_context=True)
 
         start_time = time.perf_counter()
         try:
@@ -680,6 +870,8 @@ class LLMRuntime:
                 "messages": messages,
                 "stream": should_stream_text,
             }
+            if request_headers:
+                kwargs["extra_headers"] = request_headers
             if self._supports_custom_temperature(str(model)) or float(temperature) == 1.0:
                 kwargs["temperature"] = temperature
             kwargs[token_key] = max_tokens or self.max_tokens
@@ -957,11 +1149,19 @@ class LLMRuntime:
                 results[provider_key] = {"ok": False, "model": None, "error": "no candidates"}
                 continue
             model = candidates[0]
-            llm_config = self._get_provider_config(provider_key)
+            llm_config = self._get_provider_config(
+                provider_key,
+                require_billing_context=False,
+            )
             llm_config["model"] = model
             try:
                 client = self._get_client(
                     llm_config["provider"], llm_config["api_key"], llm_config["base_url"]
+                )
+                probe_headers = self._resolve_request_headers(
+                    require_billing_context=False,
+                    fallback_billing_user_id="scriptlens-boot-check",
+                    fallback_intent="boot_check",
                 )
                 token_key = (
                     "max_completion_tokens"
@@ -973,6 +1173,8 @@ class LLMRuntime:
                     "messages": [{"role": "user", "content": "ping"}],
                     token_key: probe_max_tokens,
                 }
+                if probe_headers:
+                    kwargs["extra_headers"] = probe_headers
                 if self._supports_custom_temperature(model):
                     kwargs["temperature"] = 0.0
                 await client.chat.completions.create(**kwargs)

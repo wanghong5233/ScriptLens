@@ -26,6 +26,7 @@ from typing import Any, Dict, List, Optional
 
 from sqlalchemy import text
 
+from agent_runtime.billing_context import with_metadata_overrides
 from .base_tool import BaseTool, ToolResult
 from ..script_vfs import ScriptVFS, ScriptVFSError
 
@@ -555,12 +556,13 @@ class ProposeRewriteTool(BaseTool):
         )
         caller = LlmCaller()
         try:
-            resp = await caller.call_json(
-                prompt,
-                tier=ModelTier.PRIMARY,
-                temperature=0.4,
-                max_tokens=TokenBudget.REWRITE_EXCERPT,
-            )
+            with with_metadata_overrides(tool_name="propose_rewrite_tool"):
+                resp = await caller.call_json(
+                    prompt,
+                    tier=ModelTier.PRIMARY,
+                    temperature=0.4,
+                    max_tokens=TokenBudget.REWRITE_EXCERPT,
+                )
         except ScoreLLMError as e:
             logger.warning("propose_rewrite_tool LLM failed: %s", e)
             return ToolResult(success=False, error=f"LLM error: {e}", summary="LLM 调用失败")
@@ -1509,14 +1511,15 @@ class ProposeFullScriptPlanTool(BaseTool):
 
         caller = LlmCaller()
         try:
-            plan = await propose_plan(
-                script_id=script_id,
-                dimension_keys=dim_keys or None,
-                improvement_brief=improvement,
-                diagnostic_brief=diagnostic,
-                max_steps=max_steps,
-                caller=caller,
-            )
+            with with_metadata_overrides(tool_name="propose_full_script_plan_tool"):
+                plan = await propose_plan(
+                    script_id=script_id,
+                    dimension_keys=dim_keys or None,
+                    improvement_brief=improvement,
+                    diagnostic_brief=diagnostic,
+                    max_steps=max_steps,
+                    caller=caller,
+                )
         except ValueError as exc:
             logger.warning(
                 "propose_full_script_plan_tool input error script=%s dimensions=%s err=%s",
@@ -1698,13 +1701,14 @@ class RewriteSceneTool(BaseTool):
 
         caller = LlmCaller()
         try:
-            result = await execute_plan_step(
-                script_id=script_id,
-                scene_id=scene_id,
-                target_dimensions=dims,
-                expected_changes=expected_changes,
-                caller=caller,
-            )
+            with with_metadata_overrides(tool_name="rewrite_scene_tool"):
+                result = await execute_plan_step(
+                    script_id=script_id,
+                    scene_id=scene_id,
+                    target_dimensions=dims,
+                    expected_changes=expected_changes,
+                    caller=caller,
+                )
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc), summary="改写参数错误")
         except ScoreLLMError as exc:
@@ -1996,14 +2000,15 @@ class ParallelRewriteScenesTool(BaseTool):
 
         async def _one(slot: Dict[str, Any]):
             async with sem:
-                return await execute_plan_step(
-                    script_id=script_id,
-                    scene_id=slot["scene_id"],
-                    target_dimensions=slot["target_dimensions"],
-                    expected_changes=slot["expected_changes"]
-                    or "按目标维度修复弱项并提升可读性。",
-                    caller=caller,
-                )
+                with with_metadata_overrides(tool_name="parallel_rewrite_scenes_tool"):
+                    return await execute_plan_step(
+                        script_id=script_id,
+                        scene_id=slot["scene_id"],
+                        target_dimensions=slot["target_dimensions"],
+                        expected_changes=slot["expected_changes"]
+                        or "按目标维度修复弱项并提升可读性。",
+                        caller=caller,
+                    )
 
         logger.info(
             "parallel_rewrite_scenes_tool dispatching script=%s scenes=%d concurrency=%d",
